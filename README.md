@@ -4,11 +4,11 @@ A local Windows terminal workspace with readable agent conversations, real termi
 
 ## Start
 
-Double-click **Lumen-0.1.7.exe** in the release folder. Choose **Open a workspace** and select your repository, or **Start without a workspace**. No installation is required.
+Double-click **Lumen-0.1.8.exe** in the release folder. Choose **Open a workspace** and select your repository, or **Start without a workspace**. No installation is required.
 
 Open a new session with the **+** beside the tabs. Choose Terminal, Pi, Codex, Claude Code, or Grok. Each tab has its own process and working folder. Double-click a tab to rename it or pick its color.
 
-The project list in the left sidebar has no fixed project limit. Add repositories with its **+**, click a project to return to its chats, and use its options to pin, rename, or reorder it. You can also drag the grips to reorder projects. Search appears when the list grows. Each project shows its own chat tabs; switching keeps other projects' processes, conversations, and unsaved editors open. Projects and their organization restore on restart.
+The project list in the left sidebar has no fixed project limit. Add repositories with its **+**, click a project to return to its chats, and use its options to pin, rename, reorder, or **Remove project**. Removal hides the project from the sidebar across restarts. Files and chats stay available, and running sessions continue. Reopen the folder with **+** or **Ctrl O** to bring back its chats and saved name/pin. You can also drag the grips to reorder projects. Search appears when the list grows. Each project shows its own chat tabs; switching keeps other projects' processes, conversations, and unsaved editors open. Projects and their organization restore on restart.
 
 On Windows, run `scripts/install-context-menu.ps1` after packaging to install a stable copy under `%LOCALAPPDATA%\Programs\Lumen` and add **Open with Lumen** for files, folders, folder backgrounds, and drives. It uses only your user registry and requires no administrator permissions. Windows 11 may show it under **Show more options**. Folders open a native terminal at that exact location, including subfolders within repositories. Files open a terminal in their parent folder and also open supported text in the editor. A running Lumen receives new tabs without interrupting existing work. Run `scripts/remove-context-menu.ps1` to remove just those entries. You can also launch `Lumen.exe --open "C:\path\to\folder-or-file"`.
 

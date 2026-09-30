@@ -1,6 +1,6 @@
 {
   "name": "lumen-workspace",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A readable terminal workspace for your code and AI agents",
   "author": "Lumen",
   "main": "electron/main.cjs",

@@ -79,9 +79,10 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>(restoreProjects);
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
-  const rememberProject = (folder: string, name?: string) => {
+  const isHiddenProject = (folder: string) => projectsRef.current.some((p) => p.hidden && sameProject(p.root, folder));
+  const rememberProject = (folder: string, name?: string, show = false) => {
     if (!folder) return;
-    setProjects((old) => old.some((p) => sameProject(p.root, folder)) ? old : [...old, { root: folder, name: name || folder.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || folder }]);
+    setProjects((old) => old.some((p) => sameProject(p.root, folder)) ? show ? old.map((p) => sameProject(p.root, folder) ? { ...p, hidden: false } : p) : old : [...old, { root: folder, name: name || folder.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || folder }]);
   };
   const [workspaces, setWorkspaces] = useState<Record<string, Workspace>>({});
   const [selectedRoot, setSelectedRoot] = useState("");
@@ -248,8 +249,10 @@ export default function App() {
         workMode: resume?.workMode || "",
       };
       setTabs((old) => [...old, tab]);
-      setActiveId(tab.id);
-      setSelectedRoot(folder);
+      if (!resume || created.projectless || !isHiddenProject(created.root)) {
+        setActiveId(tab.id);
+        setSelectedRoot(folder);
+      }
       if (!created.projectless) rememberProject(created.root);
       setAgentMenu(false);
       return tab;
@@ -266,7 +269,7 @@ export default function App() {
       if (!next) return;
       setWorkspaces((old) => ({ ...old, [next.root]: next }));
       setSelectedRoot(next.root);
-      rememberProject(next.root, next.name);
+      rememberProject(next.root, next.name, true);
       setDialog(null);
       const existing = tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root));
       if (existing) setActiveId(existing.id);
@@ -279,6 +282,18 @@ export default function App() {
     } catch (e: any) {
       notify(e.message);
     }
+  };
+  const removeProject = (project: Project) => {
+    const remaining = projectsRef.current.filter((p) => !p.hidden && !sameProject(p.root, project.root));
+    setProjects((old) => old.map((p) => sameProject(p.root, project.root) ? { ...p, hidden: true } : p));
+    if (sameProject(rootRef.current, project.root)) {
+      const next = remaining.find((p) => p.pinned) || remaining[0];
+      const existing = next ? tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root)) : tabsRef.current.find((t) => t.projectless);
+      setActiveId(existing?.id || "");
+      setSelectedRoot(existing && !existing.projectless ? existing.root : "");
+      if (!existing && next) void openWorkspace(next.root);
+    }
+    notify(`${project.name} removed from the sidebar. Chats stay available and running sessions continue. Open the folder again to return.`);
   };
   useEffect(() => {
     let alive = true;
@@ -321,10 +336,10 @@ export default function App() {
         for (const tab of restoring) {
           if (tab.agent && tab.mode === "rich" && (tab.projectless || (tab.root && opened[tab.root]))) {
             const restored = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, tab, tab.cwd);
-            if (tab.id === savedActive && restored) restoredActive = restored.id;
+            if (tab.id === savedActive && restored && (tab.projectless || !isHiddenProject(restored.root))) restoredActive = restored.id;
           }
         }
-        if (last && opened[last]) {
+        if (last && opened[last] && !isHiddenProject(last)) {
           setSelectedRoot(last);
           if (!persisted.some((t) => t.root === last))
             await addTab("shell", "rich", last);
@@ -356,6 +371,7 @@ export default function App() {
             try {
               const opened = await api<{ workspace: Workspace; cwd: string; file: string }>("launch:resolve", target);
               const next = opened.workspace;
+              rememberProject(next.root, next.name, true);
               setWorkspaces((old) => ({ ...old, [next.root]: next }));
               const tab = await addTab("shell", "native", next.root, undefined, opened.cwd);
               if (!tab) continue;
@@ -898,9 +914,10 @@ export default function App() {
         {sidebar && (
           <>
             <aside className="sidebar" style={{ width: sidebarWidth }}>
-              <ProjectSidebar projects={projects} activeRoot={root} ready={loaded}
+              <ProjectSidebar projects={projects.filter((p) => !p.hidden)} activeRoot={root} ready={loaded}
                 counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root)).length]))}
-                onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")} onChange={setProjects} />
+                onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")}
+                onChange={(next) => setProjects((old) => [...next, ...old.filter((p) => p.hidden)])} onRemove={removeProject} />
               <button
                 className="workspace-switch"
                 onClick={() => setDialog("open")}
