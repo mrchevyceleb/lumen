@@ -1,0 +1,39 @@
+/* Keep terminal rendering separate from the conversation's typography. */
+.xterm .xterm-screen {
+  font-variant-ligatures: none;
+}
+.terminal-host {
+  width: 100%;
+  height: 100%;
+}
+.native-terminal {
+  position: relative;
+}
+.terminal-find {
+  position: absolute;
+  right: 6px;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  padding: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: 0 5px 25px #0004;
+}
+.terminal-find input {
+  font-size: 11px;
+  padding: 6px 9px;
+  width: 200px;
+}
+.terminal-find button {
+  padding: 4px;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 6px;
+}
