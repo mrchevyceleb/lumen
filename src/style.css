@@ -255,6 +255,56 @@ p {
   left: 94%;
   animation-delay: -8s;
 }
+.atmosphere-stars,
+.atmosphere-nebula {
+  background: radial-gradient(ellipse at 65% 30%, #14213c, #070c1d 75%);
+}
+.atmosphere-stars i:nth-child(-n + 3),
+.atmosphere-nebula i:nth-child(4) {
+  --star-tile: 600px;
+  display: block;
+  inset: calc(-1 * var(--star-tile));
+  border-radius: 0;
+  background: url("/space-stars.svg") repeat;
+  background-size: var(--star-tile) var(--star-tile);
+  opacity: .8;
+  animation: star-drift 160s linear -38s infinite;
+}
+.atmosphere-stars i:nth-child(2) {
+  --star-tile: 840px;
+  background-position: 197px 93px;
+  opacity: .55;
+  animation-duration: 220s;
+  animation-delay: -127s;
+}
+.atmosphere-stars i:nth-child(3) {
+  --star-tile: 430px;
+  background-position: 61px 247px;
+  opacity: .35;
+  animation-duration: 200s;
+  animation-delay: -71s;
+}
+.atmosphere-nebula i:nth-child(-n + 3) {
+  display: block;
+  inset: -20%;
+  border-radius: 0;
+  background: url("/space-nebula.svg") center / cover no-repeat;
+  animation: nebula-drift 48s ease-in-out -18s infinite alternate;
+}
+.atmosphere-nebula i:nth-child(2) {
+  opacity: .55;
+  filter: hue-rotate(24deg);
+  animation-duration: 64s;
+  animation-delay: -39s;
+  animation-direction: alternate-reverse;
+}
+.atmosphere-nebula i:nth-child(3) {
+  opacity: .35;
+  filter: hue-rotate(-26deg);
+  animation-duration: 80s;
+  animation-delay: -57s;
+}
+.atmosphere-nebula i:nth-child(4) { opacity: .85; }
 .motion-off *,
 .motion-off *::before,
 .motion-off *::after {
@@ -2681,6 +2731,14 @@ kbd {
   border-width: 1px;
   opacity: 0.6;
 }
+.background-swatch.atmosphere-stars i:nth-child(-n + 3),
+.background-swatch.atmosphere-nebula i:nth-child(4) {
+  --star-tile: 170px;
+  animation-duration: 55s;
+}
+.background-swatch.atmosphere-stars i:nth-child(2) { --star-tile: 230px; }
+.background-swatch.atmosphere-stars i:nth-child(3) { --star-tile: 130px; }
+.background-swatch.atmosphere-nebula i:nth-child(-n + 3) { animation-duration: 24s; }
 .swatch-grid {
   background:
     linear-gradient(var(--border) 1px, transparent 1px),
@@ -2838,6 +2896,13 @@ kbd {
 }
 .shortcut-list kbd {
   font-size: 9px;
+}
+@keyframes star-drift {
+  to { transform: translate(calc(-1 * var(--star-tile)), calc(-1 * var(--star-tile))); }
+}
+@keyframes nebula-drift {
+  from { transform: translate(-4%, 5%) rotate(-8deg) scale(.92); }
+  to { transform: translate(6%, -4%) rotate(7deg) scale(1.12); }
 }
 @keyframes aurora-flow {
   from { transform: translate(-14%, -10%) rotate(-18deg) scale(0.95); }

@@ -19,12 +19,14 @@ const backgrounds = [
   ["aurora", "Aurora", "A slow wash of light"],
   ["orbits", "Orbital", "Drifting luminous circles"],
   ["rain", "Rain", "Gentle falling light"],
+  ["stars", "Star field", "A slow drift through deep space"],
+  ["nebula", "Nebula", "Violet clouds and distant stars"],
   ["grid", "Blueprint", "A fine architectural grid"],
   ["contour", "Contour", "Quiet topographic lines"],
   ["grain", "Grain", "A little analog texture"],
   ["image", "Your image", "Make it your space"],
 ];
-const animatedBackgrounds = new Set(["aurora", "orbits", "rain"]);
+const animatedBackgrounds = new Set(["aurora", "orbits", "rain", "stars", "nebula"]);
 export default function SettingsPanel({
   settings: s,
   update,
@@ -208,7 +210,7 @@ export default function SettingsPanel({
               />
               <Toggle
                 title="Animate backgrounds"
-                detail="Aurora, Orbital, and Rain animate. Motion also follows your system’s reduced-motion setting."
+                detail="Aurora, Orbital, Rain, Star field, and Nebula animate. Motion also follows your system’s reduced-motion setting."
                 value={s.motion}
                 onChange={(v) => set("motion", v)}
               />

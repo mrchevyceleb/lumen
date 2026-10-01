@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800">
+  <defs>
+    <radialGradient id="violet"><stop stop-color="#c6a5ff" stop-opacity=".9"/><stop offset=".3" stop-color="#9561e8" stop-opacity=".8"/><stop offset=".7" stop-color="#48235e" stop-opacity=".5"/><stop offset="1" stop-color="#331a48" stop-opacity="0"/></radialGradient>
+    <radialGradient id="rose"><stop stop-color="#f5b4da" stop-opacity=".8"/><stop offset=".35" stop-color="#b94895" stop-opacity=".65"/><stop offset="1" stop-color="#731957" stop-opacity="0"/></radialGradient>
+    <radialGradient id="blue"><stop stop-color="#abdefa" stop-opacity=".9"/><stop offset=".4" stop-color="#3978ba" stop-opacity=".65"/><stop offset="1" stop-color="#223f84" stop-opacity="0"/></radialGradient>
+    <filter id="gas" x="-30%" y="-40%" width="160%" height="180%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency=".009 .017" numOctaves="3" seed="17" result="turbulence"/>
+      <feDisplacementMap in="SourceGraphic" in2="turbulence" scale="145" xChannelSelector="R" yChannelSelector="B"/>
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+  </defs>
+  <g filter="url(#gas)">
+    <ellipse cx="660" cy="380" rx="460" ry="190" fill="url(#violet)" transform="rotate(-28 660 380)"/>
+    <ellipse cx="810" cy="255" rx="320" ry="105" fill="url(#rose)" transform="rotate(-31 810 255)"/>
+    <ellipse cx="370" cy="565" rx="300" ry="130" fill="url(#blue)" transform="rotate(-22 370 565)"/>
+    <ellipse cx="540" cy="423" rx="220" ry="45" fill="url(#rose)" transform="rotate(-36 540 423)"/>
+  </g>
+</svg>
