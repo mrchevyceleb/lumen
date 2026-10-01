@@ -344,9 +344,9 @@ export default function SettingsPanel({
               ))}
               <p className="settings-note">
                 New settings apply to new tabs. Rich mode uses CLI event
-                streams; native mode opens the full CLI. Tool permissions follow
-                the CLI settings and arguments. Use native mode for login and
-                interactive approval flows.
+                streams; native mode opens the full CLI. Agents launch with full
+                local tool access. Plan mode is an explicit choice; agent questions
+                appear here. Use native mode for login and terminal interfaces.
               </p>
             </>
           )}

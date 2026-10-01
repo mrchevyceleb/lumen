@@ -3142,3 +3142,9 @@ kbd {
 .plan-choices strong { font-size: 14px; font-weight: 550; }
 .plan-choices p { font-size: 12px; line-height: 1.6; color: var(--muted); margin: 5px 0 0; }
 @media (max-height: 700px) { .model-options { max-height: 35vh; } }
+.agent-question { border: 0; padding: 0; margin: 0 0 24px; min-width: 0; }
+.agent-question legend { margin-bottom: 12px; line-height: 1.5; }
+.agent-question-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; cursor: pointer; }
+.agent-question-option input { width: auto; flex-shrink: 0; margin-top: 3px; accent-color: var(--accent); }
+.agent-question-option small { display: block; color: var(--muted); line-height: 1.5; margin-top: 4px; }
+.agent-request-detail { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; line-height: 1.5; }

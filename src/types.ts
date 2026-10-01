@@ -173,6 +173,7 @@ export interface PiRequest {
   prefill?: string;
   text?: string;
   timeout?: number;
+  questions?: { id: string; question: string; header?: string; multiSelect?: boolean; isSecret?: boolean; options?: { label: string; description?: string }[] }[];
 }
 export interface UpdateStatus {
   phase: "idle" | "portable" | "checking" | "current" | "downloading" | "downloaded" | "error";

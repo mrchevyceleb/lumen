@@ -35,7 +35,7 @@ function launchOptions(s) {
   return Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]);
 }
 function codexConfig(s) {
-  const config = {};
+  const config = { "shell_environment_policy.inherit": "all", "shell_environment_policy.ignore_default_excludes": true };
   if (s.autoCompactTokens) {
     config.model_auto_compact_token_limit = s.autoCompactTokens;
     config.model_auto_compact_token_limit_scope = "total";
@@ -153,6 +153,7 @@ async function recoverGrokMcp(s) {
 class Runtime {
   constructor(owner, s) {
     this.owner = owner; this.s = s; this.pending = new Map(); this.closed = false;
+    this.uiRequests = new Map();
     this.hadPrompt = !!s.sessionRef;
   }
   write(message) {
@@ -174,6 +175,8 @@ class Runtime {
     this.closed = true;
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(message)); }
     this.pending.clear();
+    for (const id of this.uiRequests.keys()) this.owner.event(this.s, { type: "agent_ui_cancel", request: { id } });
+    this.uiRequests.clear();
     this.compactionDone?.reject(new Error(message)); this.compactionDone = null;
     if (this.s.runtime === this) this.s.runtime = null;
   }
@@ -191,14 +194,41 @@ class Runtime {
       error ? pending.reject(new Error(typeof error === "string" ? error : error.message || "CLI control failed.")) : pending.resolve(result || {});
       return;
     }
-    // Preserve readable view's existing permission behavior. No approvals are granted
-    // automatically; interactive permission workflows remain available in native view.
+    // Lumen runs with the user's explicitly requested full local access. Questions
+    // still need a real answer; tool approvals must never be silently denied here.
     if ((claude && e.type === "control_request") || (!claude && e.method && e.id !== undefined)) {
-      if (claude) this.write({ type: "control_response", response: { subtype: "success", request_id: e.request_id,
-        response: { behavior: "deny", message: "Open native view to approve this action interactively." } } });
-      else if (s.agent === "grok" && e.method === "session/request_permission") this.write({ jsonrpc: "2.0", id: e.id, result: { outcome: { outcome: "cancelled" } } });
-      else this.write({ jsonrpc: "2.0", id: e.id, error: { code: -32601, message: "This request needs native CLI view." } });
-      o.event(s, { type: "diagnostic", key: "native-permission", text: "This action needs an interactive CLI permission. Open native view to handle it." });
+      if (claude && e.request?.subtype === "can_use_tool") {
+        const reply = (response) => this.write({ type: "control_response", response: { subtype: "success", request_id: e.request_id, response } });
+        if (e.request.tool_name === "AskUserQuestion") this.ask({ title: "Claude Code needs your input", questions: e.request.input?.questions?.map((q) => ({ ...q, id: q.question })) || [] },
+          (answer) => reply(answer.cancelled ? { behavior: "deny", message: "The user cancelled this question." } : { behavior: "allow", updatedInput: { ...e.request.input, answers: answer.answers } }));
+        else if (s.workMode === "plan" || e.request.tool_name === "ExitPlanMode") this.ask({ method: "confirm", title: "Claude Code · plan mode", message: `Allow ${e.request.tool_name}?\n${JSON.stringify(e.request.input || {}, null, 2)}` },
+          (answer) => {
+            reply(answer.confirmed ? { behavior: "allow", updatedInput: e.request.input || {} } : { behavior: "deny", message: "The user declined this action." });
+            if (answer.confirmed && e.request.tool_name === "ExitPlanMode") { s.workMode = "default"; o.event(s, { type: "config", workMode: s.workMode }); }
+          });
+        else reply({ behavior: "allow", updatedInput: e.request.input || {} });
+      } else if (s.agent === "grok" && ["_x.ai/ask_user_question", "x.ai/ask_user_question"].includes(e.method)) {
+        this.ask({ title: "Grok needs your input", questions: (e.params?.questions || []).map((q) => ({ ...q, id: q.question, multiSelect: q.multiSelect ?? q.multi_select })) },
+          (answer) => this.write({ jsonrpc: "2.0", id: e.id, result: answer.cancelled ? { outcome: "cancelled" } : { outcome: "accepted", answers: answer.selections || answer.answers,
+            annotations: Object.fromEntries(Object.entries(answer.notes || {}).filter(([, text]) => text).map(([key, notes]) => [key, { notes }])) } }));
+      } else if (s.agent === "grok" && ["_x.ai/exit_plan_mode", "x.ai/exit_plan_mode"].includes(e.method)) {
+        this.ask({ method: "confirm", title: "Approve Grok's plan?", message: e.params?.planContent || "Approve this plan and start implementation?" },
+          (answer) => {
+            this.write({ jsonrpc: "2.0", id: e.id, result: { outcome: answer.confirmed ? "approved" : "cancelled" } });
+            if (answer.confirmed) { s.workMode = "default"; o.event(s, { type: "config", workMode: s.workMode }); }
+          });
+      } else if (s.agent === "grok" && e.method === "session/request_permission") {
+        const allowed = e.params?.options?.find((option) => option.kind === "allow_once") || e.params?.options?.find((option) => option.kind === "allow_always");
+        const reply = (accept) => this.write({ jsonrpc: "2.0", id: e.id, result: { outcome: accept && allowed ? { outcome: "selected", optionId: allowed.optionId } : { outcome: "cancelled" } } });
+        if (s.workMode === "plan") this.ask({ method: "confirm", title: "Grok · plan mode", message: e.params?.toolCall?.title || "Allow this tool action?" }, (answer) => reply(answer.confirmed));
+        else reply(true);
+      } else if (s.agent === "codex" && e.method === "item/tool/requestUserInput") {
+        this.ask({ title: "Codex needs your input", questions: e.params?.questions || [] }, (answer) => this.write({ jsonrpc: "2.0", id: e.id,
+          result: { answers: Object.fromEntries((e.params?.questions || []).map((q) => [q.id, { answers: answer.cancelled ? [] : answer.answerLists?.[q.id] || [answer.answers?.[q.id] || ""] }])) } }));
+      } else if (s.agent === "codex" && ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "execCommandApproval", "applyPatchApproval"].includes(e.method)) {
+        this.write({ jsonrpc: "2.0", id: e.id, result: { decision: e.method.includes("/") ? "accept" : "approved" } });
+      } else if (claude) this.write({ type: "control_response", response: { subtype: "error", request_id: e.request_id, error: "This CLI control is not supported in readable view." } });
+      else this.write({ jsonrpc: "2.0", id: e.id, error: { code: -32601, message: "This CLI control needs native view." } });
       return;
     }
     if (claude) {
@@ -220,20 +250,26 @@ class Runtime {
     let args, env;
     if (s.agent === "claude") {
       env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s) };
-      args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", ...cliOptions(s), ...launchOptions(s)];
+      args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
       if (s.sessionRef) args.push("--resume", s.sessionRef);
     } else if (s.agent === "codex") args = ["app-server", "--stdio"];
     else {
       env = { GROK_HOME: await grokHome(o, s) };
       const watermark = (await jsonFile(path.join(s.grokHome, "lumen-context.json"))).lastCompactedUsage;
       this.lastCompactedUsage = Number.isFinite(watermark) && watermark >= 0 ? watermark : null;
-      args = ["agent", "--no-leader", ...cliOptions({ ...s, workMode: "" }), "stdio"];
+      args = [...cliOptions({ ...s, workMode: "" }), "agent", "--no-leader", "stdio"];
     }
     this.child = o.child(s, args, env);
     o.jsonStream(s, this.child, (e) => this.receive(e));
     this.child.once("close", () => this.close());
     this.child.once("error", (error) => this.close(error.message));
-    if (s.agent === "claude") this.metadata = await this.request("initialize");
+    if (s.agent === "claude") {
+      this.metadata = await this.request("initialize");
+      if (s.workMode === "plan") {
+        await this.request("set_permission_mode", { mode: "plan" });
+        this.metadata.current_permission_mode = "plan";
+      }
+    }
     else if (s.agent === "codex") {
       await this.request("initialize", { clientInfo: { name: "lumen", version: "0.1.11" } });
       this.write({ method: "initialized" });
@@ -242,7 +278,7 @@ class Runtime {
       s.codexLocalServers = this.localServers;
       const servers = { ...loaded };
       for (const [name, enabled] of Object.entries(s.mcpOverrides)) if (servers[name]) servers[name] = { ...servers[name], enabled };
-      const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "workspace-write", config: { ...codexConfig(s), ...(Object.keys(s.mcpOverrides).length ? { mcp_servers: servers } : {}) }, ...(s.model ? { model: s.model } : {}) };
+      const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", config: { ...codexConfig(s), ...(Object.keys(s.mcpOverrides).length ? { mcp_servers: servers } : {}) }, ...(s.model ? { model: s.model } : {}) };
       const result = await this.request(s.sessionRef ? "thread/resume" : "thread/start", { ...params, ...(s.sessionRef ? { threadId: s.sessionRef, excludeTurns: true } : {}) });
       s.sessionRef = result.thread.id;
       if (this.hadPrompt) o.event(s, { type: "session", sessionRef: s.sessionRef });
@@ -254,7 +290,7 @@ class Runtime {
       s.sessionRef = this.metadata.sessionId || s.sessionRef;
       if (!sessionId(s.sessionRef)) throw new Error("Grok did not return a valid session ID.");
       o.event(s, { type: "session", sessionRef: s.sessionRef });
-      if (s.workMode) await this.request("session/set_mode", { sessionId: s.sessionRef, modeId: s.workMode });
+      await this.request("session/set_mode", { sessionId: s.sessionRef, modeId: s.workMode === "plan" ? "plan" : "default" });
     }
     if (["claude", "grok"].includes(s.agent)) await this.applyOverrides();
     return this;
@@ -285,6 +321,17 @@ class Runtime {
     return raw.map((r) => ({ name: r.name, status: r.session?.authRequired ? "needs-auth" : r.session?.status || (r.session?.enabled === false ? "disabled" : "unknown"),
       enabled: s.mcpOverrides[r.name] ?? r.session?.enabled !== false, tools: r.session?.tools?.filter((t) => t.enabled !== false).length ?? null,
       source: r.sourceLabel || r.source || "Grok", canToggle: r.type !== "managedGateway" && r.session?.enabled !== false && !!r.session?.tools?.length }));
+  }
+  ask(request, reply) {
+    const id = uuid();
+    this.uiRequests.set(id, reply);
+    this.owner.event(this.s, { type: "agent_ui", request: { method: "questions", ...request, id } });
+  }
+  reply(response) {
+    const reply = this.uiRequests.get(response.id);
+    if (!reply) throw new Error("This CLI question is no longer pending.");
+    reply(response);
+    this.uiRequests.delete(response.id);
   }
   async toggle(name, enabled) {
     const s = this.s;

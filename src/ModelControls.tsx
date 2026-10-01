@@ -139,7 +139,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
       </> : <div className="plan-choices">
         {["claude", "grok"].includes(tab.agent) ? <>
           <button disabled={locked} onClick={() => void apply({ workMode: "plan" })}><ListChecks size={20} /><div><strong>Plan mode</strong><p>Use {agentNames[tab.agent]}'s native plan permission mode for your next turns.</p></div>{workMode === "plan" && <Check size={16} />}</button>
-          <button disabled={locked} onClick={() => void apply({ workMode: "default" })}><Check size={20} /><div><strong>Default mode</strong><p>Return to the CLI's normal permission prompts.</p></div>{workMode === "default" && <Check size={16} />}</button>
+          <button disabled={locked} onClick={() => void apply({ workMode: "default" })}><Check size={20} /><div><strong>Full access</strong><p>Run tools and commands with your normal local account access.</p></div>{workMode !== "plan" && <Check size={16} />}</button>
         </> : tab.agent === "pi" ?
           <button disabled={locked} onClick={() => { setPanel(null); onPlanDraft(); }}><ListChecks size={20} /><div><strong>Plan with Pi</strong><p>Put /plan in your draft. Uses your installed planning command when you send it.</p></div></button> :
           <button disabled={locked} onClick={() => { setPanel(null); onNative("/plan"); }}><ListChecks size={20} /><div><strong>Plan in native Codex</strong><p>Open the same conversation in native view with /plan ready to copy.</p></div></button>}

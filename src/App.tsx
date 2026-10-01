@@ -113,10 +113,11 @@ export default function App() {
     text: string;
     action: () => void;
   } | null>(null);
-  const [piRequest, setPiRequest] = useState<{
+  const [uiRequests, setUiRequests] = useState<{
     session: string;
     request: PiRequest;
-  } | null>(null);
+  }[]>([]);
+  const piRequest = uiRequests[0];
   const [diff, setDiff] = useState<{
     path: string;
     text: string;
@@ -539,10 +540,15 @@ export default function App() {
       );
     };
     const unsub = window.lumen.onSession((e) => {
-      if (e.type === "pi_ui" && e.request) {
+      if (e.type === "done" || e.type === "exit") setUiRequests((old) => old.filter((value) => value.session !== e.id));
+      if (e.type === "agent_ui_cancel" && e.request) {
+        setUiRequests((old) => old.filter((value) => value.session !== e.id || value.request.id !== e.request!.id));
+        return;
+      }
+      if (["pi_ui", "agent_ui"].includes(e.type) && e.request) {
         const request = e.request;
-        if (["select", "confirm", "input", "editor"].includes(request.method))
-          setPiRequest({ session: e.id, request });
+        if (["select", "confirm", "input", "editor", "questions"].includes(request.method))
+          setUiRequests((old) => [...old, { session: e.id, request }]);
         else if (request.method === "notify")
           notify(request.message || "Pi notification");
         return;
@@ -1498,14 +1504,16 @@ export default function App() {
       )}
       {piRequest && (
         <PiDialog
+          key={`${piRequest.session}:${piRequest.request.id}`}
           value={piRequest.request}
+          sessionName={(() => { const tab = tabs.find((value) => value.id === piRequest.session); return tab ? `${tab.name} · ${tab.root || "No workspace"}` : "Agent session"; })()}
           onReply={async (response) => {
             try {
               await api("session:pi-response", piRequest.session, {
                 id: piRequest.request.id,
                 ...response,
               });
-              setPiRequest(null);
+              setUiRequests((old) => old.filter((value) => value.session !== piRequest.session || value.request.id !== piRequest.request.id));
             } catch (e: any) {
               notify(e.message);
             }
@@ -2257,25 +2265,57 @@ function TabDialog({
 }
 function PiDialog({
   value: v,
+  sessionName,
   onReply,
 }: {
   value: PiRequest;
+  sessionName?: string;
   onReply: (value: any) => void;
 }) {
   const [text, setText] = useState(v.prefill || "");
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const send = async (response: any) => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    setSending(true);
+    try { await onReply(response); } finally { sendingRef.current = false; setSending(false); }
+  };
+  const answerLists = Object.fromEntries((v.questions || []).map((q) => {
+    const typed = custom[q.id]?.trim();
+    return [q.id, typed && !q.multiSelect ? [typed] : [...(answers[q.id] || []), ...(typed ? [typed] : [])]];
+  }));
   return (
     <Modal
       title={v.title || "Pi needs your input"}
-      subtitle={v.message}
-      onClose={() => onReply({ cancelled: true })}
+      subtitle={sessionName}
+      onClose={() => void send({ cancelled: true })}
     >
       <div className="dialog-form">
-        {v.method === "select" ? (
+        {v.message && <pre className="agent-request-detail">{v.message}</pre>}
+        {v.questions ? <>
+          {v.questions.map((q) => <fieldset className="agent-question" key={q.id}>
+            <legend>{q.header ? `${q.header} · ` : ""}{q.question}</legend>
+            {q.options?.map((option) => <label className="agent-question-option" key={option.label}>
+              <input type={q.multiSelect ? "checkbox" : "radio"} name={q.id} checked={!!answers[q.id]?.includes(option.label)} disabled={sending}
+                onChange={() => setAnswers((old) => ({ ...old, [q.id]: q.multiSelect ? old[q.id]?.includes(option.label) ? old[q.id].filter((label) => label !== option.label) : [...(old[q.id] || []), option.label] : [option.label] }))} />
+              <span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+            </label>)}
+            <input type={q.isSecret ? "password" : "text"} aria-label={q.question} placeholder={q.options?.length ? "Or write your answer" : "Your answer"}
+              disabled={sending} value={custom[q.id] || ""} onChange={(e) => setCustom((old) => ({ ...old, [q.id]: e.target.value }))} />
+          </fieldset>)}
+          <div className="dialog-actions"><button className="primary" disabled={sending || v.questions.some((q) => !custom[q.id]?.trim() && !answers[q.id]?.length)}
+            onClick={() => void send({ answers: Object.fromEntries(Object.entries(answerLists).map(([id, choices]) => [id, choices.join(", ")])), answerLists,
+              selections: Object.fromEntries(v.questions!.map((q) => [q.id, custom[q.id]?.trim() ? [...(q.multiSelect ? answers[q.id] || [] : []), "Other"] : answers[q.id] || []])), notes: custom })}>Send answers</button></div>
+        </> : v.method === "select" ? (
           v.options?.map((option) => (
             <button
               className="secondary"
               key={option}
-              onClick={() => onReply({ value: option })}
+              disabled={sending}
+              onClick={() => void send({ value: option })}
             >
               {option}
             </button>
@@ -2284,13 +2324,15 @@ function PiDialog({
           <div className="dialog-actions">
             <button
               className="secondary"
-              onClick={() => onReply({ confirmed: false })}
+              disabled={sending}
+              onClick={() => void send({ confirmed: false })}
             >
               No
             </button>
             <button
               className="primary"
-              onClick={() => onReply({ confirmed: true })}
+              disabled={sending}
+              onClick={() => void send({ confirmed: true })}
             >
               Yes
             </button>
@@ -2307,7 +2349,8 @@ function PiDialog({
             <div className="dialog-actions">
               <button
                 className="primary"
-                onClick={() => onReply({ value: text })}
+                disabled={sending}
+                onClick={() => void send({ value: text })}
               >
                 Send response
               </button>

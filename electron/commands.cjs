@@ -9,7 +9,7 @@ async function discoverCommands(s, launcher, kill) {
     pi: ["--mode", "rpc", "--no-session", ...model],
     claude: ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...model],
     codex: ["app-server", "--stdio"],
-    grok: ["agent", "--no-leader", ...model, "stdio"],
+    grok: [...model, "agent", "--no-leader", "stdio"],
   }[s.agent];
   if (!args) return { commands: [], origin: "Shell" };
   const child = spawn(launcher.file, [...launcher.args, ...args, ...extraOptions(s)], {

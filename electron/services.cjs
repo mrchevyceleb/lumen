@@ -1352,6 +1352,7 @@ class Sessions {
   }
   piResponse(id, response) {
     const s = this.get(id);
+    if (s.agent !== "pi" && s.runtime) return s.runtime.reply(response);
     if (s.agent !== "pi" || !s.process)
       throw new Error("Pi session has ended.");
     s.process.stdin.write(
