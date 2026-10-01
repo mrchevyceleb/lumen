@@ -19,6 +19,7 @@ const channels = new Set([
   "session:create",
   "session:start",
   "session:send",
+  "session:submit", "session:queue-action",
   "session:stop",
   "session:close",
   "session:write",

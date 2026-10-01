@@ -127,6 +127,8 @@ app.whenReady().then(async () => {
   handle("session:create", (options) => { const created = sessions.create(options); accounts.notify({ type: "changed" }); return created; });
   handle("session:start", (id) => sessions.startNative(id));
   handle("session:send", (id, message) => sessions.send(id, message));
+  handle("session:submit", (id, message) => sessions.submit(id, message));
+  handle("session:queue-action", (id, messageId, action) => sessions.queueAction(id, messageId, action));
   handle("session:stop", (id) => sessions.stop(id));
   handle("session:close", async (id) => { await sessions.close(id); accounts.notify({ type: "changed" }); });
   handle("session:write", (id, data) => sessions.write(id, data));

@@ -10,6 +10,7 @@ const { discoverCommands, normalize } = require("./commands.cjs");
 const { catalog, efforts, piShortcuts, cliOptions, extraOptions } = require("./models.cjs");
 const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp } = require("./session-controls.cjs");
 const { accountEnvironment } = require("./accounts.cjs");
+const { MessageQueue } = require("./message-queue.cjs");
 const OMIT = new Set([
   ".git",
   "node_modules",
@@ -458,6 +459,7 @@ class Sessions {
     autoCompactTokens = null,
     mcpOverrides = {},
     accountId,
+    queuedMessages = [],
   }) {
     if (
       !["shell", "pi", "codex", "claude", "grok"].includes(agent) ||
@@ -532,8 +534,9 @@ class Sessions {
       busy: false,
       output: "",
     };
+    s.messageQueue = new MessageQueue(this, s, queuedMessages);
     this.sessions.set(id, s);
-    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls, accountId: s.accountId, accountName: s.accountName };
+    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls, accountId: s.accountId, accountName: s.accountName, ...s.messageQueue.state() };
   }
   async sessionControls(id) {
     const s = this.get(id);
@@ -543,7 +546,7 @@ class Sessions {
     try { return await this.readControls(s); } finally { s.setting = false; }
   }
   async readControls(s) {
-    let servers, contextTokens = null, warning = "";
+    let servers, contextTokens = null, contextWindow = null, warning = "";
     if (s.agent === "pi") {
       await this.ensurePiPolicy(s);
       const info = await this.piMcp(s);
@@ -551,13 +554,16 @@ class Sessions {
       warning = info.warning;
       const stats = await this.piRpc(s, "get_session_stats");
       contextTokens = stats.contextUsage?.tokens ?? null;
+      contextWindow = stats.contextUsage?.contextWindow ?? null;
     } else {
       const runtime = await ensureRuntime(this, s);
       servers = await runtime.servers(); contextTokens = await runtime.contextUsage();
+      contextWindow = runtime.contextWindow ?? null;
       if (s.agent === "grok") warning = "Grok controls tool access for connected MCPs; transports stay cached. Auto-compact runs between prompts at your token threshold. Grok's native compaction also protects long running turns.";
       if (s.agent === "codex") warning = "Codex reconnects this thread to apply MCP changes. Disabling a plugin MCP disables that plugin for this chat's future turns.";
     }
-    return { servers, contextTokens, autoCompactTokens: s.autoCompactTokens, mcpOverrides: s.mcpOverrides, warning,
+    this.event(s, { type: "context", contextTokens, contextWindow });
+    return { servers, contextTokens, contextWindow, autoCompactTokens: s.autoCompactTokens, mcpOverrides: s.mcpOverrides, warning,
       minimumTokens: s.agent === "claude" ? 100000 : 1000, maximumTokens: s.agent === "claude" ? 1000000 : 2000000 };
   }
   async changeControls(id, change) {
@@ -758,6 +764,7 @@ class Sessions {
   }
   async configure(id, change) {
     const s = this.get(id);
+    const previousModel = s.model;
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") throw new Error("Finish this turn before changing its controls.");
     const info = await this.models(id);
     if (s.busy || s.stopping || s.transitioning || s.setting || !this.sessions.has(id)) throw new Error("This chat is busy or closing.");
@@ -800,11 +807,17 @@ class Sessions {
           currentEfforts: efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) };
       } else s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode };
       if (s.agent !== "pi" && s.runtime) await this.resetRuntime(s);
+      if (s.model !== previousModel) this.event(s, { type: "context", contextTokens: null, contextWindow: null });
       this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       return { model: s.model, effort: s.effort, workMode: s.workMode, catalog: s.catalog };
     } finally { s.setting = false; }
   }
   event(s, event) {
+    if (event.type === "context") {
+      s.contextTokens = Number.isFinite(event.contextTokens) && event.contextTokens >= 0 ? event.contextTokens : null;
+      if (Object.hasOwn(event, "contextWindow")) s.contextWindow = Number.isFinite(event.contextWindow) && event.contextWindow > 0 ? event.contextWindow : null;
+      event = { ...event, contextTokens: s.contextTokens, contextWindow: s.contextWindow ?? null };
+    }
     this.emit({ id: s.id, ...event });
   }
   async startNative(id) {
@@ -895,7 +908,7 @@ class Sessions {
   terminalBuffer(id) {
     return this.get(id).output;
   }
-  async send(id, prompt) {
+  async send(id, prompt, queuedMessage) {
     const s = this.get(id);
     if (s.stopping || s.transitioning || s.setting || s.catalogPromise)
       throw new Error(
@@ -907,6 +920,7 @@ class Sessions {
       throw new Error("Enter a message under 200,000 characters.");
     if (s.mode === "native")
       throw new Error("Type directly into the terminal.");
+    if (queuedMessage) this.event(s, { type: "user-message", messageId: queuedMessage.id, text: prompt, delivery: "send" });
     s.busy = true;
     s.phase = undefined;
     s.activeTools = new Set();
@@ -920,8 +934,10 @@ class Sessions {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
       else await this.agentTurn(s, prompt);
     } catch (error) {
+      if (queuedMessage) this.event(s, { type: "user-message-retracted", messageId: queuedMessage.id });
       this.event(s, { type: "error", message: error.message });
       this.finish(s, 1);
+      if (queuedMessage) throw error;
     }
   }
   finish(s, code = 0) {
@@ -931,6 +947,15 @@ class Sessions {
     s.busy = false;
     s.phase = undefined;
     this.event(s, { type: "done", code, sessionRef: s.sessionRef });
+    s.messageQueue?.finish(code);
+  }
+  submit(id, message) { return this.get(id).messageQueue.submit(message); }
+  queueAction(id, messageId, action) { return this.get(id).messageQueue.action(messageId, action); }
+  async steer(s, message) {
+    if (!s.busy || s.mode !== "rich" || s.stopping || s.transitioning || s.setting || s.phase === "compacting") throw new Error("This turn cannot accept steering right now.");
+    if (message.text.trimStart().startsWith("/") || (s.agent === "codex" && message.text.trimStart().startsWith("$"))) throw new Error("Steer with a normal message. Run CLI commands after this turn finishes.");
+    if (s.agent === "pi") { if (!s.process) throw new Error("Pi is still starting."); await this.piRpc(s, "steer", { message: message.text }); }
+    else { if (!s.runtime || s.runtime.closed) throw new Error("The CLI is still starting or closing."); await s.runtime.steer(message); }
   }
   grokPhase(s, phase) {
     if (s.agent !== "grok" || !s.busy || s.stopping || s.phase === phase) return;
@@ -1248,7 +1273,7 @@ class Sessions {
     }
     if (e.type === "extension_ui_request" && e.method === "notify" && e.message?.startsWith("LUMEN_CONTEXT:")) {
       try {
-        const usage = JSON.parse(e.message.slice("LUMEN_CONTEXT:".length)); this.event(s, { type: "context", contextTokens: usage.contextTokens });
+        const usage = JSON.parse(e.message.slice("LUMEN_CONTEXT:".length)); this.event(s, { type: "context", contextTokens: usage.contextTokens, contextWindow: usage.contextWindow });
         if (usage.compacting !== undefined) {
           s.piCompacting = usage.compacting;
           this.event(s, { type: "phase", phase: usage.compacting ? "compacting" : undefined });
@@ -1378,6 +1403,7 @@ class Sessions {
     if (mode === "native" && s.agent === "pi" && Object.keys(s.mcpOverrides).length)
       throw new Error("Use CLI MCP defaults in this chat's controls before opening native view. Pi cannot carry Lumen's runtime MCP switches into its native terminal.");
     s.transitioning = true;
+    s.messageQueue?.pause();
     try {
       await this.cancelDiscovery(s);
       if (s.runtime && !s.runtime.hadPrompt && ["codex", "claude"].includes(s.agent)) s.sessionRef = "";
@@ -1426,6 +1452,7 @@ class Sessions {
     if (s.stopping) return;
     clearTimeout(s.progressTimer);
     s.stopping = true;
+    s.messageQueue?.pause();
     try {
       await this.cancelDiscovery(s);
       s.runtime?.close("Turn stopped.");
@@ -1479,6 +1506,7 @@ class Sessions {
     if (!s) return;
     clearTimeout(s.progressTimer);
     s.stopping = true;
+    s.messageQueue?.close();
     await this.cancelDiscovery(s);
     s.runtime?.close("Chat closed.");
     s.pty?.kill();

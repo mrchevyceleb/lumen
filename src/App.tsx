@@ -57,6 +57,7 @@ import NativeTerminal from "./NativeTerminal";
 import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./ProjectSidebar";
 import { useUpdates } from "./UpdatesPanel";
 import { AccountPicker, useAccounts } from "./AccountsPanel";
+import ContextIndicator from "./ContextIndicator";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -92,6 +93,15 @@ export default function App() {
   const [selectedRoot, setSelectedRoot] = useState("");
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState("");
+  const contextBar = useRef<HTMLDivElement>(null);
+  const [nativeTop, setNativeTop] = useState(88);
+  useEffect(() => {
+    const element = contextBar.current;
+    if (!element) return;
+    const measure = () => setNativeTop(element.offsetTop + element.offsetHeight);
+    const observer = new ResizeObserver(measure); observer.observe(element); measure();
+    return () => observer.disconnect();
+  }, [activeId]);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const tabsRef = useRef(tabs);
@@ -245,6 +255,7 @@ export default function App() {
         autoCompactTokens: resume?.autoCompactTokens ?? null,
         mcpOverrides: resume?.mcpOverrides || {},
         accountId: resume ? resume.accountId || "" : accountId,
+        queuedMessages: resume?.queuedMessages || [],
       };
       let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string };
       try { created = await api("session:create", request); }
@@ -275,6 +286,11 @@ export default function App() {
         controlId: created.controlId,
         autoCompactTokens: resume?.autoCompactTokens ?? null,
         mcpOverrides: resume?.mcpOverrides || {},
+        contextTokens: resume?.contextTokens ?? null,
+        contextWindow: resume?.contextWindow ?? null,
+        contextStale: resume?.contextTokens != null,
+        queuedMessages: resume?.queuedMessages?.map((m) => ({ ...m, state: "queued" })) || [],
+        queuePaused: !!resume?.queuedMessages?.length,
       };
       setTabs((old) => [...old, tab]);
       if (!resume || created.projectless || !isHiddenProject(created.root)) {
@@ -453,6 +469,7 @@ export default function App() {
                 mode: result.mode,
                 sessionRef: result.sessionRef,
                 exited: false,
+                contextStale: true,
               }
             : t,
         ),
@@ -465,7 +482,7 @@ export default function App() {
     if (!active) return;
     try {
       const result = await api("session:mode", active.id, "native");
-      setTabs((old) => old.map((t) => t.id === active.id ? { ...t, mode: result.mode, sessionRef: result.sessionRef, exited: false, nativeDraft: draft } : t));
+      setTabs((old) => old.map((t) => t.id === active.id ? { ...t, mode: result.mode, sessionRef: result.sessionRef, exited: false, contextStale: true, nativeDraft: draft } : t));
     } catch (e: any) { notify(e.message); }
   };
   const refreshGit = async (folder = root) => {
@@ -519,7 +536,10 @@ export default function App() {
             else if (e.type === "session") t.sessionRef = e.sessionRef;
             else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
-            else if (e.type === "context") t.contextTokens = e.contextTokens;
+            else if (e.type === "context") { t.contextTokens = e.contextTokens; t.contextWindow = e.contextWindow; t.contextStale = false; }
+            else if (e.type === "queue") { t.queuedMessages = e.queuedMessages; t.queuePaused = e.queuePaused; }
+            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, role: "user", text: e.text || "", delivery: e.delivery });
+            else if (e.type === "user-message-retracted") t.messages = t.messages.filter((m) => m.id !== e.messageId);
             else if (e.type === "cwd") { t.cwd = e.cwd; t.cwdVersion = (t.cwdVersion || 0) + 1; }
             else if (e.type === "exit") t.exited = true;
             else if (["text", "tool", "error", "diagnostic"].includes(e.type)) {
@@ -587,6 +607,13 @@ export default function App() {
     const message = attachment
       ? `${text}\n\nFile reference: ${attachment}`
       : text;
+    if (active.agent !== "shell") {
+      try {
+        await api("session:submit", active.id, { id: messageId, text: message });
+        if (activeIdRef.current === active.id) setAttachment((current) => current === attachment ? "" : current);
+        return true;
+      } catch (e: any) { notify(e.message); return false; }
+    }
     setTabs((old) =>
       old.map((t) =>
         t.id === active.id
@@ -1212,7 +1239,7 @@ export default function App() {
           </div>
           {active ? (
             <>
-              <div className="contextbar">
+              <div className="contextbar" ref={contextBar}>
                 <div>
                   <span
                     className="live-dot"
@@ -1232,6 +1259,7 @@ export default function App() {
                   </button>}
                 </div>
                 <div>
+                  {active.agent !== "shell" && <ContextIndicator tab={active} />}
                   {["claude", "codex"].includes(active.agent) && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
                     if (id !== (active.accountId || "")) void addTab(active.agent, active.mode, active.projectless ? "" : active.root, undefined, active.cwd, id, active.projectless ? active.scratchId : undefined);
                   }} onManage={() => { setSettingsSection("accounts"); setDialog("settings"); }} />}
@@ -1358,7 +1386,7 @@ export default function App() {
                   active?.mode === "native" && !(editorExpanded && activeDoc)
                     ? "block"
                     : "none",
-                top: 88,
+                top: nativeTop,
                 width: activeDoc ? `${split}%` : "100%",
               }}
             >

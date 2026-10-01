@@ -162,18 +162,21 @@ class Runtime {
     this.uiRequests = new Map();
     this.hadPrompt = !!s.sessionRef;
   }
-  write(message) {
+  write(message, onWritten) {
     if (this.closed || this.child !== this.s.process) throw new Error("The CLI session closed. Try again.");
-    this.child.stdin.write(JSON.stringify(message) + "\n");
+    this.child.stdin.write(JSON.stringify(message) + "\n", onWritten);
   }
-  request(method, params = {}, timeout = 45000) {
+  request(method, params = {}, timeout = 45000, onWritten) {
     const id = uuid();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`The CLI did not finish ${method}. Try again or use native view.`)); }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       try {
         this.write(this.s.agent === "claude" ? { type: "control_request", request_id: id, request: { subtype: method, ...params } } :
-          { jsonrpc: "2.0", id, method, params });
+          { jsonrpc: "2.0", id, method, params }, (error) => {
+            if (error && this.pending.has(id)) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+            onWritten?.(error);
+          });
       } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
@@ -240,10 +243,14 @@ class Runtime {
     if (claude) {
       o.messagesEvent(s, !this.hadPrompt && e.session_id ? { ...e, session_id: undefined } : e);
       const messageUsage = e.type === "assistant" ? e.message?.usage : e.event?.type === "message_start" ? e.event.message?.usage : null;
-      if (messageUsage) this.context = claudeContext(messageUsage);
+      if (messageUsage) { this.claudeUsage = { ...messageUsage }; this.contextModel = e.message?.model || e.event?.message?.model; this.context = claudeContext(this.claudeUsage); this.reportContext(); }
+      if (e.event?.type === "message_delta" && e.event.usage && this.claudeUsage) { Object.assign(this.claudeUsage, e.event.usage); this.context = claudeContext(this.claudeUsage); this.reportContext(); }
       if (e.type === "system" && e.subtype === "compact_boundary") this.phase(false);
       if (e.type === "system" && e.subtype === "status") this.phase(e.status === "compacting");
-      if (e.type === "result") { o.event(s, { type: "context", contextTokens: this.context ?? null }); o.finish(s, e.is_error ? 1 : 0); }
+      if (e.type === "result") {
+        const usage = e.modelUsage?.[this.contextModel] || (Object.keys(e.modelUsage || {}).length === 1 ? Object.values(e.modelUsage)[0] : null);
+        this.contextWindow = usage?.contextWindow ?? this.contextWindow; this.reportContext(); o.finish(s, e.is_error ? 1 : 0);
+      }
     } else if (s.agent === "codex") this.codexEvent(e);
     else this.grokEvent(e);
   }
@@ -386,40 +393,75 @@ class Runtime {
     for (const [name, enabled] of Object.entries(this.s.mcpOverrides)) await this.toggle(name, enabled);
   }
   async contextUsage() {
-    if (this.s.agent === "grok") { const info = await this.request("_x.ai/session/info", { sessionId: this.s.sessionRef }); return (info.context || info.data?.context)?.used ?? null; }
+    if (this.s.agent === "grok") {
+      const info = await this.request("_x.ai/session/info", { sessionId: this.s.sessionRef }, 5000), context = info.context || info.data?.context;
+      this.context = context?.used ?? null; this.contextWindow = context?.total ?? context?.limit ?? null; this.reportContext();
+    }
     return this.context ?? null;
+  }
+  reportContext() { this.owner.event(this.s, { type: "context", contextTokens: this.context ?? null, contextWindow: this.contextWindow ?? null }); }
+  async userInput(text, id) {
+    await new Promise((resolve, reject) => this.write({ type: "user", ...(id ? { uuid: id } : {}), session_id: this.s.sessionRef || "", parent_tool_use_id: null,
+      message: { role: "user", content: text } }, (error) => error ? reject(error) : resolve()));
+  }
+  async steer(message) {
+    if (this.closed || !this.s.busy) throw new Error("This turn has finished.");
+    if (this.s.agent === "codex") {
+      if (!this.activeTurnId) throw new Error("Codex is still starting its turn.");
+      await this.request("turn/steer", { threadId: this.s.sessionRef, expectedTurnId: this.activeTurnId, input: [{ type: "text", text: message.text }] });
+    } else if (this.s.agent === "grok") {
+      if (!this.grokPromptActive) throw new Error("Grok has not started its turn or is finishing it.");
+      const result = await this.request("_x.ai/interject", { sessionId: this.s.sessionRef, text: message.text, interjectionId: message.id });
+      if (result.status !== "queued") throw new Error("Grok did not acknowledge the interjection.");
+    } else {
+      // Native streaming input is consumed by Claude at its next loop boundary.
+      // Keep the current process/tools alive; never emulate steering by killing it.
+      const turn = this.s.turn;
+      await this.userInput(message.text, message.id);
+      if (this.closed || !this.s.busy || this.s.turn !== turn || this.s.stopping)
+        throw new Error("Claude finished before steering was confirmed. The correction may have reached the CLI; review it before retrying.");
+    }
   }
   async prompt(text) {
     const { s, owner: o } = this;
     this.hadPrompt = true;
     if (s.agent === "codex") o.event(s, { type: "session", sessionRef: s.sessionRef });
-    if (s.agent === "claude") this.write({ type: "user", session_id: s.sessionRef || "", parent_tool_use_id: null, message: { role: "user", content: text } });
+    if (s.agent === "claude") await this.userInput(text);
     else if (s.agent === "codex") {
       await this.servers();
       const disabledPluginIds = [...new Set(this.rawServers.filter((r) => r.pluginId && s.mcpOverrides[r.name] === false).map((r) => r.pluginId))];
-      await this.request("turn/start", { threadId: s.sessionRef, input: [{ type: "text", text }], disabledPluginIds, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}) });
+      const result = await this.request("turn/start", { threadId: s.sessionRef, input: [{ type: "text", text }], disabledPluginIds, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}) });
+      if (s.busy && result.turn?.status === "inProgress") this.activeTurnId = result.turn.id;
     }
     else {
-      void this.grokPrompt(text).catch((error) => {
-        if (this.closed || s.stopping || s.process !== this.child) return;
-        o.event(s, { type: "error", message: error.message }); o.finish(s, 1);
+      await new Promise((resolve, reject) => {
+        let dispatched = false;
+        void this.grokPrompt(text, () => { dispatched = true; resolve(); }).catch((error) => {
+          if (!dispatched) { reject(error); return; }
+          if (this.closed || s.stopping || s.process !== this.child) return;
+          o.event(s, { type: "error", message: error.message }); o.finish(s, 1);
+        });
       });
     }
   }
-  async grokPrompt(text) {
+  async grokPrompt(text, onDispatch) {
     const { s, owner: o } = this;
+    const turn = s.turn;
     this.messageId = uuid();
     await this.grokCompact();
-    const result = await this.request("session/prompt", { sessionId: s.sessionRef, prompt: [{ type: "text", text }] }, 24 * 60 * 60 * 1000);
+    if (this.closed || !s.busy || s.turn !== turn || s.stopping) throw new Error("Grok stopped before this message was sent.");
+    let result;
+    this.grokPromptActive = true;
+    try { result = await this.request("session/prompt", { sessionId: s.sessionRef, prompt: [{ type: "text", text }] }, 24 * 60 * 60 * 1000, (error) => { if (!error) onDispatch(); }); }
+    finally { this.grokPromptActive = false; }
     if (result.stopReason !== "cancelled") await this.grokCompact();
     if (result.stopReason && !["end_turn", "cancelled"].includes(result.stopReason)) o.event(s, { type: "diagnostic", text: `Grok finished: ${result.stopReason}.` });
     o.finish(s, result.stopReason === "cancelled" ? 130 : 0);
   }
   async grokCompact() {
     const { s, owner: o } = this;
+    const used = await this.contextUsage().catch(() => null);
     if (!s.autoCompactTokens) return;
-    const used = await this.contextUsage();
-    o.event(s, { type: "context", contextTokens: used });
     if (used !== null && used < s.autoCompactTokens && this.lastCompactedUsage !== null) {
       this.lastCompactedUsage = null;
       await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: null }));
@@ -436,6 +478,7 @@ class Runtime {
   codexEvent(e) {
     const { owner: o, s } = this, p = e.params || {};
     if (p.threadId && p.threadId !== s.sessionRef) return;
+    if (e.method === "turn/started") this.activeTurnId = p.turn?.id;
     if (e.method === "item/agentMessage/delta") o.text(s, p.delta, p.itemId || "answer");
     if (["item/started", "item/completed"].includes(e.method)) {
       const item = p.item;
@@ -444,9 +487,11 @@ class Runtime {
         item.aggregatedOutput || item.text || JSON.stringify(item), e.method === "item/completed" ? "done" : "running");
       if (item?.type === "contextCompaction") this.phase(e.method === "item/started");
     }
-    if (e.method === "thread/tokenUsage/updated") this.context = p.tokenUsage?.last?.totalTokens ?? null;
+    if (e.method === "thread/tokenUsage/updated") { this.context = p.tokenUsage?.last?.totalTokens ?? null; this.contextWindow = p.tokenUsage?.modelContextWindow ?? null; this.reportContext(); }
     if (e.method === "error") o.event(s, { type: "error", message: p.error?.message || "Codex turn failed." });
     if (e.method === "turn/completed") {
+      if (p.turn?.id && this.activeTurnId && p.turn.id !== this.activeTurnId) return;
+      this.activeTurnId = null;
       if (p.turn?.error) o.event(s, { type: "error", message: p.turn.error.message });
       o.finish(s, p.turn?.status === "failed" ? 1 : p.turn?.status === "interrupted" ? 130 : 0);
     }
@@ -463,7 +508,7 @@ class Runtime {
         o.tool(s, u.toolCallId, u.title || "Tool result", u.content?.map((c) => c.content?.text || c.text || "").join("\n") || JSON.stringify(u.rawInput || u.rawOutput || {}), u.status || "running");
       }
     }
-    if (e.method?.includes("context") && p.used !== undefined) this.context = p.used;
+    if (e.method?.includes("context") && p.used !== undefined) { this.context = p.used; this.contextWindow = p.total ?? p.limit ?? this.contextWindow; this.reportContext(); }
   }
 }
 function claudeContext(usage) {

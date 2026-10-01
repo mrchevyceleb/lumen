@@ -23,6 +23,7 @@ import CommandMenu from "./CommandMenu";
 import ModelControls, { type ControlPanel } from "./ModelControls";
 import SessionControls, { lumenCommands, parseThreshold } from "./SessionControls";
 import type { SessionControlsState } from "./types";
+import QueuedMessages from "./QueuedMessages";
 import { agentNames } from "./settings";
 export function AgentMark({
   agent,
@@ -84,6 +85,7 @@ export default function Conversation({
   const [sessionPanel, setSessionPanel] = useState<"mcp" | "context" | null>(null);
   const [sessionError, setSessionError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submitLock = useRef(false);
   const scroll = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [inventory, setInventory] = useState<CommandInventory>({ commands: [], origin: "" });
@@ -154,9 +156,17 @@ export default function Conversation({
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
   const isLocalCommand = tab.agent !== "shell" && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
   const submit = async () => {
-    if (!input.trim() || tab.busy || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)) return;
+    if (!input.trim() || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && commandLoading)) return;
+    submitLock.current = true;
+    try {
     const hostCommand = input.trim();
     setSessionError("");
+    if (tab.busy) {
+      if (isCommandInput) { setSessionError("Queue a normal message while the agent works. Run CLI commands after this turn finishes."); return; }
+      setSubmitting(true);
+      if (await onSend(input)) { setInput(""); setCaret(0); stick.current = true; }
+      return;
+    }
     if (isLocalCommand) {
       const [name, ...args] = hostCommand.split(/\s+/);
       if (!args.length) {
@@ -166,7 +176,7 @@ export default function Conversation({
       try {
         if (args.length !== 1 || (name === "/mcp" && args[0] !== "reset")) throw new Error(name === "/mcp" ? "Use /mcp or /mcp reset." : "Use /autocompact 160k or /autocompact auto.");
         const next = await api<SessionControlsState>("session:controls-change", tab.id, name === "/mcp" ? { resetMcps: true } : { autoCompactTokens: parseThreshold(args[0]) });
-        onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, draft: "" });
+        onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow, draft: "" });
         setDismissedCommands(true); setSessionPanel(name === "/mcp" ? "mcp" : "context");
       } catch (e: any) { setSessionError(e.message); }
       finally { setSubmitting(false); }
@@ -193,6 +203,7 @@ export default function Conversation({
     setDismissedCommands(false);
     stick.current = true;
     } finally { setSubmitting(false); }
+    } finally { submitLock.current = false; setSubmitting(false); }
   };
   const color = settings.coloredAgents
     ? settings.agents[tab.agent].color
@@ -323,6 +334,7 @@ export default function Conversation({
         </button>
       )}
       <div className="composer-wrap">
+        {tab.agent !== "shell" && <QueuedMessages tab={tab} onConfig={onConfig} />}
         {tab.agent === "shell" && tab.cwd && tab.cwd !== tab.root && (
           <button
             className="cwd-banner"
@@ -364,7 +376,7 @@ export default function Conversation({
                 : "Ask, build, or explore… / for commands"
             }
             value={input}
-            disabled={tab.busy || submitting}
+            disabled={(tab.busy && tab.agent === "shell") || submitting}
             onChange={(e) => { setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => setFocused(true)}
@@ -415,7 +427,7 @@ export default function Conversation({
               <span className="input-hint">
                 {settings.enterSend ? "↵ send · ⇧↵ new line" : "Ctrl ↵ send"}
               </span>
-              {tab.busy ? (
+              {tab.busy && (
                 <button
                   className="send-button stop-button"
                   aria-label="Stop running turn"
@@ -423,10 +435,11 @@ export default function Conversation({
                 >
                   <Square size={13} fill="currentColor" />
                 </button>
-              ) : (
+              )}
+              {(!tab.busy || tab.agent !== "shell") && (
                 <button
                   className="send-button"
-                  aria-label="Send message"
+                  aria-label={tab.busy ? "Queue message" : "Send message"}
                   disabled={!input.trim() || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)}
                   onClick={submit}
                 >
@@ -474,7 +487,7 @@ function MessageView({
   if (m.role === "user")
     return (
       <div className="user-message">
-        <div>{m.text}</div>
+        <div>{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}{m.text}</div>
         <CopyButton text={m.text} />
       </div>
     );

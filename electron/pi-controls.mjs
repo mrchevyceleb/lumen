@@ -7,10 +7,13 @@ export default function lumenControls(pi) {
   try { const stored = JSON.parse(fs.readFileSync(process.env.LUMEN_COMPACT_STATE_FILE, "utf8")); if (Number.isFinite(stored.lastCompactedUsage) && stored.lastCompactedUsage >= 0) lastCompactedUsage = stored.lastCompactedUsage; } catch {}
   const saveWatermark = () => { try { if (process.env.LUMEN_COMPACT_STATE_FILE) fs.writeFileSync(process.env.LUMEN_COMPACT_STATE_FILE, JSON.stringify({ lastCompactedUsage }), { mode: 0o600 }); } catch { /* Context protection continues even if its restart watermark cannot be saved. */ } };
   const contextEvent = (ctx, data) => {
+    data = { contextWindow: ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? null, ...data };
     if (process.env.LUMEN_RPC_CONTROLS === "1") ctx.ui.notify("LUMEN_CONTEXT:" + JSON.stringify(data), "info");
     else if (data.compacting === true) ctx.ui.notify("Compacting context…", "info");
     else if (data.compacting === false) ctx.ui.notify(data.error ? "Auto-compact: " + data.error : "Context compacted", data.error ? "warning" : "info");
   };
+  for (const event of ["session_start", "model_select", "message_end", "session_compact"])
+    pi.on(event, (_event, ctx) => contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null }));
   pi.on("agent_settled", (_event, ctx) => {
     const usage = ctx.getContextUsage();
     const tokens = usage?.tokens ?? null;

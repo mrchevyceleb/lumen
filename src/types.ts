@@ -63,7 +63,9 @@ export interface Message {
   state?: string;
   turn?: string;
   time?: number;
+  delivery?: "steer" | "send";
 }
+export interface QueuedMessage { id: string; text: string; state: "queued" | "sending" | "steering" }
 export interface Tab {
   id: string;
   root: string;
@@ -95,12 +97,16 @@ export interface Tab {
   autoCompactTokens?: number | null;
   mcpOverrides?: Record<string, boolean>;
   contextTokens?: number | null;
+  contextWindow?: number | null;
+  contextStale?: boolean;
+  queuedMessages?: QueuedMessage[];
+  queuePaused?: boolean;
 }
 export interface McpConnection {
   name: string; source: string; status: string; enabled: boolean; tools: number | null; canToggle: boolean;
 }
 export interface SessionControlsState {
-  servers: McpConnection[]; contextTokens: number | null; autoCompactTokens: number | null;
+  servers: McpConnection[]; contextTokens: number | null; contextWindow?: number | null; autoCompactTokens: number | null;
   mcpOverrides: Record<string, boolean>; warning: string; minimumTokens: number; maximumTokens: number;
 }
 export interface Doc {
@@ -166,6 +172,11 @@ export interface SessionEvent {
   autoCompactTokens?: number | null;
   mcpOverrides?: Record<string, boolean>;
   contextTokens?: number | null;
+  contextWindow?: number | null;
+  queuedMessages?: QueuedMessage[];
+  queuePaused?: boolean;
+  messageId?: string;
+  delivery?: "steer" | "send";
 }
 export interface PiRequest {
   id: string;

@@ -32,7 +32,7 @@ export default function SessionControls({ tab, onConfig, onClose, focusContext =
     setPending(true); setError("");
     try {
       const next = await api<SessionControlsState>("session:controls", tab.id);
-      if (alive.current) { setInfo(next); onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens }); }
+      if (alive.current) { setInfo(next); onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow }); }
     } catch (e: any) { if (alive.current) setError(e.message); }
     finally { if (alive.current) setPending(false); }
   };
@@ -41,7 +41,7 @@ export default function SessionControls({ tab, onConfig, onClose, focusContext =
     setPending(true); setError(""); setSaved(false);
     try {
       const next = await api<SessionControlsState>("session:controls-change", tab.id, data);
-      if (alive.current) { setInfo(next); setSaved(true); onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens }); }
+      if (alive.current) { setInfo(next); setSaved(true); onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow }); }
     } catch (e: any) { if (alive.current) setError(e.message); }
     finally { if (alive.current) setPending(false); }
   };
