@@ -119,6 +119,7 @@ export interface Settings {
   font: string;
   terminalFontSize: number;
   backgroundOpacity: number;
+  backgroundBlur: number;
   motion: boolean;
   playful: boolean;
   coloredTabs: boolean;

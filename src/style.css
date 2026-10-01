@@ -138,7 +138,8 @@ p {
 }
 .atmosphere {
   position: absolute;
-  inset: 0;
+  inset: calc(var(--bg-blur, 0px) * -2);
+  filter: blur(var(--bg-blur, 0px));
   pointer-events: none;
   overflow: hidden;
   z-index: -1;
@@ -147,7 +148,7 @@ p {
   background-position: center;
 }
 .atmosphere i,
-.background-swatch i {
+.background-preview i {
   position: absolute;
   border-radius: 50%;
   display: none;
@@ -2713,6 +2714,7 @@ kbd {
   overflow: hidden;
 }
 .background-swatch > svg {
+  z-index: 1;
   position: absolute;
   right: 8px;
   top: 8px;
@@ -2723,22 +2725,28 @@ kbd {
 .swatch-rain {
   background: var(--bg);
 }
-.background-swatch.atmosphere-aurora i {
+.background-preview {
+  position: absolute;
+  inset: calc(var(--bg-blur, 0px) * -2);
+  overflow: hidden;
+  filter: blur(var(--bg-blur, 0px));
+}
+.background-preview.atmosphere-aurora i {
   filter: blur(12px);
   opacity: 0.55;
 }
-.background-swatch.atmosphere-orbits i {
+.background-preview.atmosphere-orbits i {
   border-width: 1px;
   opacity: 0.6;
 }
-.background-swatch.atmosphere-stars i:nth-child(-n + 3),
-.background-swatch.atmosphere-nebula i:nth-child(4) {
+.background-preview.atmosphere-stars i:nth-child(-n + 3),
+.background-preview.atmosphere-nebula i:nth-child(4) {
   --star-tile: 170px;
   animation-duration: 55s;
 }
-.background-swatch.atmosphere-stars i:nth-child(2) { --star-tile: 230px; }
-.background-swatch.atmosphere-stars i:nth-child(3) { --star-tile: 130px; }
-.background-swatch.atmosphere-nebula i:nth-child(-n + 3) { animation-duration: 24s; }
+.background-preview.atmosphere-stars i:nth-child(2) { --star-tile: 230px; }
+.background-preview.atmosphere-stars i:nth-child(3) { --star-tile: 130px; }
+.background-preview.atmosphere-nebula i:nth-child(-n + 3) { animation-duration: 24s; }
 .swatch-grid {
   background:
     linear-gradient(var(--border) 1px, transparent 1px),

@@ -84,6 +84,7 @@ export const defaults: Settings = {
   font: "system",
   terminalFontSize: 15,
   backgroundOpacity: 12,
+  backgroundBlur: 0,
   motion: true,
   playful: false,
   coloredTabs: true,
@@ -118,6 +119,7 @@ export function styleVars(s: Settings): Record<string, string | number> {
     "--font-size": `${s.fontSize}px`,
     "--line-height": s.lineHeight,
     "--bg-opacity": s.backgroundOpacity / 100,
+    "--bg-blur": `${(Number.isFinite(s.backgroundBlur) ? Math.min(100, Math.max(0, s.backgroundBlur)) : 0) * 0.4}px`,
     "--font":
       s.font === "system"
         ? '"Segoe UI", system-ui, sans-serif'

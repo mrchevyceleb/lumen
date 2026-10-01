@@ -165,8 +165,10 @@ export default function SettingsPanel({
                     aria-pressed={s.background === key}
                     onClick={() => set("background", key)}
                   >
-                    <div className={`background-swatch swatch-${key} atmosphere-${key}`} aria-hidden="true">
-                      <i /><i /><i /><i /><i /><i />
+                    <div className="background-swatch" aria-hidden="true">
+                      <div className={`background-preview swatch-${key} atmosphere-${key}`}>
+                        <i /><i /><i /><i /><i /><i />
+                      </div>
                       {s.background === key && <Check size={17} />}
                     </div>
                     <strong>{name}</strong>
@@ -207,6 +209,14 @@ export default function SettingsPanel({
                 max={50}
                 suffix="%"
                 onChange={(v) => set("backgroundOpacity", v)}
+              />
+              <Range
+                title="Background blur"
+                value={s.backgroundBlur}
+                min={0}
+                max={100}
+                suffix="%"
+                onChange={(v) => set("backgroundBlur", v)}
               />
               <Toggle
                 title="Animate backgrounds"
