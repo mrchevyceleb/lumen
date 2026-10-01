@@ -478,6 +478,12 @@ kbd {
 .project-menu button:hover { background: var(--border); }
 .project-menu .remove-project { border-top: 1px solid var(--border); margin-top: 3px; }
 .remove-project small { display: block; color: var(--muted); font-size: 9px; margin-top: 3px; }
+.update-card { display: flex; gap: 16px; align-items: flex-start; border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 24px 0 18px; }
+.update-card > svg { color: var(--accent); flex-shrink: 0; margin-top: 3px; }
+.update-card h4 { margin: 0 0 8px; font-size: 16px; }
+.update-card p { line-height: 1.65; margin: 0 0 8px; }
+.update-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.update-ready { color: var(--accent); }
 .project-empty { font-size: 10px; line-height: 1.7; color: var(--muted); padding: 4px 8px; }
 .workspace-switch:hover {
   background: color-mix(in srgb, var(--muted) 5%, transparent);

@@ -35,6 +35,9 @@ const channels = new Set([
   "settings:save",
   "external:open",
   "window:action",
+  "updates:status",
+  "updates:check",
+  "updates:install",
 ]);
 contextBridge.exposeInMainWorld("lumen", {
   invoke: async (channel, ...args) => {
@@ -47,6 +50,11 @@ contextBridge.exposeInMainWorld("lumen", {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on("session:event", listener);
     return () => ipcRenderer.removeListener("session:event", listener);
+  },
+  onUpdate: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("updates:status", listener);
+    return () => ipcRenderer.removeListener("updates:status", listener);
   },
   onOpenPaths: (callback) => {
     const listener = () => callback();

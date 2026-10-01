@@ -8,10 +8,12 @@ import {
   Check,
   ImagePlus,
   RotateCcw,
+  Download,
 } from "lucide-react";
 import { Modal } from "./Components";
 import { agentNames, defaults, themes } from "./settings";
 import type { Settings, Agent, AgentConfig } from "./types";
+import UpdatesPanel from "./UpdatesPanel";
 const backgrounds = [
   ["none", "Solid", "Still & focused"],
   ["aurora", "Aurora", "A slow wash of light"],
@@ -59,6 +61,7 @@ export default function SettingsPanel({
             ["type", Type, "Typography"],
             ["agents", Bot, "Agents"],
             ["behavior", SlidersHorizontal, "Workspace"],
+            ["updates", Download, "Updates"],
           ].map(([key, Icon, label]: any) => (
             <button
               key={key}
@@ -71,6 +74,7 @@ export default function SettingsPanel({
           ))}
         </nav>
         <div className="settings-content">
+          {section === "updates" && <UpdatesPanel />}
           {section === "appearance" && (
             <>
               <h3>A fresh coat of color</h3>

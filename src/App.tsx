@@ -55,6 +55,7 @@ import SettingsPanel from "./SettingsPanel";
 import Conversation, { AgentMark } from "./Conversation";
 import NativeTerminal from "./NativeTerminal";
 import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./ProjectSidebar";
+import { useUpdates } from "./UpdatesPanel";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -67,6 +68,7 @@ type Bootstrap = {
 type Dialog =
   "settings" | "worktrees" | "palette" | "open" | "newfile" | "tab" | null;
 export default function App() {
+  const updateStatus = useUpdates();
   const [settings, setSettings] = useState<Settings>(structuredClone(defaults));
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -1370,6 +1372,7 @@ export default function App() {
           <span>One workspace. Every agent. Room to think.</span>
         </div>
         <div>
+          {updateStatus?.phase === "downloaded" && <button className="update-ready" title={`Lumen ${updateStatus.latest} is ready. Close Lumen to install, or restart now.`} onClick={() => api("updates:install").catch((e) => notify(e.message))}><Download size={12} />Update ready</button>}
           {active?.busy ? (
             active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
           ) : (

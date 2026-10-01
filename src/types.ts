@@ -159,11 +159,20 @@ export interface PiRequest {
   text?: string;
   timeout?: number;
 }
+export interface UpdateStatus {
+  phase: "idle" | "portable" | "checking" | "current" | "downloading" | "downloaded" | "error";
+  version: string;
+  latest: string;
+  percent: number;
+  checkedAt: number;
+  message: string;
+}
 declare global {
   interface Window {
     lumen: {
       invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
       onSession: (callback: (event: SessionEvent) => void) => () => void;
+      onUpdate: (callback: (status: UpdateStatus) => void) => () => void;
       onOpenPaths: (callback: () => void) => () => void;
       onClosing: (callback: () => Promise<void>) => () => void;
     };

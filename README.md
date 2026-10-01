@@ -4,7 +4,13 @@ A local Windows terminal workspace with readable agent conversations, real termi
 
 ## Start
 
-Double-click **Lumen-0.1.8.exe** in the release folder. Choose **Open a workspace** and select your repository, or **Start without a workspace**. No installation is required.
+Download **Lumen-Setup-<version>.exe** from the [latest GitHub release](https://github.com/mrchevyceleb/lumen/releases/latest) and run it on each Windows computer. It installs for your Windows account, adds Start menu and desktop shortcuts, and registers **Open with Lumen**. Choose **Open a workspace** and select your repository, or **Start without a workspace**. Existing Lumen settings and saved chats are retained.
+
+## Automatic updates
+
+Installed Lumen checks GitHub after launch and every six hours, downloads newer stable releases in the background, and installs them when you close the app. **Settings → Updates** shows your version, download status, and **Check for updates**. **Update ready** in the bottom bar or **Restart and update** lets you install sooner. Restarting uses the same unsaved-file and running-session checks as closing normally and saves your chats before exiting. No GitHub login is required. Updates do not sync projects, files, or credentials between computers.
+
+Older portable/manual copies need the Setup installer once to enable updates. Close them before installing. The optional portable build remains available for development, but does not update itself.
 
 Open a new session with the **+** beside the tabs. Choose Terminal, Pi, Codex, Claude Code, or Grok. Each tab has its own process and working folder. Double-click a tab to rename it or pick its color.
 
@@ -91,7 +97,9 @@ npm run build
 npm start
 ```
 
-For hot reload, run `npm run dev` in one terminal, then `$env:LUMEN_DEV='1'; npm start` in another. Build the portable executable with `npm run package`. The file editor and its workers are bundled locally; no CDN is needed.
+For hot reload, run `npm run dev` in one terminal, then `$env:LUMEN_DEV='1'; npm start` in another. Build the Windows installer with `npm run package`, then run `npm run verify:release` to check its update metadata, checksum, and packaged terminal runtime. `npm run package:portable` produces an optional portable executable. The file editor and its workers are bundled locally; no CDN is needed.
+
+Every push to `main` runs the Windows release workflow. It chooses a version above existing stable release numbers (using the source version as a minimum), builds and verifies the installer, then uploads all assets to a draft before publishing. No personal access token is needed for CI. Build version changes stay on the runner, so releases do not create extra source commits. Failed builds remain unpublished. The repository and releases are public; source is licensed under MIT.
 
 The Windows release is unsigned. SmartScreen may require **More info → Run anyway** on a downloaded copy. Linux/macOS packaging is not included in this release.
 

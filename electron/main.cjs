@@ -9,12 +9,14 @@ const {
 } = require("./services.cjs");
 const { installZoom } = require("./zoom.cjs");
 const { openPaths, resolveOpenPath } = require("./launch.cjs");
+const { createUpdates } = require("./updates.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
   app.setPath("userData", process.env.LUMEN_TEST_DATA);
 const initialPaths = openPaths(process.argv);
 if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) app.exit(0);
-let window, workspace, sessions;
+let window, workspace, sessions, updates;
+let restartForUpdate = false;
 let pendingPaths = [...initialPaths];
 app.on("second-instance", (_event, argv, cwd, data) => {
   const paths = Array.isArray(data?.openPaths) && data.openPaths.every((value) => typeof value === "string" && path.isAbsolute(value)) ? data.openPaths : openPaths(argv, cwd);
@@ -52,6 +54,17 @@ app.whenReady().then(async () => {
   sessions = new Sessions(workspace, dataDir, (event) => {
     if (window && !window.isDestroyed())
       window.webContents.send("session:event", event);
+  });
+  updates = createUpdates({ app, notify: (status) => {
+    if (window && !window.isDestroyed()) window.webContents.send("updates:status", status);
+  } });
+  handle("updates:status", () => updates.status());
+  handle("updates:check", () => updates.check());
+  handle("updates:install", () => {
+    if (updates.status().phase !== "downloaded") return false;
+    restartForUpdate = true;
+    window.close();
+    return restartForUpdate;
   });
   handle("bootstrap", async () => ({
     recent: workspace.recent,
@@ -180,6 +193,7 @@ app.whenReady().then(async () => {
           "Closing Lumen discards unsaved editor changes and stops its processes. Saved files and CLI session history remain available.",
       });
       if (response === 0) {
+        restartForUpdate = false;
         event.preventDefault();
         return;
       }
@@ -202,10 +216,13 @@ app.whenReady().then(async () => {
     if (process.env.LUMEN_HIDDEN !== "1") window.show();
   });
   await window.loadURL(devURL || fileURL);
+  updates.start();
 });
 app.on("window-all-closed", async () => {
   try {
     await sessions?.closeAll();
   } catch {}
+  updates?.dispose();
+  if (restartForUpdate && updates?.install()) return;
   app.quit();
 });

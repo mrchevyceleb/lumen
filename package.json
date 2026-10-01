@@ -1,8 +1,10 @@
 {
   "name": "lumen-workspace",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "A readable terminal workspace for your code and AI agents",
-  "author": "Lumen",
+  "author": "Matt Johnston",
+  "license": "MIT",
+  "repository": "https://github.com/mrchevyceleb/lumen",
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
@@ -10,30 +12,34 @@
     "start": "electron .",
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
-    "package": "npm run build && electron-builder --win portable --config.win.signExecutable=false"
+    "package": "npm run build && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false",
+    "package:portable": "npm run build && electron-builder --win portable --x64 --publish never --config.win.signExecutable=false",
+    "verify:release": "node scripts/verify-release.cjs"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "node-pty": "1.1.0"
   },
   "devDependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "electron": "44.5.1",
-    "electron-builder": "^26.0.0",
-    "playwright": "^1.56.0",
-    "typescript": "^5.9.0",
-    "vite": "8.3.1",
-    "@monaco-editor/react": "^4.7.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",
+    "electron": "44.5.1",
+    "electron-builder": "^26.0.0",
+    "js-yaml": "4.3.2",
     "lucide-react": "^0.468.0",
     "monaco-editor": "^0.57.0",
+    "playwright": "^1.56.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "typescript": "^5.9.0",
+    "vite": "8.3.1"
   },
   "build": {
     "appId": "app.lumen.workspace",
@@ -51,9 +57,27 @@
     ],
     "npmRebuild": false,
     "win": {
-      "target": "portable",
-      "artifactName": "Lumen-${version}.exe",
+      "target": "nsis",
+      "artifactName": "Lumen-Setup-${version}.exe",
       "icon": "public/lumen.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "Lumen",
+      "include": "build/installer.nsh"
+    },
+    "portable": {
+      "artifactName": "Lumen-${version}-portable.exe"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "mrchevyceleb",
+      "repo": "lumen",
+      "releaseType": "release"
     }
   }
 }
