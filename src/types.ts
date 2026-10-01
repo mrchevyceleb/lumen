@@ -73,7 +73,7 @@ export interface Tab {
   color?: string;
   messages: Message[];
   busy: boolean;
-  phase?: "waiting" | "finishing";
+  phase?: "waiting" | "finishing" | "compacting";
   sessionRef?: string;
   turn?: string;
   started?: number;
@@ -87,6 +87,17 @@ export interface Tab {
   model?: string;
   effort?: string;
   workMode?: string;
+  controlId?: string;
+  autoCompactTokens?: number | null;
+  mcpOverrides?: Record<string, boolean>;
+  contextTokens?: number | null;
+}
+export interface McpConnection {
+  name: string; source: string; status: string; enabled: boolean; tools: number | null; canToggle: boolean;
+}
+export interface SessionControlsState {
+  servers: McpConnection[]; contextTokens: number | null; autoCompactTokens: number | null;
+  mcpOverrides: Record<string, boolean>; warning: string; minimumTokens: number; maximumTokens: number;
 }
 export interface Doc {
   root: string;
@@ -131,7 +142,7 @@ export interface Settings {
 export interface SessionEvent {
   id: string;
   type: string;
-  phase?: "waiting" | "finishing";
+  phase?: "waiting" | "finishing" | "compacting";
   text?: string;
   key?: string;
   replace?: boolean;
@@ -148,6 +159,9 @@ export interface SessionEvent {
   model?: string;
   effort?: string;
   workMode?: string;
+  autoCompactTokens?: number | null;
+  mcpOverrides?: Record<string, boolean>;
+  contextTokens?: number | null;
 }
 export interface PiRequest {
   id: string;

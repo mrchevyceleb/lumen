@@ -124,6 +124,8 @@ app.whenReady().then(async () => {
   handle("session:commands", (id, refresh) => sessions.commands(id, refresh));
   handle("session:models", (id, refresh) => sessions.models(id, refresh));
   handle("session:configure", (id, change) => sessions.configure(id, change));
+  handle("session:controls", (id) => sessions.sessionControls(id));
+  handle("session:controls-change", (id, change) => sessions.changeControls(id, change));
   handle("session:shortcuts", (id) => sessions.get(id).agent === "pi" ? require("./models.cjs").piShortcuts() : {});
   handle("editor:dirty", (count) => {
     dirtyEditors = Number(count) || 0;

@@ -2600,6 +2600,41 @@ kbd {
   opacity: 0.6;
   min-width: 47px;
 }
+.session-controls-panel { display: grid; gap: 24px; min-height: 0; max-height: min(70vh, 700px); overflow: auto; padding: 24px 28px; }
+.session-controls-panel section { min-width: 0; }
+.session-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.session-section-heading h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
+.session-section-heading > span { color: var(--muted); font-size: 11px; }
+.session-controls-panel p { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 10px 0; }
+.threshold-form { display: grid; gap: 7px; margin-top: 16px; }
+.threshold-form label { font-size: 12px; }
+.threshold-form > div { display: flex; gap: 8px; }
+.threshold-form input { min-width: 0; flex: 1; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.context-policy-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.context-policy-footer code { color: var(--muted); font-size: 11px; }
+.context-policy-footer button { color: var(--accent); font-size: 11px; padding: 4px 0; background: none; border: none; }
+.session-controls-panel p.session-fine-print { font-size: 11px; }
+.session-saved { display: flex; gap: 6px; align-items: center; color: var(--accent); font-size: 12px; margin-top: 8px; }
+.session-loading { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; padding: 12px 0; }
+.session-control-error { display: flex; align-items: flex-start; gap: 8px; color: #e9a39c; font-size: 12px; line-height: 1.6; padding: 10px 0; }
+.session-control-error svg { flex-shrink: 0; margin-top: 2px; }
+.mcp-empty { padding: 18px 0; color: var(--muted); font-size: 12px; }
+.mcp-server-list { display: grid; }
+.mcp-server-row { display: flex; align-items: center; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--border); }
+.mcp-status-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); opacity: .45; }
+.mcp-status-dot.connected { background: var(--accent); opacity: 1; box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 25%, transparent); }
+.mcp-server-info { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.mcp-server-info strong { font-size: 12px; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.mcp-server-info > span { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.mcp-server-row .toggle { width: 32px; height: 19px; border: 1px solid var(--border); background: var(--surface); border-radius: 20px; padding: 2px; flex-shrink: 0; }
+.mcp-server-row .toggle > span { display: block; width: 13px; height: 13px; background: var(--muted); border-radius: 50%; transition: transform .15s; }
+.mcp-server-row .toggle.on { background: var(--accent); border-color: var(--accent); }
+.mcp-server-row .toggle.on > span { transform: translateX(13px); background: var(--bg); }
+.mcp-server-row .toggle:disabled { opacity: .4; cursor: not-allowed; }
+.session-access-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 6px 14px 10px; }
+.session-access-bar button { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted); font-size: 11px; padding: 3px 0; }
+.session-access-bar button:hover { color: var(--text); }
+.session-access-bar button:disabled { opacity: .4; }
 .toggle-row {
   display: flex;
   align-items: center;

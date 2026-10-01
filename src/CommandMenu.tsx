@@ -23,7 +23,7 @@ export default function CommandMenu({ commands, selected, loading, error, warnin
         </button>
       </div>
       <div ref={list} className="command-list" id="slash-commands" role="listbox" aria-label="Slash commands" aria-busy={loading}>
-        {loading && !commands.length ? <div className="command-empty" role="status">Reading commands from your installed CLI…</div> : error ? <div className="command-empty" role="status">{error}</div> : !commands.length ? <div className="command-empty" role="status">No matching commands. Refresh after adding a skill, or explore native commands below.</div> : commands.map((command, index) => (
+        {loading && !commands.length ? <div className="command-empty" role="status">Reading commands from your installed CLI…</div> : !commands.length ? <div className="command-empty" role="status">{error || "No matching commands. Refresh after adding a skill, or explore native commands below."}</div> : commands.map((command, index) => (
           <button key={command.insertText} id={`slash-command-${index}`} role="option" aria-selected={index === selected} tabIndex={-1}
             className={`command-option ${index === selected ? "selected" : ""}`} onMouseEnter={() => onHover(index)} onClick={() => onSelect(command)}>
             <span className="command-option-copy">
@@ -34,6 +34,7 @@ export default function CommandMenu({ commands, selected, loading, error, warnin
           </button>
         ))}
       </div>
+      {error && commands.length > 0 && <div className="command-warning">{error} Lumen commands remain available.</div>}
       {warning && <div className="command-warning">{warning}</div>}
       <div className="command-menu-footer">
         <span title={origin}>↑↓ navigate · Tab / ↵ insert · Esc close</span>

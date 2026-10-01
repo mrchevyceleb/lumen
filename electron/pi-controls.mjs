@@ -1,5 +1,36 @@
-// Loaded only by Lumen's Pi RPC sessions. No settings or provider files are written.
+// Loaded by Lumen's Pi sessions. No settings or provider files are written.
+import fs from "node:fs";
 export default function lumenControls(pi) {
+  let threshold = Number(process.env.LUMEN_AUTO_COMPACT_TOKENS) || null;
+  let compacting = false;
+  let lastCompactedUsage = null;
+  try { const stored = JSON.parse(fs.readFileSync(process.env.LUMEN_COMPACT_STATE_FILE, "utf8")); if (Number.isFinite(stored.lastCompactedUsage) && stored.lastCompactedUsage >= 0) lastCompactedUsage = stored.lastCompactedUsage; } catch {}
+  const saveWatermark = () => { try { if (process.env.LUMEN_COMPACT_STATE_FILE) fs.writeFileSync(process.env.LUMEN_COMPACT_STATE_FILE, JSON.stringify({ lastCompactedUsage }), { mode: 0o600 }); } catch { /* Context protection continues even if its restart watermark cannot be saved. */ } };
+  const contextEvent = (ctx, data) => {
+    if (process.env.LUMEN_RPC_CONTROLS === "1") ctx.ui.notify("LUMEN_CONTEXT:" + JSON.stringify(data), "info");
+    else if (data.compacting === true) ctx.ui.notify("Compacting context…", "info");
+    else if (data.compacting === false) ctx.ui.notify(data.error ? "Auto-compact: " + data.error : "Context compacted", data.error ? "warning" : "info");
+  };
+  pi.on("agent_settled", (_event, ctx) => {
+    const usage = ctx.getContextUsage();
+    const tokens = usage?.tokens ?? null;
+    contextEvent(ctx, { contextTokens: tokens });
+    if (!threshold || tokens === null || compacting) return;
+    if (tokens < threshold && lastCompactedUsage !== null) { lastCompactedUsage = null; saveWatermark(); }
+    // A summary + retained messages can themselves exceed a small threshold.
+    // Require fresh context growth before compacting again; never compact-loop.
+    if (tokens < threshold || (lastCompactedUsage !== null && tokens < lastCompactedUsage + Math.max(1000, threshold * 0.1))) return;
+    compacting = true;
+    lastCompactedUsage = tokens;
+    contextEvent(ctx, { contextTokens: tokens, compacting: true });
+    ctx.compact({
+      onComplete: (result) => { compacting = false; lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
+        contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); },
+      onError: (error) => { compacting = false;
+        saveWatermark();
+        contextEvent(ctx, { contextTokens: tokens, compacting: false, error: error.message }); },
+    });
+  });
   pi.registerCommand("__lumen_controls", {
     description: "Lumen session controls",
     handler: async (args, ctx) => {
@@ -21,6 +52,9 @@ export default function lumenControls(pi) {
             if (!await pi.setModel(next.model)) throw new Error("No account configured for this model.");
             if (next.thinkingLevel) pi.setThinkingLevel(next.thinkingLevel);
           }
+        } else if (request.action === "autocompact") {
+          threshold = request.tokens ?? null;
+          if (request.reset) { lastCompactedUsage = null; saveWatermark(); }
         } else if (request.action !== "state") throw new Error("Unknown Lumen control.");
         ctx.ui.notify("LUMEN_CONTROLS:" + JSON.stringify({ id: request.id,
           favorites: scoped.map((s) => `${s.model.provider}/${s.model.id}`),

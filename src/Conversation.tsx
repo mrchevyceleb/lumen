@@ -15,11 +15,14 @@ import {
   Command,
   Paperclip,
   ExternalLink,
+  Cable,
 } from "lucide-react";
 import { Busy, CopyButton, IconButton } from "./Components";
 import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand } from "./types";
 import CommandMenu from "./CommandMenu";
 import ModelControls, { type ControlPanel } from "./ModelControls";
+import SessionControls, { lumenCommands, parseThreshold } from "./SessionControls";
+import type { SessionControlsState } from "./types";
 import { agentNames } from "./settings";
 export function AgentMark({
   agent,
@@ -78,6 +81,8 @@ export default function Conversation({
   const setInput = (value: string) => onConfig({ draft: value });
   const [controlPanel, setControlPanel] = useState<ControlPanel>(null);
   const [controlPending, setControlPending] = useState(false);
+  const [sessionPanel, setSessionPanel] = useState<"mcp" | "context" | null>(null);
+  const [sessionError, setSessionError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -92,10 +97,10 @@ export default function Conversation({
   const loadedCommands = useRef(false);
   const loadingCommands = useRef(false);
   const commandToken = input.match(/^([/$])([^\s]*)([\s\S]*)$/);
-  const menuOpen = tab.agent !== "shell" && !tab.busy && !controlPanel && focused && !dismissedCommands && !!commandToken &&
+  const menuOpen = tab.agent !== "shell" && !tab.busy && !controlPanel && !sessionPanel && focused && !dismissedCommands && !!commandToken &&
     (commandToken[1] === "/" || tab.agent === "codex") && caret > 0 && caret <= commandToken[2].length + 1;
   const query = commandToken?.[2].toLowerCase() || "";
-  const commands = inventory.commands.filter((c) => `${c.name} ${c.description}`.toLowerCase().includes(query)).sort((a, b) =>
+  const commands = [...lumenCommands, ...inventory.commands.filter((c) => !lumenCommands.some((local) => local.name === c.name))].filter((c) => `${c.name} ${c.description}`.toLowerCase().includes(query)).sort((a, b) =>
     Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)) || a.name.localeCompare(b.name));
   const selection = Math.min(selectedCommand, Math.max(0, commands.length - 1));
   const loadCommands = async (refresh = false) => {
@@ -147,9 +152,26 @@ export default function Conversation({
     inputRef.current?.focus();
   }, [tab.id]);
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
+  const isLocalCommand = tab.agent !== "shell" && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
   const submit = async () => {
-    if (!input.trim() || tab.busy || controlPending || submitting || (isCommandInput && commandLoading)) return;
+    if (!input.trim() || tab.busy || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)) return;
     const hostCommand = input.trim();
+    setSessionError("");
+    if (isLocalCommand) {
+      const [name, ...args] = hostCommand.split(/\s+/);
+      if (!args.length) {
+        setSessionPanel(name === "/mcp" ? "mcp" : "context"); setInput(""); setDismissedCommands(true); return;
+      }
+      setSubmitting(true);
+      try {
+        if (args.length !== 1 || (name === "/mcp" && args[0] !== "reset")) throw new Error(name === "/mcp" ? "Use /mcp or /mcp reset." : "Use /autocompact 160k or /autocompact auto.");
+        const next = await api<SessionControlsState>("session:controls-change", tab.id, name === "/mcp" ? { resetMcps: true } : { autoCompactTokens: parseThreshold(args[0]) });
+        onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, draft: "" });
+        setDismissedCommands(true); setSessionPanel(name === "/mcp" ? "mcp" : "context");
+      } catch (e: any) { setSessionError(e.message); }
+      finally { setSubmitting(false); }
+      return;
+    }
     if (tab.agent !== "shell" && ["/model", "/effort", "/thinking"].includes(hostCommand)) {
       setControlPanel(hostCommand === "/model" ? "model" : "effort");
       setInput(""); setDismissedCommands(true); return;
@@ -257,7 +279,7 @@ export default function Conversation({
                   <i />
                   <i />
                 </span>}{" "}
-                {tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
+                {tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
                   ? "Running command"
                   : `${agentNames[tab.agent]} is working`}
               </div>
@@ -332,7 +354,7 @@ export default function Conversation({
             aria-autocomplete={tab.agent === "shell" ? undefined : "list"}
             aria-expanded={tab.agent === "shell" ? undefined : menuOpen}
             aria-controls={menuOpen ? "slash-commands" : undefined}
-            aria-activedescendant={menuOpen && commands.length > 0 && !commandError ? `slash-command-${selection}` : undefined}
+            aria-activedescendant={menuOpen && commands.length > 0 ? `slash-command-${selection}` : undefined}
             aria-label={
               tab.agent === "shell" ? "Shell command" : "Message agent"
             }
@@ -355,10 +377,10 @@ export default function Conversation({
                 if (commands.length) setSelectedCommand((selection + (e.key === "ArrowDown" ? 1 : commands.length - 1)) % commands.length);
                 return;
               }
-              if (menuOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && ["Enter", "Tab"].includes(e.key) && commands.length && !commandError) {
+              if (menuOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && ["Enter", "Tab"].includes(e.key) && commands.length) {
                 e.preventDefault(); selectCommand(commands[selection]); return;
               }
-              if (menuOpen && commandLoading && e.key === "Enter") { e.preventDefault(); return; }
+              if (menuOpen && commandLoading && !isLocalCommand && e.key === "Enter") { e.preventDefault(); return; }
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&
@@ -405,7 +427,7 @@ export default function Conversation({
                 <button
                   className="send-button"
                   aria-label="Send message"
-                  disabled={!input.trim() || controlPending || submitting || (isCommandInput && commandLoading)}
+                  disabled={!input.trim() || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)}
                   onClick={submit}
                 >
                   <ArrowUp size={18} />
@@ -417,6 +439,9 @@ export default function Conversation({
             onConfig={onConfig} onPending={setControlPending} onNative={(draft) => onNative(draft ? `${draft}${input.trim() ? `\n\n${input}` : ""}` : input.trim() || undefined)}
             onPlanDraft={() => { setInput(input.startsWith("/plan") ? input : `/plan${input.trim() ? ` ${input}` : " "}`); setDismissedCommands(true);
               requestAnimationFrame(() => inputRef.current?.focus()); }} />}
+          {tab.agent !== "shell" && <div className="session-access-bar"><button disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={13} /> MCPs & context</button>
+            <button disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>{tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()}` : "Auto-compact · CLI default"}</button></div>}
+          {sessionError && <div className="session-control-error" role="alert"><AlertCircle size={14} />{sessionError}</div>}
         </div>
         </div>
         <div className="composer-caption">
@@ -430,6 +455,7 @@ export default function Conversation({
           </span>
         </div>
       </div>
+      {sessionPanel && <SessionControls tab={tab} onConfig={onConfig} focusContext={sessionPanel === "context"} onClose={() => { setSessionPanel(null); requestAnimationFrame(() => inputRef.current?.focus()); }} />}
     </div>
   );
 }

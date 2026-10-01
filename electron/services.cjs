@@ -8,6 +8,7 @@ const { promisify } = require("node:util");
 const execute = promisify(execFile);
 const { discoverCommands, normalize } = require("./commands.cjs");
 const { catalog, efforts, piShortcuts, cliOptions, extraOptions } = require("./models.cjs");
+const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp } = require("./session-controls.cjs");
 const OMIT = new Set([
   ".git",
   "node_modules",
@@ -451,6 +452,9 @@ class Sessions {
     extraArgs = [],
     sessionRef = "",
     scratchId = "",
+    controlId = "",
+    autoCompactTokens = null,
+    mcpOverrides = {},
   }) {
     if (
       !["shell", "pi", "codex", "claude", "grok"].includes(agent) ||
@@ -481,6 +485,11 @@ class Sessions {
     )
       throw new Error("This CLI conversation is already open in another tab.");
     const id = uuid();
+    controlId ||= id;
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(controlId)) throw new Error("Invalid session controls identifier.");
+    const controls = policy({ autoCompactTokens, mcpOverrides });
+    if (agent === "claude" && controls.autoCompactTokens && (controls.autoCompactTokens < 100000 || controls.autoCompactTokens > 1000000))
+      throw new Error("Claude's native auto-compact threshold supports 100,000–1,000,000 tokens.");
     const projectless = root === "";
     if (projectless) {
       scratchId ||= id;
@@ -512,11 +521,109 @@ class Sessions {
       workMode,
       extraArgs,
       sessionRef,
+      controlId,
+      ...controls,
       busy: false,
       output: "",
     };
     this.sessions.set(id, s);
-    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode };
+    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls };
+  }
+  async sessionControls(id) {
+    const s = this.get(id);
+    if (s.agent === "shell") throw new Error("Choose an agent to use MCP and context controls.");
+    if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") throw new Error("Finish this turn in readable view to inspect its session controls.");
+    s.setting = true;
+    try { return await this.readControls(s); } finally { s.setting = false; }
+  }
+  async readControls(s) {
+    let servers, contextTokens = null, warning = "";
+    if (s.agent === "pi") {
+      await this.ensurePiPolicy(s);
+      const info = await this.piMcp(s);
+      servers = info.servers;
+      warning = info.warning;
+      const stats = await this.piRpc(s, "get_session_stats");
+      contextTokens = stats.contextUsage?.tokens ?? null;
+    } else {
+      const runtime = await ensureRuntime(this, s);
+      servers = await runtime.servers(); contextTokens = await runtime.contextUsage();
+      if (s.agent === "grok") warning = "Grok controls tool access for connected MCPs; transports stay cached. Auto-compact runs between prompts at your token threshold. Grok's native compaction also protects long running turns.";
+      if (s.agent === "codex") warning = "Codex reconnects this thread to apply MCP changes. Disabling a plugin MCP disables that plugin for this chat's future turns.";
+    }
+    return { servers, contextTokens, autoCompactTokens: s.autoCompactTokens, mcpOverrides: s.mcpOverrides, warning,
+      minimumTokens: s.agent === "claude" ? 100000 : 1000, maximumTokens: s.agent === "claude" ? 1000000 : 2000000 };
+  }
+  async changeControls(id, change) {
+    const s = this.get(id);
+    if (s.agent === "shell" || s.mode !== "rich" || s.busy || s.stopping || s.transitioning || s.setting)
+      throw new Error("Finish this turn in readable view before changing session controls.");
+    s.setting = true;
+    try {
+      if (change.resetMcps === true) {
+        await this.resetRuntime(s);
+        await resetMcpPreferences(s);
+        s.mcpRecovery = null;
+        s.mcpOverrides = {};
+      } else if (Object.hasOwn(change, "autoCompactTokens")) {
+        const next = policy({ ...s, autoCompactTokens: change.autoCompactTokens });
+        if (s.agent === "claude" && next.autoCompactTokens && (next.autoCompactTokens < 100000 || next.autoCompactTokens > 1000000))
+          throw new Error("Claude's native auto-compact threshold supports 100,000–1,000,000 tokens.");
+        if (s.agent === "pi") await this.piBridge(s, "autocompact", { tokens: next.autoCompactTokens, reset: true });
+        else await this.resetRuntime(s);
+        if (s.agent === "grok" && s.grokHome) await fs.writeFile(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: null }));
+        s.autoCompactTokens = next.autoCompactTokens;
+      } else {
+        if (typeof change.server !== "string" || typeof change.enabled !== "boolean") throw new Error("Choose an MCP and its connection state.");
+        const info = await this.readControls(s);
+        const server = info.servers.find((r) => r.name === change.server);
+        if (!server?.canToggle) throw new Error("This MCP requires its native CLI controls or authentication first.");
+        if (s.agent === "pi") await this.piMcp(s, change.server, change.enabled);
+        else if (s.agent === "codex") await this.resetRuntime(s);
+        else await s.runtime.toggle(change.server, change.enabled);
+        s.mcpOverrides = { ...s.mcpOverrides, [change.server]: change.enabled };
+      }
+      this.event(s, { type: "session-controls", autoCompactTokens: s.autoCompactTokens, mcpOverrides: s.mcpOverrides });
+      return await this.readControls(s);
+    } finally { s.setting = false; }
+  }
+  async resetRuntime(s) {
+    if (["claude", "codex"].includes(s.agent) && s.runtime && !s.runtime.hadPrompt) {
+      s.sessionRef = "";
+      this.event(s, { type: "session", sessionRef: "" });
+    }
+    s.runtime?.close("Session controls changed.");
+    if (s.process) { await this.kill(s.process); s.process = null; }
+  }
+  async piMcp(s, name, enabled) {
+    if (s.piMcpSupported === undefined) s.piMcpSupported = (await this.piRpc(s, "get_commands")).commands?.some((c) => c.name === "mcp") || false;
+    if (!s.piMcpSupported) return { servers: [], warning: "Pi's MCP manager extension is not installed or enabled. Configure it in native Pi, then restart this chat." };
+    if (name !== undefined && (!/^[\w.-]+$/.test(name) || ["add", "remove", "list"].includes(name.toLowerCase())))
+      throw new Error("This Pi MCP needs its native controls.");
+    const list = async () => {
+      s.piMcpNotification = "";
+      await this.piRpc(s, "prompt", { message: "/mcp list" });
+      const message = s.piMcpNotification;
+      if (!message) return { servers: [], warning: "Pi's MCP manager did not return a server list. Install or enable your MCP extension in native Pi." };
+      const servers = [...message.matchAll(/^\s*([^\s:]+):\s*(global|project),\s*(connected|disabled|disconnected)\s*\((\d+) tools?\)/gm)]
+        .map((m) => ({ name: m[1], source: m[2], status: m[3], tools: Number(m[4]), enabled: m[3] !== "disabled", canToggle: /^[\w.-]+$/.test(m[1]) && !["add", "remove", "list"].includes(m[1].toLowerCase()) }));
+      return { servers, warning: "Pi uses its MCP manager's runtime switches. Tool exposure still follows your Pi mode." };
+    };
+    const info = await list();
+    if (name === undefined) return info;
+    const server = info.servers.find((r) => r.name === name);
+    if (!server) throw new Error("This Pi MCP is no longer available. Refresh the list.");
+    if (server.enabled !== enabled) await this.piRpc(s, "prompt", { message: `/mcp ${name}` });
+    const next = await list();
+    if (next.servers.find((r) => r.name === name)?.enabled !== enabled) throw new Error("Pi did not change this MCP. Check its connection in native view.");
+    return next;
+  }
+  async ensurePiPolicy(s) {
+    this.ensurePi(s);
+    if (s.piPolicyReady) return;
+    if (s.autoCompactTokens) await this.piBridge(s, "autocompact", { tokens: s.autoCompactTokens });
+    for (const [name, enabled] of Object.entries(s.mcpOverrides)) await this.piMcp(s, name, enabled);
+    s.piPolicyReady = true;
   }
   get(id) {
     const s = this.sessions.get(id);
@@ -564,17 +671,26 @@ class Sessions {
   }
   ensurePi(s) {
     if (s.process) return;
+    s.piCompacting = false;
+    const extensionFile = this.piExtension();
+    const args = ["--mode", "rpc", "--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s),
+      "--extension", extensionFile];
+    if (s.sessionRef) args.push("--session", s.sessionRef);
+    const child = this.child(s, args, { LUMEN_RPC_CONTROLS: "1", LUMEN_COMPACT_STATE_FILE: this.compactStateFile(s) });
+    this.jsonStream(s, child, (e) => this.piEvent(s, e));
+  }
+  piExtension() {
     // External Node processes cannot read Electron's virtual .asar filesystem.
     const extension = fsSync.readFileSync(path.join(__dirname, "pi-controls.mjs"));
     const runtime = path.join(this.dataDir, "runtime");
     fsSync.mkdirSync(runtime, { recursive: true });
     const extensionFile = path.join(runtime, `pi-controls-${crypto.createHash("sha256").update(extension).digest("hex").slice(0, 16)}.mjs`);
     if (!fsSync.existsSync(extensionFile)) fsSync.writeFileSync(extensionFile, extension);
-    const args = ["--mode", "rpc", "--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s),
-      "--extension", extensionFile];
-    if (s.sessionRef) args.push("--session", s.sessionRef);
-    const child = this.child(s, args);
-    this.jsonStream(s, child, (e) => this.piEvent(s, e));
+    return extensionFile;
+  }
+  compactStateFile(s) {
+    const folder = path.join(this.dataDir, "context"); fsSync.mkdirSync(folder, { recursive: true });
+    return path.join(folder, `${s.controlId}.json`);
   }
   piRpc(s, type, data = {}) {
     if (s.stopping || s.transitioning || !this.sessions.has(s.id)) return Promise.reject(new Error("Pi controls were canceled."));
@@ -674,6 +790,7 @@ class Sessions {
         s.catalog = { ...info, currentModel: s.model, currentEffort: s.effort,
           currentEfforts: efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) };
       } else s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode };
+      if (s.agent !== "pi" && s.runtime) await this.resetRuntime(s);
       this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       return { model: s.model, effort: s.effort, workMode: s.workMode, catalog: s.catalog };
     } finally { s.setting = false; }
@@ -684,6 +801,16 @@ class Sessions {
   async startNative(id) {
     const s = this.get(id);
     if (s.pty) return;
+    if (s.agent === "pi" && Object.keys(s.mcpOverrides).length)
+      throw new Error("Use CLI MCP defaults before opening native Pi. Its terminal cannot inherit Lumen's runtime MCP switches.");
+    const sessionEnv = {};
+    if (s.agent === "grok") sessionEnv.GROK_HOME = s.grokHome || await grokHome(this, s);
+    if (s.agent === "claude") sessionEnv.CLAUDE_CONFIG_DIR = s.claudeHome || await claudeHome(this, s);
+    await syncNativeMcp(s);
+    if (s.agent === "codex" && Object.keys(s.mcpOverrides).length && !s.codexLocalServers) {
+      await (await ensureRuntime(this, s)).servers();
+      await this.resetRuntime(s);
+    }
     const pty = require("node-pty");
     const shell =
       process.platform === "win32"
@@ -709,7 +836,9 @@ class Sessions {
       launch.args.push(
         ...cliOptions(s),
         ...extraOptions(s),
+        ...launchOptions(s),
       );
+      if (s.agent === "pi") { launch.args.push("--extension", this.piExtension()); sessionEnv.LUMEN_AUTO_COMPACT_TOKENS = String(s.autoCompactTokens || ""); sessionEnv.LUMEN_COMPACT_STATE_FILE = this.compactStateFile(s); }
     } else if (process.platform === "win32") {
       // Keep the existing PowerShell prompt, adding its real folder as an OSC event.
       launch.args.push("-NoExit", "-Command", '$global:lumenPromptBlock=(Get-Item function:prompt).ScriptBlock; function global:prompt { [Console]::Write([char]27+\']9;9;"\'+(Get-Location).Path+\'"\'+[char]7); & $global:lumenPromptBlock }');
@@ -719,7 +848,7 @@ class Sessions {
       cwd: s.cwd || s.root,
       cols: 100,
       rows: 30,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
+      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", ...sessionEnv },
     });
     s.pty.onData((data) => {
       s.cwdOscBuffer = (s.cwdOscBuffer || "") + data;
@@ -799,7 +928,7 @@ class Sessions {
     s.phase = phase;
     this.event(s, { type: "phase", phase });
   }
-  child(s, args) {
+  child(s, args, env = {}) {
     const launch = resolveLauncher(s.command);
     const child = spawn(
       launch.file,
@@ -808,7 +937,7 @@ class Sessions {
         cwd: s.cwd || s.root,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, NO_COLOR: "1" },
+        env: { ...process.env, NO_COLOR: "1", ...env },
       },
     );
     s.process = child;
@@ -862,6 +991,9 @@ class Sessions {
         }
       }
       s.process = null;
+      s.piPolicyReady = false;
+      s.piMcpSupported = undefined;
+      s.piCompacting = false;
       this.rejectPiCommands(s, "Pi closed before returning its commands. Refresh to discover them again.");
       this.finish(s, code ?? 1);
     });
@@ -966,9 +1098,8 @@ class Sessions {
     }
   }
   async agentTurn(s, prompt) {
-    const model = cliOptions(s);
     if (s.agent === "pi") {
-      this.ensurePi(s);
+      await this.ensurePiPolicy(s);
       s.process.stdin.write(JSON.stringify({ id: uuid(), type: "get_state" }) + "\n");
       s.piPromptId = uuid();
       s.piSlashPrompt = prompt.startsWith("/");
@@ -977,73 +1108,7 @@ class Sessions {
       );
       return;
     }
-    let args;
-    if (s.agent === "codex") {
-      const config = [
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        'sandbox_mode="workspace-write"',
-      ];
-      args = s.sessionRef
-        ? [
-            "exec",
-            "resume",
-            "--json",
-            ...config,
-            "--skip-git-repo-check",
-            ...model,
-            s.sessionRef,
-            "-",
-          ]
-        : [
-            "exec",
-            "--json",
-            "--color",
-            "never",
-            "--sandbox",
-            "workspace-write",
-            ...config,
-            "--skip-git-repo-check",
-            ...model,
-            "-",
-          ];
-    } else if (s.agent === "claude") {
-      args = [
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        ...model,
-      ];
-      if (s.sessionRef) args.push("--resume", s.sessionRef);
-    } else {
-      await fs.mkdir(path.join(this.dataDir, "prompts"), { recursive: true });
-      s.promptFile = path.join(this.dataDir, "prompts", `${s.turn}.txt`);
-      await fs.writeFile(s.promptFile, prompt);
-      args = [
-        "--prompt-file",
-        s.promptFile,
-        "--output-format",
-        "streaming-messages-json",
-        "--include-partial-messages",
-        ...model,
-      ];
-      if (s.sessionRef) args.push("--resume", s.sessionRef);
-      else {
-        s.sessionRef = uuid();
-        args.push("--session-id", s.sessionRef);
-      }
-    }
-    const child = this.child(s, args);
-    this.jsonStream(s, child, (e) =>
-      s.agent === "codex" ? this.codexEvent(s, e) : this.messagesEvent(s, e),
-    );
-    child.on("close", () => {
-      if (s.promptFile) fs.rm(s.promptFile, { force: true }).catch(() => {});
-    });
-    child.stdin.end(s.agent === "grok" ? "" : prompt);
+    await (await ensureRuntime(this, s)).prompt(prompt);
   }
   codexEvent(s, e) {
     if (e.type === "thread.started") {
@@ -1169,6 +1234,23 @@ class Sessions {
     }
   }
   piEvent(s, e) {
+    if (e.type === "extension_ui_request" && e.method === "notify" && /^MCP Servers:|^No MCP servers configured/.test(e.message || "")) {
+      s.piMcpNotification = e.message; return;
+    }
+    if (e.type === "extension_ui_request" && e.method === "notify" && e.message?.startsWith("LUMEN_CONTEXT:")) {
+      try {
+        const usage = JSON.parse(e.message.slice("LUMEN_CONTEXT:".length)); this.event(s, { type: "context", contextTokens: usage.contextTokens });
+        if (usage.compacting !== undefined) {
+          s.piCompacting = usage.compacting;
+          this.event(s, { type: "phase", phase: usage.compacting ? "compacting" : undefined });
+          if (usage.error) this.event(s, { type: "diagnostic", key: "auto-compact", text: "Auto-compact: " + usage.error + ". The CLI's normal context protection remains active." });
+          if (!usage.compacting && !s.piRunActive) this.finish(s, 0);
+        }
+      } catch {}
+      return;
+    }
+    if (["auto_compaction_start", "compaction_start"].includes(e.type)) this.event(s, { type: "phase", phase: "compacting" });
+    if (["auto_compaction_end", "compaction_end"].includes(e.type)) this.event(s, { type: "phase", phase: undefined });
     const control = e.type === "extension_ui_request" && e.method === "notify" && e.message?.startsWith("LUMEN_CONTROLS:");
     if (control) {
       try {
@@ -1262,7 +1344,7 @@ class Sessions {
       this.event(s, { type: "pi_ui", request: e });
     if (e.type === "agent_settled") {
       s.piRunActive = false;
-      this.finish(s, 0);
+      if (!s.piCompacting) this.finish(s, 0);
       s.process?.stdin.write(
         JSON.stringify({ id: uuid(), type: "get_state" }) + "\n",
       );
@@ -1283,13 +1365,18 @@ class Sessions {
     if (s.busy || s.stopping || s.transitioning || s.setting)
       throw new Error("Stop or finish this turn before changing views.");
     if (s.mode === mode) return { mode: s.mode, sessionRef: s.sessionRef };
+    if (mode === "native" && s.agent === "pi" && Object.keys(s.mcpOverrides).length)
+      throw new Error("Use CLI MCP defaults in this chat's controls before opening native view. Pi cannot carry Lumen's runtime MCP switches into its native terminal.");
     s.transitioning = true;
     try {
       await this.cancelDiscovery(s);
+      if (s.runtime && !s.runtime.hadPrompt && ["codex", "claude"].includes(s.agent)) s.sessionRef = "";
+      s.runtime?.close("Switching session views.");
       if (s.process) {
         await this.kill(s.process);
         s.process = null;
       }
+      if (mode === "native") await syncNativeMcp(s);
       if (s.shell) {
         await this.kill(s.shell);
         s.shell = null;
@@ -1331,6 +1418,7 @@ class Sessions {
     s.stopping = true;
     try {
       await this.cancelDiscovery(s);
+      s.runtime?.close("Turn stopped.");
       if (s.shell) {
         await this.kill(s.shell);
         s.shell = null;
@@ -1382,6 +1470,7 @@ class Sessions {
     clearTimeout(s.progressTimer);
     s.stopping = true;
     await this.cancelDiscovery(s);
+    s.runtime?.close("Chat closed.");
     s.pty?.kill();
     if (s.shell) await this.kill(s.shell);
     if (s.process) await this.kill(s.process);

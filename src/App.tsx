@@ -224,8 +224,11 @@ export default function App() {
         workMode: resume?.workMode || "",
         sessionRef: resume?.sessionRef || "",
         scratchId: resume?.scratchId || "",
+        controlId: resume?.controlId || "",
+        autoCompactTokens: resume?.autoCompactTokens ?? null,
+        mcpOverrides: resume?.mcpOverrides || {},
       };
-      let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string };
+      let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string };
       try { created = await api("session:create", request); }
       catch (error) {
         if (!resume || !startCwd) throw error;
@@ -249,6 +252,9 @@ export default function App() {
         model: resume?.model ?? config.model,
         effort: resume?.effort ?? config.effort ?? "",
         workMode: resume?.workMode || "",
+        controlId: created.controlId,
+        autoCompactTokens: resume?.autoCompactTokens ?? null,
+        mcpOverrides: resume?.mcpOverrides || {},
       };
       setTabs((old) => [...old, tab]);
       if (!resume || created.projectless || !isHiddenProject(created.root)) {
@@ -492,6 +498,8 @@ export default function App() {
             } else if (e.type === "phase") t.phase = e.phase;
             else if (e.type === "session") t.sessionRef = e.sessionRef;
             else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
+            else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
+            else if (e.type === "context") t.contextTokens = e.contextTokens;
             else if (e.type === "cwd") { t.cwd = e.cwd; t.cwdVersion = (t.cwdVersion || 0) + 1; }
             else if (e.type === "exit") t.exited = true;
             else if (["text", "tool", "error", "diagnostic"].includes(e.type)) {
@@ -1374,7 +1382,7 @@ export default function App() {
         <div>
           {updateStatus?.phase === "downloaded" && <button className="update-ready" title={`Lumen ${updateStatus.latest} is ready. Close Lumen to install, or restart now.`} onClick={() => api("updates:install").catch((e) => notify(e.message))}><Download size={12} />Update ready</button>}
           {active?.busy ? (
-            active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
+              active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
           ) : (
             <>
               <Circle size={9} />

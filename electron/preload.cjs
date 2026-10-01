@@ -29,6 +29,8 @@ const channels = new Set([
   "session:commands",
   "session:models",
   "session:configure",
+  "session:controls",
+  "session:controls-change",
   "session:shortcuts",
   "editor:dirty",
   "settings:load",
