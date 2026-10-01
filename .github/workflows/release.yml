@@ -31,7 +31,7 @@ jobs:
         run: |
           $version = node scripts/release-version.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Could not select the release version.' }
-          npm version $version --no-git-tag-version
+          npm version $version --no-git-tag-version --allow-same-version
           if ($LASTEXITCODE -ne 0) { throw 'Could not set the build version.' }
       - run: npm ci
       - run: npm run package
