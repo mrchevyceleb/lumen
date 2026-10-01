@@ -4,6 +4,7 @@ const path = require("node:path");
 const os = require("node:os");
 const TOML = require("@iarna/toml");
 const { cliOptions } = require("./models.cjs");
+const { codexAccountOptions } = require("./accounts.cjs");
 const uuid = () => crypto.randomUUID();
 const withoutNulls = (value) => Array.isArray(value) ? value.map(withoutNulls) : value && typeof value === "object" ?
   Object.fromEntries(Object.entries(value).filter(([, v]) => v !== null).map(([k, v]) => [k, withoutNulls(v)])) : value;
@@ -79,16 +80,19 @@ async function grokHome(owner, s) {
   return target;
 }
 async function claudeHome(owner, s) {
-  const source = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  const source = s.accountHome || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   const target = path.join(owner.dataDir, "claude", s.controlId);
   await fs.mkdir(target, { recursive: true, mode: 0o700 });
   const initialized = await exists(path.join(target, ".lumen-initialized"));
+  const binding = await fs.readFile(path.join(target, ".lumen-account-id"), "utf8").catch((e) => { if (e.code === "ENOENT") return ""; throw e; });
+  if (initialized && binding !== (s.accountId || "")) throw new Error("This Claude chat belongs to another account. Start a new chat to switch accounts.");
   if (!initialized) {
   for (const name of ["settings.json", "settings.local.json", "CLAUDE.md", ".credentials.json", "credentials.json"])
     await fs.copyFile(path.join(source, name), path.join(target, name)).catch((error) => { if (error.code !== "ENOENT") throw error; });
-  const config = process.env.CLAUDE_CONFIG_DIR ? path.join(source, ".claude.json") : path.join(os.homedir(), ".claude.json");
+  const config = s.accountId || process.env.CLAUDE_CONFIG_DIR ? path.join(source, ".claude.json") : path.join(os.homedir(), ".claude.json");
   await fs.copyFile(config, path.join(target, ".claude.json")).catch((error) => { if (error.code !== "ENOENT") throw error; });
   await fs.writeFile(path.join(target, ".lumen-initialized"), "1", { mode: 0o600 });
+  await fs.writeFile(path.join(target, ".lumen-account-id"), s.accountId || "", { mode: 0o600 });
   }
   // Keep installed skills/plugins and conversation storage available without
   // copying their large caches. The private .claude.json owns MCP preferences.
@@ -97,6 +101,8 @@ async function claudeHome(owner, s) {
       await fs.symlink(path.join(source, name), path.join(target, name), process.platform === "win32" ? "junction" : "dir");
   await fs.chmod(path.join(target, ".claude.json"), 0o600).catch(() => {});
   s.claudeHome = target;
+  await owner.accounts?.syncClaude(s);
+  owner.accounts?.watchClaude(s);
   return target;
 }
 async function resetMcpPreferences(s) {
@@ -110,7 +116,7 @@ async function resetMcpPreferences(s) {
     s.grokToolSelections = {};
   }
   if (s.agent === "claude" && s.claudeHome) {
-    const source = process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : path.join(os.homedir(), ".claude.json");
+    const source = s.accountHome ? path.join(s.accountHome, ".claude.json") : process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : path.join(os.homedir(), ".claude.json");
     const file = path.join(s.claudeHome, ".claude.json"), current = await jsonFile(file), baseline = await jsonFile(source);
     const copyMcp = (to, from = {}) => {
       for (const key of ["mcpServers", "disabledMcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers"]) {
@@ -252,7 +258,7 @@ class Runtime {
       env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s) };
       args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
       if (s.sessionRef) args.push("--resume", s.sessionRef);
-    } else if (s.agent === "codex") args = ["app-server", "--stdio"];
+    } else if (s.agent === "codex") args = ["app-server", "--stdio", ...codexAccountOptions(s)];
     else {
       env = { GROK_HOME: await grokHome(o, s) };
       const watermark = (await jsonFile(path.join(s.grokHome, "lumen-context.json"))).lastCompactedUsage;

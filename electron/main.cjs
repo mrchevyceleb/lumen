@@ -10,12 +10,13 @@ const {
 const { installZoom } = require("./zoom.cjs");
 const { openPaths, resolveOpenPath } = require("./launch.cjs");
 const { createUpdates } = require("./updates.cjs");
+const { Accounts } = require("./accounts.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
   app.setPath("userData", process.env.LUMEN_TEST_DATA);
 const initialPaths = openPaths(process.argv);
 if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) app.exit(0);
-let window, workspace, sessions, updates;
+let window, workspace, sessions, updates, accounts;
 let restartForUpdate = false;
 let pendingPaths = [...initialPaths];
 app.on("second-instance", (_event, argv, cwd, data) => {
@@ -51,10 +52,24 @@ app.whenReady().then(async () => {
   const dataDir = app.getPath("userData");
   workspace = new WorkspaceService(dataDir);
   await workspace.init();
+  accounts = new Accounts(dataDir, resolveLauncher, (event) => {
+    if (window && !window.isDestroyed()) window.webContents.send("accounts:event", event);
+  }, (id) => [...(sessions?.sessions.values() || [])].some((s) => s.accountId === id));
+  await accounts.init();
   sessions = new Sessions(workspace, dataDir, (event) => {
     if (window && !window.isDestroyed())
       window.webContents.send("session:event", event);
-  });
+  }, accounts);
+  handle("accounts:list", () => accounts.list());
+  handle("accounts:add", (value) => accounts.add(value));
+  handle("accounts:change", (id, value) => accounts.change(id, value));
+  handle("accounts:system", (agent) => accounts.useSystem(agent));
+  handle("accounts:remove", (id) => accounts.remove(id));
+  handle("accounts:login", (id, command) => accounts.login(id, command));
+  handle("accounts:write", (id, data) => accounts.write(id, data));
+  handle("accounts:resize", (id, cols, rows) => accounts.resize(id, cols, rows));
+  handle("accounts:buffer", (id) => accounts.buffer(id));
+  handle("accounts:cancel", (id) => accounts.cancel(id));
   updates = createUpdates({ app, notify: (status) => {
     if (window && !window.isDestroyed()) window.webContents.send("updates:status", status);
   } });
@@ -109,11 +124,11 @@ app.whenReady().then(async () => {
     workspace.worktree(root, branch, base),
   );
   handle("git:prs", (root) => workspace.prs(root));
-  handle("session:create", (options) => sessions.create(options));
+  handle("session:create", (options) => { const created = sessions.create(options); accounts.notify({ type: "changed" }); return created; });
   handle("session:start", (id) => sessions.startNative(id));
   handle("session:send", (id, message) => sessions.send(id, message));
   handle("session:stop", (id) => sessions.stop(id));
-  handle("session:close", (id) => sessions.close(id));
+  handle("session:close", async (id) => { await sessions.close(id); accounts.notify({ type: "changed" }); });
   handle("session:write", (id, data) => sessions.write(id, data));
   handle("session:resize", (id, cols, rows) => sessions.resize(id, cols, rows));
   handle("session:buffer", (id) => sessions.terminalBuffer(id));
@@ -221,6 +236,7 @@ app.whenReady().then(async () => {
   updates.start();
 });
 app.on("window-all-closed", async () => {
+  accounts?.dispose();
   try {
     await sessions?.closeAll();
   } catch {}

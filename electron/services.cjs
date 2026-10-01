@@ -9,6 +9,7 @@ const execute = promisify(execFile);
 const { discoverCommands, normalize } = require("./commands.cjs");
 const { catalog, efforts, piShortcuts, cliOptions, extraOptions } = require("./models.cjs");
 const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp } = require("./session-controls.cjs");
+const { accountEnvironment } = require("./accounts.cjs");
 const OMIT = new Set([
   ".git",
   "node_modules",
@@ -434,11 +435,12 @@ class WorkspaceService {
 }
 
 class Sessions {
-  constructor(workspaces, dataDir, emit) {
+  constructor(workspaces, dataDir, emit, accounts = null) {
     this.workspaces = workspaces;
     this.dataDir = dataDir;
     this.emit = emit;
     this.sessions = new Map();
+    this.accounts = accounts;
   }
   create({
     root = "",
@@ -455,6 +457,7 @@ class Sessions {
     controlId = "",
     autoCompactTokens = null,
     mcpOverrides = {},
+    accountId,
   }) {
     if (
       !["shell", "pi", "codex", "claude", "grok"].includes(agent) ||
@@ -488,6 +491,8 @@ class Sessions {
     controlId ||= id;
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(controlId)) throw new Error("Invalid session controls identifier.");
     const controls = policy({ autoCompactTokens, mcpOverrides });
+    if (!this.accounts && accountId) throw new Error("Saved accounts are unavailable.");
+    const account = this.accounts?.select(agent, accountId) || { accountId: "", accountName: "CLI default", accountHome: "" };
     if (agent === "claude" && controls.autoCompactTokens && (controls.autoCompactTokens < 100000 || controls.autoCompactTokens > 1000000))
       throw new Error("Claude's native auto-compact threshold supports 100,000–1,000,000 tokens.");
     const projectless = root === "";
@@ -506,7 +511,7 @@ class Sessions {
     if (cwd) {
       if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw new Error("Use an absolute working folder.");
       cwd = fsSync.realpathSync(cwd);
-      if (!inside(root, cwd) || !fsSync.statSync(cwd).isDirectory()) throw new Error("Working folder is outside the workspace.");
+      if ((!projectless && !inside(root, cwd)) || !fsSync.statSync(cwd).isDirectory()) throw new Error("Working folder is outside the workspace.");
     }
     const s = {
       id,
@@ -522,12 +527,13 @@ class Sessions {
       extraArgs,
       sessionRef,
       controlId,
+      ...account,
       ...controls,
       busy: false,
       output: "",
     };
     this.sessions.set(id, s);
-    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls };
+    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls, accountId: s.accountId, accountName: s.accountName };
   }
   async sessionControls(id) {
     const s = this.get(id);
@@ -646,7 +652,10 @@ class Sessions {
         // Query the actual persistent session, including extensions reloaded there.
         const data = await this.piRpc(s, "get_commands");
         result = { commands: normalize(data.commands, "pi"), origin: "Pi RPC" };
-      } else result = await discoverCommands(s, resolveLauncher(s.command), (child) => this.kill(child));
+      } else {
+        if (s.agent === "claude" && s.accountId) await claudeHome(this, s);
+        result = await discoverCommands(s, resolveLauncher(s.command), (child) => this.kill(child));
+      }
       if (!this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Command discovery was canceled.");
       s.commands = result;
       s.commandsAt = Date.now();
@@ -805,7 +814,7 @@ class Sessions {
       throw new Error("Use CLI MCP defaults before opening native Pi. Its terminal cannot inherit Lumen's runtime MCP switches.");
     const sessionEnv = {};
     if (s.agent === "grok") sessionEnv.GROK_HOME = s.grokHome || await grokHome(this, s);
-    if (s.agent === "claude") sessionEnv.CLAUDE_CONFIG_DIR = s.claudeHome || await claudeHome(this, s);
+    if (s.agent === "claude") sessionEnv.CLAUDE_CONFIG_DIR = await claudeHome(this, s);
     await syncNativeMcp(s);
     if (s.agent === "codex" && Object.keys(s.mcpOverrides).length && !s.codexLocalServers) {
       await (await ensureRuntime(this, s)).servers();
@@ -848,7 +857,7 @@ class Sessions {
       cwd: s.cwd || s.root,
       cols: 100,
       rows: 30,
-      env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor", ...sessionEnv },
+      env: { ...accountEnvironment(s), TERM: "xterm-256color", COLORTERM: "truecolor", ...sessionEnv },
     });
     s.pty.onData((data) => {
       s.cwdOscBuffer = (s.cwdOscBuffer || "") + data;
@@ -937,7 +946,7 @@ class Sessions {
         cwd: s.cwd || s.root,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, NO_COLOR: "1", ...env },
+        env: { ...accountEnvironment(s), NO_COLOR: "1", ...env },
       },
     );
     s.process = child;
@@ -1475,6 +1484,8 @@ class Sessions {
     s.pty?.kill();
     if (s.shell) await this.kill(s.shell);
     if (s.process) await this.kill(s.process);
+    for (const watch of s.accountWatches || []) watch.close();
+    await this.accounts?.syncClaude(s);
     this.sessions.delete(id);
   }
   async closeAll() {

@@ -56,6 +56,7 @@ import Conversation, { AgentMark } from "./Conversation";
 import NativeTerminal from "./NativeTerminal";
 import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./ProjectSidebar";
 import { useUpdates } from "./UpdatesPanel";
+import { AccountPicker, useAccounts } from "./AccountsPanel";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -69,6 +70,7 @@ type Dialog =
   "settings" | "worktrees" | "palette" | "open" | "newfile" | "tab" | null;
 export default function App() {
   const updateStatus = useUpdates();
+  const { accounts } = useAccounts();
   const [settings, setSettings] = useState<Settings>(structuredClone(defaults));
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -94,6 +96,17 @@ export default function App() {
   activeIdRef.current = activeId;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  useEffect(() => {
+    setTabs((old) => {
+      let changed = false;
+      const next = old.map((tab) => {
+        const profile = accounts.profiles.find((p) => p.id === tab.accountId);
+        if (!profile || profile.name === tab.accountName) return tab;
+        changed = true; return { ...tab, accountName: profile.name };
+      });
+      return changed ? next : old;
+    });
+  }, [accounts]);
   const projectTabsRef = useRef<Record<string, string>>({});
   const [panel, setPanel] = useState<"files" | "git">("files");
   const [sidebar, setSidebar] = useState(true);
@@ -103,6 +116,7 @@ export default function App() {
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [split, setSplit] = useState(50);
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [settingsSection, setSettingsSection] = useState("appearance");
   const [agentMenu, setAgentMenu] = useState(false);
   const [notice, setNotice] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
@@ -211,6 +225,8 @@ export default function App() {
     folder = root,
     resume?: Partial<Tab>,
     startCwd?: string,
+    accountId?: string,
+    scratchId?: string,
   ) => {
     const config = settingsRef.current.agents[agent];
     try {
@@ -224,12 +240,13 @@ export default function App() {
         effort: resume?.effort ?? config.effort ?? "",
         workMode: resume?.workMode || "",
         sessionRef: resume?.sessionRef || "",
-        scratchId: resume?.scratchId || "",
+        scratchId: resume?.scratchId || scratchId || "",
         controlId: resume?.controlId || "",
         autoCompactTokens: resume?.autoCompactTokens ?? null,
         mcpOverrides: resume?.mcpOverrides || {},
+        accountId: resume ? resume.accountId || "" : accountId,
       };
-      let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string };
+      let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string };
       try { created = await api("session:create", request); }
       catch (error) {
         if (!resume || !startCwd) throw error;
@@ -245,6 +262,8 @@ export default function App() {
         agent,
         mode,
         name: resume?.name || agentNames[agent],
+        accountId: created.accountId,
+        accountName: created.accountName,
         color: resume?.color,
         messages: resume?.messages || [],
         draft: resume?.draft || "",
@@ -1120,7 +1139,7 @@ export default function App() {
                       }
                       size={17}
                     />
-                    <span>{tab.name}</span>
+                    <span>{tab.name}{tab.accountId ? ` · ${tab.accountName}` : ""}</span>
                     {tab.busy ? (
                       tab.phase ? null : <span className="tiny-pulse" />
                     ) : tab.mode === "native" ? (
@@ -1213,6 +1232,9 @@ export default function App() {
                   </button>}
                 </div>
                 <div>
+                  {["claude", "codex"].includes(active.agent) && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
+                    if (id !== (active.accountId || "")) void addTab(active.agent, active.mode, active.projectless ? "" : active.root, undefined, active.cwd, id, active.projectless ? active.scratchId : undefined);
+                  }} onManage={() => { setSettingsSection("accounts"); setDialog("settings"); }} />}
                   <button className="view-button" onClick={switchView}>
                     <TerminalSquare size={13} />
                     {active.mode === "rich" ? "Native CLI" : "Readable view"}
@@ -1408,6 +1430,8 @@ export default function App() {
           onClose={() => setDialog(null)}
           available={boot.agents}
           onError={notify}
+          initialSection={settingsSection}
+          onAccountChat={(profile) => { void addTab(profile.agent, "rich", root, undefined, undefined, profile.id); setDialog(null); }}
         />
       )}
       {dialog === "open" && (

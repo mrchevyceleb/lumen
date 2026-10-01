@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { claudeAccountSettings, codexAccountOptions } = require("./accounts.cjs");
 const label = (id) => ({ xhigh: "Extra high", off: "Off" }[id] || id.charAt(0).toUpperCase() + id.slice(1));
 const efforts = (values) => (values || []).map((v) => typeof v === "string" ? { id: v, name: label(v), description: "" } :
   { id: v.reasoningEffort || v.id || v.value, name: v.label || label(v.reasoningEffort || v.id || v.value), description: v.description || "" });
@@ -36,6 +37,7 @@ function cliOptions(s) {
   if (s.agent === "claude") args.push("--dangerously-skip-permissions", "--settings", claudeSettings(s));
   if (s.agent === "grok") args.push("--sandbox", "off");
   if (s.agent === "codex") args.push("-c", 'sandbox_mode="danger-full-access"', "-c", 'approval_policy="never"', "-c", 'shell_environment_policy.inherit="all"', "-c", 'shell_environment_policy.ignore_default_excludes=true');
+  if (s.agent === "codex") args.push(...codexAccountOptions(s));
   if (s.effort) args.push(...(s.agent === "codex" ? ["-c", `model_reasoning_effort=${JSON.stringify(s.effort)}`] :
     [s.agent === "pi" ? "--thinking" : s.agent === "claude" ? "--effort" : "--reasoning-effort", s.effort]));
   if (["claude", "grok"].includes(s.agent)) args.push("--permission-mode", s.workMode === "plan" ? "plan" : "bypassPermissions");
@@ -52,7 +54,7 @@ function claudeSettings(s) {
     settings = JSON.parse(supplied.trim().startsWith("{") ? supplied : fs.readFileSync(path.resolve(s.cwd || s.root, supplied), "utf8"));
     if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("Claude's advanced --settings must contain a JSON object.");
   }
-  return JSON.stringify({ ...settings, sandbox: { ...settings.sandbox, enabled: false } });
+  return JSON.stringify(claudeAccountSettings(s, { ...settings, sandbox: { ...settings.sandbox, enabled: false } }));
 }
 // Picker choices and Lumen's full-access permission mode own their native flags.
 function extraOptions(s) {
@@ -64,7 +66,7 @@ function extraOptions(s) {
   for (let i = 0; i < s.extraArgs.length; i++) {
     const arg = s.extraArgs[i];
     if (flags.has(arg.split("=")[0])) { if (!arg.includes("=")) i++; continue; }
-    const ownedConfig = (value) => (s.model && /^model\s*=/.test(value)) || (s.effort && /^model_reasoning_effort\s*=/.test(value)) || /^(sandbox_mode|approval_policy|shell_environment_policy\.(inherit|ignore_default_excludes))\s*=/.test(value);
+    const ownedConfig = (value) => (s.model && /^model\s*=/.test(value)) || (s.effort && /^model_reasoning_effort\s*=/.test(value)) || (s.accountId && /^(cli_auth_credentials_store|model_provider|openai_base_url|chatgpt_base_url|model_providers\.(?:openai|"openai")\.[^=]+)\s*=/.test(value)) || /^(sandbox_mode|approval_policy|shell_environment_policy\.(inherit|ignore_default_excludes))\s*=/.test(value);
     if (s.agent === "codex" && ["-c", "--config"].includes(arg) && ownedConfig(s.extraArgs[i + 1] || "")) { i++; continue; }
     if (s.agent === "codex" && arg.startsWith("--config=") && ownedConfig(arg.slice(9))) continue;
     if (s.workMode && s.agent === "grok" && arg === "--no-plan") continue;

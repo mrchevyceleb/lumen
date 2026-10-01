@@ -1,6 +1,7 @@
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const { catalog, cliOptions, extraOptions } = require("./models.cjs");
+const { accountEnvironment, codexAccountOptions } = require("./accounts.cjs");
 
 // Read metadata from the installed CLI. No user prompt or model turn is sent.
 async function discoverCommands(s, launcher, kill) {
@@ -8,13 +9,13 @@ async function discoverCommands(s, launcher, kill) {
   const args = {
     pi: ["--mode", "rpc", "--no-session", ...model],
     claude: ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...model],
-    codex: ["app-server", "--stdio"],
+    codex: ["app-server", "--stdio", ...codexAccountOptions(s)],
     grok: [...model, "agent", "--no-leader", "stdio"],
   }[s.agent];
   if (!args) return { commands: [], origin: "Shell" };
   const child = spawn(launcher.file, [...launcher.args, ...args, ...extraOptions(s)], {
     cwd: s.root, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, NO_COLOR: "1" },
+    env: { ...accountEnvironment(s), NO_COLOR: "1" },
   });
   s.discoveryChild = child;
   let timer, buffer = "", stderr = "", settled = false, finish, grokCommands, grokReady = false, grokInfo;

@@ -40,6 +40,8 @@ const channels = new Set([
   "updates:status",
   "updates:check",
   "updates:install",
+  "accounts:list", "accounts:add", "accounts:change", "accounts:system", "accounts:remove",
+  "accounts:login", "accounts:write", "accounts:resize", "accounts:buffer", "accounts:cancel",
 ]);
 contextBridge.exposeInMainWorld("lumen", {
   invoke: async (channel, ...args) => {
@@ -57,6 +59,11 @@ contextBridge.exposeInMainWorld("lumen", {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on("updates:status", listener);
     return () => ipcRenderer.removeListener("updates:status", listener);
+  },
+  onAccounts: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("accounts:event", listener);
+    return () => ipcRenderer.removeListener("accounts:event", listener);
   },
   onOpenPaths: (callback) => {
     const listener = () => callback();

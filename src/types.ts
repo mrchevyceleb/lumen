@@ -1,5 +1,7 @@
 export type Agent = "shell" | "pi" | "codex" | "claude" | "grok";
 export type Mode = "rich" | "native";
+export interface AccountProfile { id: string; agent: "claude" | "codex"; name: string; signedIn: boolean; email: string; signingIn: boolean; inUse: boolean }
+export interface AccountInventory { profiles: AccountProfile[]; defaults: { claude: string; codex: string } }
 export interface SlashCommand {
   name: string;
   insertText: string;
@@ -69,6 +71,8 @@ export interface Tab {
   scratchId?: string;
   agent: Agent;
   mode: Mode;
+  accountId?: string;
+  accountName?: string;
   name: string;
   color?: string;
   messages: Message[];
@@ -189,6 +193,7 @@ declare global {
       invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
       onSession: (callback: (event: SessionEvent) => void) => () => void;
       onUpdate: (callback: (status: UpdateStatus) => void) => () => void;
+      onAccounts: (callback: (event: { type: string; id?: string; data?: string; code?: number; offset?: number }) => void) => () => void;
       onOpenPaths: (callback: () => void) => () => void;
       onClosing: (callback: () => Promise<void>) => () => void;
     };

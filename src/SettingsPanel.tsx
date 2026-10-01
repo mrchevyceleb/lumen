@@ -9,11 +9,14 @@ import {
   ImagePlus,
   RotateCcw,
   Download,
+  Users,
 } from "lucide-react";
 import { Modal } from "./Components";
 import { agentNames, defaults, themes } from "./settings";
 import type { Settings, Agent, AgentConfig } from "./types";
 import UpdatesPanel from "./UpdatesPanel";
+import AccountsPanel from "./AccountsPanel";
+import type { AccountProfile } from "./types";
 const backgrounds = [
   ["none", "Solid", "Still & focused"],
   ["aurora", "Aurora", "A slow wash of light"],
@@ -33,14 +36,18 @@ export default function SettingsPanel({
   onClose,
   available,
   onError,
+  initialSection = "appearance",
+  onAccountChat,
 }: {
   settings: Settings;
   update: (next: Settings) => void;
   onClose: () => void;
   available: Record<string, { available: boolean; file?: string }>;
   onError: (text: string) => void;
+  initialSection?: string;
+  onAccountChat: (profile: AccountProfile) => void;
 }) {
-  const [section, setSection] = useState("appearance");
+  const [section, setSection] = useState(initialSection);
   const set = (key: keyof Settings, value: any) =>
     update({ ...s, [key]: value });
   const agentSet = (agent: Agent, key: keyof AgentConfig, value: any) =>
@@ -62,6 +69,7 @@ export default function SettingsPanel({
             ["backgrounds", Waves, "Backgrounds"],
             ["type", Type, "Typography"],
             ["agents", Bot, "Agents"],
+            ["accounts", Users, "Accounts"],
             ["behavior", SlidersHorizontal, "Workspace"],
             ["updates", Download, "Updates"],
           ].map(([key, Icon, label]: any) => (
@@ -77,6 +85,7 @@ export default function SettingsPanel({
         </nav>
         <div className="settings-content">
           {section === "updates" && <UpdatesPanel />}
+          {section === "accounts" && <AccountsPanel settings={s} onStart={onAccountChat} />}
           {section === "appearance" && (
             <>
               <h3>A fresh coat of color</h3>
