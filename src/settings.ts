@@ -90,6 +90,7 @@ export const defaults: Settings = {
   coloredTabs: true,
   coloredAgents: true,
   compact: false,
+  chatLayout: "vertical",
   enterSend: true,
   agents: {
     shell: { command: "", model: "", extraArgs: [], color: "#a4b0bd" },
@@ -103,6 +104,7 @@ export function loadSettings(value: Partial<Settings> | null): Settings {
   return {
     ...defaults,
     ...value,
+    chatLayout: value?.chatLayout === "horizontal" ? "horizontal" : "vertical",
     agents: { ...defaults.agents, ...value?.agents },
   };
 }

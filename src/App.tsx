@@ -36,6 +36,8 @@ import {
   Sparkles,
   Circle,
   Download,
+  ListTree,
+  PanelTop,
 } from "lucide-react";
 import {
   api,
@@ -58,6 +60,7 @@ import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./Pr
 import { useUpdates } from "./UpdatesPanel";
 import { AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
+import SessionTabs from "./SessionTabs";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -87,21 +90,14 @@ export default function App() {
   const isHiddenProject = (folder: string) => projectsRef.current.some((p) => p.hidden && sameProject(p.root, folder));
   const rememberProject = (folder: string, name?: string, show = false) => {
     if (!folder) return;
-    setProjects((old) => old.some((p) => sameProject(p.root, folder)) ? show ? old.map((p) => sameProject(p.root, folder) ? { ...p, hidden: false } : p) : old : [...old, { root: folder, name: name || folder.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || folder }]);
+    setProjects((old) => old.some((p) => sameProject(p.root, folder)) ? show ? old.map((p) => sameProject(p.root, folder) ? { ...p, hidden: false, collapsed: false } : p) : old : [...old, { root: folder, name: name || folder.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || folder }]);
   };
   const [workspaces, setWorkspaces] = useState<Record<string, Workspace>>({});
   const [selectedRoot, setSelectedRoot] = useState("");
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState("");
   const contextBar = useRef<HTMLDivElement>(null);
-  const [nativeTop, setNativeTop] = useState(88);
-  useEffect(() => {
-    const element = contextBar.current;
-    if (!element) return;
-    const measure = () => setNativeTop(element.offsetTop + element.offsetHeight);
-    const observer = new ResizeObserver(measure); observer.observe(element); measure();
-    return () => observer.disconnect();
-  }, [activeId]);
+  const [nativeTop, setNativeTop] = useState(76);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const tabsRef = useRef(tabs);
@@ -120,6 +116,14 @@ export default function App() {
   const projectTabsRef = useRef<Record<string, string>>({});
   const [panel, setPanel] = useState<"files" | "git">("files");
   const [sidebar, setSidebar] = useState(true);
+  const verticalChats = settings.chatLayout === "vertical" && sidebar;
+  useEffect(() => {
+    const element = contextBar.current;
+    if (!element) return;
+    const measure = () => setNativeTop(element.offsetTop + element.offsetHeight);
+    const observer = new ResizeObserver(measure); observer.observe(element); measure();
+    return () => observer.disconnect();
+  }, [activeId, verticalChats]);
   const [sidebarWidth, setSidebarWidth] = useState(250);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocKey, setActiveDocKey] = useState("");
@@ -128,6 +132,14 @@ export default function App() {
   const [dialog, setDialog] = useState<Dialog>(null);
   const [settingsSection, setSettingsSection] = useState("appearance");
   const [agentMenu, setAgentMenu] = useState(false);
+  const [agentMenuRoot, setAgentMenuRoot] = useState<string | undefined>();
+  const agentMenuRef = useRef<HTMLDivElement>(null);
+  const agentMenuTrigger = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!agentMenu) return;
+    if (!agentMenuRef.current?.contains(document.activeElement)) agentMenuTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    agentMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [agentMenu, agentMenuRoot, verticalChats]);
   const [notice, setNotice] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
@@ -297,8 +309,9 @@ export default function App() {
         setActiveId(tab.id);
         setSelectedRoot(folder);
       }
-      if (!created.projectless) rememberProject(created.root);
+      if (!created.projectless) rememberProject(created.root, undefined, !resume);
       setAgentMenu(false);
+      setAgentMenuRoot(undefined);
       return tab;
     } catch (e: any) {
       notify(e.message);
@@ -848,9 +861,27 @@ export default function App() {
       : settings.accent
     : settings.accent;
   const hasNative = tabs.some((t) => t.mode === "native");
+  const selectTab = (tab: Tab) => {
+    setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
+    if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
+  };
+  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onClose: closeTab };
+  const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
+  const sessionActions = <div className="tab-actions">
+    <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
+    <div className="agent-menu-anchor">
+      <IconButton label="New agent session" active={agentMenu} onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}><Plus size={18} /></IconButton>
+      {agentMenu && <div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
+        {agents.map((agent) => <button key={agent} onClick={() => addTab(agent, "rich", agentMenuRoot ?? root)}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
+        <div className="menu-divider" /><button onClick={() => addTab("shell", "rich", "")}><TerminalSquare size={17} /><span>New chat without workspace</span></button>
+        <button onClick={() => { setAgentMenu(false); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
+      </div>}
+    </div>
+    <IconButton label="Settings" onClick={() => setDialog("settings")}><MoreHorizontal size={18} /></IconButton>
+  </div>;
   return (
     <div
-      className={`app ${settings.motion ? "" : "motion-off"} ${settings.theme === "Paper" ? "light" : ""}`}
+      className={`app ${verticalChats ? "vertical-layout" : "horizontal-layout"} ${settings.motion ? "" : "motion-off"} ${settings.theme === "Paper" ? "light" : ""}`}
       style={styleVars(settings) as CSSProperties}
       onClick={(e) => {
         if (!settings.playful) return;
@@ -977,10 +1008,15 @@ export default function App() {
           <>
             <aside className="sidebar" style={{ width: sidebarWidth }}>
               <ProjectSidebar projects={projects.filter((p) => !p.hidden)} activeRoot={root} ready={loaded}
+                tabs={tabs} activeId={activeId} settings={settings} {...tabActions} onLayout={toggleChatLayout} newChatRoot={agentMenu ? agentMenuRoot : undefined}
+                onNewChat={(folder) => {
+                  const open = () => { setAgentMenuRoot(folder); setAgentMenu(true); };
+                  if (folder) void openWorkspace(folder).then((value) => { if (value) open(); }); else open();
+                }}
                 counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root)).length]))}
                 onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")}
                 onChange={(next) => setProjects((old) => [...next, ...old.filter((p) => p.hidden)])} onRemove={removeProject} />
-              <button
+              {!verticalChats && <button
                 className="workspace-switch"
                 onClick={() => setDialog("open")}
               >
@@ -996,7 +1032,7 @@ export default function App() {
                   </small>
                 </span>
                 <ChevronDown size={13} />
-              </button>
+              </button>}
               <div className="sidebar-heading">
                 <span>{panel === "files" ? "EXPLORER" : "SOURCE CONTROL"}</span>
                 <div>
@@ -1129,114 +1165,11 @@ export default function App() {
           </>
         )}
         <main className="main">
-          <div className="tabbar">
-            {!sidebar && (
-              <IconButton label="Show sidebar" onClick={() => setSidebar(true)}>
-                <PanelLeftOpen size={17} />
-              </IconButton>
-            )}
-            <div className="session-tabs">
-              {tabs.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless).map((tab) => (
-                <div
-                  className={`session-tab ${activeId === tab.id ? "selected" : ""}`}
-                  key={tab.id}
-                  style={
-                    {
-                      "--tab-color": settings.coloredTabs
-                        ? tab.color || settings.agents[tab.agent].color
-                        : settings.border,
-                    } as CSSProperties
-                  }
-                >
-                  <button
-                    className="tab-select"
-                    onClick={() => {
-                      setActiveId(tab.id);
-                      setSelectedRoot(tab.projectless ? "" : tab.root);
-                    }}
-                    onDoubleClick={() => setDialog("tab")}
-                    title={`${tab.projectless ? "No workspace · Scratch folder" : tab.root}\n${tab.mode === "native" ? "Native CLI" : "Readable session"} · Double-click to customize`}
-                  >
-                    <AgentMark
-                      agent={tab.agent}
-                      color={
-                        settings.coloredAgents
-                          ? settings.agents[tab.agent].color
-                          : settings.muted
-                      }
-                      size={17}
-                    />
-                    <span>{tab.name}{tab.accountId ? ` · ${tab.accountName}` : ""}</span>
-                    {tab.busy ? (
-                      tab.phase ? null : <span className="tiny-pulse" />
-                    ) : tab.mode === "native" ? (
-                      <span className="native-tag">CLI</span>
-                    ) : null}
-                  </button>
-                  <IconButton
-                    label={`Close ${tab.name} tab`}
-                    onClick={() => closeTab(tab)}
-                  >
-                    <X size={12} />
-                  </IconButton>
-                </div>
-              ))}
-            </div>
-            <div className="tab-actions">
-              <div className="agent-menu-anchor">
-                <IconButton
-                  label="New agent session"
-                  active={agentMenu}
-                  onClick={() => setAgentMenu(!agentMenu)}
-                >
-                  <Plus size={18} />
-                </IconButton>
-                {agentMenu && (
-                  <div className="agent-menu">
-                    <div className="menu-label">START SOMETHING NEW</div>
-                    {agents.map((agent) => (
-                      <button key={agent} onClick={() => addTab(agent)}>
-                        <AgentMark
-                          agent={agent}
-                          color={settings.agents[agent].color}
-                          size={18}
-                        />
-                        <span>{agentNames[agent]}</span>
-                        <small>
-                          {agent === "shell"
-                            ? "Shell"
-                            : boot.agents[agent]?.available
-                              ? "Ready"
-                              : "Configure"}
-                        </small>
-                      </button>
-                    ))}
-                    <div className="menu-divider" />
-                    <button onClick={() => addTab("shell", "rich", "")}>
-                      <TerminalSquare size={17} />
-                      <span>New chat without workspace</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        setAgentMenu(false);
-                        setDialog("worktrees");
-                      }}
-                    >
-                      <Layers size={17} />
-                      <span>New worktree</span>
-                      <kbd>Ctrl ⇧ N</kbd>
-                    </button>
-                  </div>
-                )}
-              </div>
-              <IconButton
-                label="Settings"
-                onClick={() => setDialog("settings")}
-              >
-                <MoreHorizontal size={18} />
-              </IconButton>
-            </div>
-          </div>
+          {(!verticalChats || !active) && <div className="tabbar">
+            {!sidebar && <IconButton label="Show sidebar" onClick={() => setSidebar(true)}><PanelLeftOpen size={17} /></IconButton>}
+            <SessionTabs tabs={tabs.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless)} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
+            {sessionActions}
+          </div>}
           {active ? (
             <>
               <div className="contextbar" ref={contextBar}>
@@ -1246,6 +1179,7 @@ export default function App() {
                     style={{ background: activeColor }}
                   />
                   <span>{workspace?.name || "No workspace"}</span>
+                  {verticalChats && <strong className="active-chat-name" title={active.name}>{active.name}</strong>}
                   <ChevronDown size={11} />
                   {workspace ? <button
                     className="branch-chip"
@@ -1269,7 +1203,7 @@ export default function App() {
                   </button>
                   <button
                     className="switch-agent"
-                    onClick={() => setAgentMenu(!agentMenu)}
+                    onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}
                   >
                     <AgentMark
                       agent={active.agent}
@@ -1279,6 +1213,7 @@ export default function App() {
                     {agentNames[active.agent]}
                     <ChevronDown size={12} />
                   </button>
+                  {verticalChats && sessionActions}
                 </div>
               </div>
               <div className="workspace-content">

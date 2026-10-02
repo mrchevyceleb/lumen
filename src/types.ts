@@ -146,6 +146,7 @@ export interface Settings {
   coloredTabs: boolean;
   coloredAgents: boolean;
   compact: boolean;
+  chatLayout: "vertical" | "horizontal";
   enterSend: boolean;
   agents: Record<Agent, AgentConfig>;
 }

@@ -12,7 +12,9 @@ Installed Lumen checks GitHub after launch and every six hours, downloads newer 
 
 Older portable/manual copies need the Setup installer once to enable updates. Close them before installing. The optional portable build remains available for development, but does not update itself.
 
-Open a new session with the **+** beside the tabs. Choose Terminal, Pi, Codex, Claude Code, or Grok. Each tab has its own process and working folder. Double-click a tab to rename it or pick its color.
+Open a new session with **+** in the chat header or beside a project. Choose Terminal, Pi, Codex, Claude Code, or Grok. Each chat has its own process and working folder. Double-click a chat name to rename it or pick its color.
+
+Chats appear vertically beneath their projects by default, with workspace-free chats grouped under **No workspace**. Collapse a project's chats using its chevron. Choose **Settings → Workspace → Chat layout → Horizontal tabs** for the tab row, or use the layout button beside **Projects** or **+** in the chat header to switch instantly. Your choice and project collapse state are saved. Switching layouts preserves running sessions, history, queues, and drafts. Hiding the sidebar temporarily shows horizontal tabs so chats remain accessible. Slimmer headers and a wider conversation column leave more room for your work; the separate compact-message setting is still available.
 
 The project list in the left sidebar has no fixed project limit. Add repositories with its **+**, click a project to return to its chats, and use its options to pin, rename, reorder, or **Remove project**. Removal hides the project from the sidebar across restarts. Files and chats stay available, and running sessions continue. Reopen the folder with **+** or **Ctrl O** to bring back its chats and saved name/pin. You can also drag the grips to reorder projects. Search appears when the list grows. Each project shows its own chat tabs; switching keeps other projects' processes, conversations, and unsaved editors open. Projects and their organization restore on restart.
 

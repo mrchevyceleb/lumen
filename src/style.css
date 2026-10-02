@@ -316,7 +316,7 @@ p {
   transition: none !important;
 }
 .titlebar {
-  height: 48px;
+  height: 40px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -398,7 +398,7 @@ kbd {
   display: grid;
   place-items: center;
   width: 44px;
-  height: 47px;
+  height: 39px;
   color: var(--muted);
 }
 .window-controls button:hover {
@@ -416,7 +416,7 @@ kbd {
   position: relative;
 }
 .rail {
-  width: 58px;
+  width: 52px;
   flex-shrink: 0;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 90%, transparent);
@@ -424,13 +424,13 @@ kbd {
   flex-direction: column;
   align-items: center;
   justify-content: space-between;
-  padding: 17px 0 12px;
+  padding: 12px 0 10px;
 }
 .rail > div {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 15px;
+  gap: 10px;
 }
 .icon-button {
   display: inline-flex;
@@ -452,15 +452,15 @@ kbd {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .rail .icon-button {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
 }
 .rail .icon-button.active::before {
   content: "";
   position: absolute;
   width: 2px;
   height: 18px;
-  left: -10px;
+  left: -9px;
   background: var(--accent);
   border-radius: 2px;
 }
@@ -500,12 +500,14 @@ kbd {
   align-items: center;
   text-align: left;
   width: 100%;
-  padding: 21px 17px;
+  padding: 12px;
   gap: 11px;
   flex-shrink: 0;
 }
-.project-sidebar { display: flex; flex-direction: column; max-height: min(390px, 44vh); flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 13px 9px 10px; }
-.project-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 7px 9px; font-size: 9px; font-weight: 600; letter-spacing: 1.2px; color: var(--muted); }
+.project-sidebar { display: flex; flex-direction: column; max-height: min(390px, 44vh); flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 10px 7px 8px; }
+.project-sidebar.with-chats { max-height: min(520px, 52vh); }
+.project-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 7px 6px; font-size: 9px; font-weight: 600; letter-spacing: 1.2px; color: var(--muted); }
+.project-heading > div { display: flex; gap: 3px; }
 .project-heading small { letter-spacing: 0; margin-left: 5px; opacity: .55; }
 .project-heading button { display: grid; place-items: center; padding: 4px; border-radius: 5px; }
 .project-heading button:hover { background: var(--border); color: var(--text); }
@@ -517,14 +519,26 @@ kbd {
 .project-row.drop-target { border-color: var(--accent); }
 .project-grip { color: var(--muted); opacity: .25; display: grid; cursor: grab; }
 .project-row:hover .project-grip { opacity: .7; }
-.project-open { display: flex; align-items: center; gap: 9px; min-width: 0; text-align: left; padding: 10px 3px; font-size: 12px; }
+.project-open { display: flex; align-items: center; gap: 7px; min-width: 0; text-align: left; padding: 7px 3px; font-size: 12px; }
 .project-open svg { color: var(--muted); }
 .project-row.selected .project-open svg { color: var(--accent); }
 .project-open > span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .project-open small { font-size: 9px; color: var(--muted); padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, var(--muted) 10%, transparent); }
 .project-options { display: grid; place-items: center; color: var(--muted); padding: 4px; }
 .project-row > input { min-width: 0; font-size: 12px; padding: 7px 5px; }
-.project-menu { grid-column: 2 / 4; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--surface); padding: 4px; border-radius: 7px; margin: 0 4px 6px 0; }
+.project-menu { grid-column: 2 / -1; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--surface); padding: 4px; border-radius: 7px; margin: 0 4px 6px 0; }
+.with-chats .project-row { grid-template-columns: 12px 18px minmax(0, 1fr) 22px 22px; }
+.project-collapse { display: grid; place-items: center; color: var(--muted); padding: 6px 0; }
+.project-collapse:hover, .project-options:hover { color: var(--text); }
+.project-entry + .project-entry { margin-top: 3px; }
+.scratch-chats { margin-top: 8px; }
+.scratch-heading { display: flex; align-items: center; gap: 4px; padding: 0 3px 0 12px; }
+.scratch-heading > button { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; padding: 7px 0; }
+.scratch-heading > button:first-child { flex: 1; min-width: 0; text-align: left; }
+.scratch-heading span { flex: 1; }
+.scratch-heading small { font-size: 9px; opacity: .7; }
+.scratch-heading > button:last-child { padding: 5px; }
+.scratch-heading > button:hover { color: var(--text); }
 .project-menu button { text-align: left; font-size: 10px; padding: 7px; border-radius: 4px; }
 .project-menu button:hover { background: var(--border); }
 .project-menu .remove-project { border-top: 1px solid var(--border); margin-top: 3px; }
@@ -571,7 +585,7 @@ kbd {
   border-radius: 9px;
 }
 .sidebar-heading {
-  padding: 10px 12px 10px 17px;
+  padding: 7px 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -646,7 +660,7 @@ kbd {
   flex-shrink: 0;
 }
 .sidebar-bottom {
-  padding: 17px 16px 12px;
+  padding: 8px 12px;
   border-top: 1px solid var(--border);
 }
 .eyebrow {
@@ -656,18 +670,16 @@ kbd {
   color: var(--muted);
 }
 .sidebar-bottom .eyebrow {
-  font-size: 8px;
-  letter-spacing: 1px;
-  opacity: 0.65;
+  display: none;
 }
 .worktree-shortcut {
-  margin-top: 13px;
+  margin-top: 0;
   display: flex;
   align-items: center;
   gap: 9px;
   width: 100%;
   text-align: left;
-  padding: 10px 0;
+  padding: 5px 0;
   color: var(--muted);
 }
 .worktree-shortcut:hover {
@@ -679,13 +691,10 @@ kbd {
   font-size: 11px;
 }
 .worktree-shortcut small {
-  display: block;
-  font-size: 10px;
-  margin-top: 4px;
-  opacity: 0.65;
+  display: none;
 }
 .sidebar-tips {
-  display: flex;
+  display: none;
   gap: 8px;
   align-items: center;
   margin-top: 13px;
@@ -735,7 +744,7 @@ kbd {
   overflow: hidden;
 }
 .tabbar {
-  height: 43px;
+  height: 36px;
   display: flex;
   align-items: stretch;
   flex-shrink: 0;
@@ -758,7 +767,7 @@ kbd {
   padding-right: 6px;
   border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
   border-top: 2px solid transparent;
-  min-width: 137px;
+  min-width: 125px;
   max-width: 240px;
   flex-shrink: 0;
   position: relative;
@@ -794,9 +803,25 @@ kbd {
   opacity: 0;
 }
 .session-tab:hover > .icon-button,
+.session-tab:focus-within > .icon-button,
 .session-tab.selected > .icon-button {
   opacity: 0.7;
 }
+.vertical-chats { display: flex; flex-direction: column; gap: 2px; padding: 2px 1px 4px 27px; }
+.vertical-chats .session-tab { min-width: 0; max-width: none; min-height: 30px; border: 0; border-left: 2px solid transparent; border-radius: 5px; padding-right: 3px; }
+.vertical-chats .session-tab.selected { border-left-color: var(--tab-color); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.vertical-chats .tab-select { padding: 6px 5px 6px 7px; gap: 6px; font-size: 11px; text-align: left; }
+.vertical-chats .tab-select > span:not(.agent-mark):not(.tiny-pulse):not(.chat-phase):not(.native-tag) { flex: 1; }
+.chat-phase { color: var(--accent); flex-shrink: 0; }
+.screen-reader-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.active-chat-name { font-size: 11px; font-weight: 500; color: var(--text); max-width: 150px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chat-layout-setting { margin: 24px 0; }
+.chat-layout-setting > strong { font-size: 13px; font-weight: 550; }
+.chat-layout-setting > p { font-size: 12px; line-height: 1.6; margin: 7px 0 12px; }
+.chat-layout-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-layout-picker button { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--muted); }
+.chat-layout-picker button:hover { color: var(--text); }
+.chat-layout-picker button[aria-pressed="true"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .native-tag {
   font-size: 8px;
   border: 1px solid var(--border);
@@ -807,23 +832,25 @@ kbd {
 .tab-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 10px;
+  gap: 2px;
+  padding: 0 4px;
   border-left: 1px solid var(--border);
 }
 .agent-menu-anchor {
   position: relative;
 }
 .agent-menu {
-  position: fixed;
-  right: 22px;
-  top: 90px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
   z-index: 30;
   background: var(--surface);
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 11px;
   width: 260px;
+  max-height: min(440px, 65vh);
+  overflow-y: auto;
   box-shadow: 0 18px 60px #0006;
 }
 .menu-label {
@@ -881,12 +908,10 @@ kbd {
   padding: 0 3px;
 }
 .contextbar {
-  min-height: 45px;
-  padding-top: 7px;
-  padding-bottom: 7px;
+  min-height: 38px;
   flex-wrap: wrap;
-  padding: 7px 26px;
-  gap: 8px;
+  padding: 5px 16px;
+  gap: 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -899,7 +924,7 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   min-width: 0;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
 }
 .context-indicator { display: flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
@@ -984,15 +1009,15 @@ kbd {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 40px max(28px, calc((100% - 900px) / 2)) 24px;
+  padding: 24px max(20px, calc((100% - 1100px) / 2)) 18px;
   scrollbar-gutter: stable;
 }
 .message-list {
-  max-width: 880px;
+  max-width: 1100px;
   margin: 0 auto;
 }
 .assistant-message {
-  margin-bottom: 38px;
+  margin-bottom: 28px;
 }
 .message-author {
   display: flex;
@@ -1020,7 +1045,7 @@ kbd {
   letter-spacing: 0;
 }
 .prose p {
-  margin: 0 0 19px;
+  margin: 0 0 15px;
 }
 .prose p:last-child {
   margin-bottom: 0;
@@ -1031,7 +1056,7 @@ kbd {
 .prose ul,
 .prose ol {
   padding-left: 26px;
-  margin: 16px 0 22px;
+  margin: 12px 0 16px;
 }
 .prose li {
   margin: 6px 0;
@@ -1305,7 +1330,7 @@ kbd {
 }
 .composer-wrap {
   flex-shrink: 0;
-  padding: 14px max(26px, calc((100% - 900px) / 2)) 12px;
+  padding: 10px max(20px, calc((100% - 1100px) / 2)) 9px;
 }
 .composer-anchor { position: relative; }
 .composer-slash { font-size: 17px; font-weight: 500; color: var(--accent); }
@@ -1364,8 +1389,8 @@ kbd {
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.6;
-  padding: 17px 19px 6px;
-  min-height: 77px;
+  padding: 12px 15px 6px;
+  min-height: 64px;
   max-height: 180px;
   outline: none;
 }
@@ -1376,7 +1401,7 @@ kbd {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 7px 12px 10px;
+  padding: 5px 10px 7px;
 }
 .composer-footer > div {
   display: flex;
@@ -1420,7 +1445,7 @@ kbd {
 .composer-caption {
   display: flex;
   justify-content: space-between;
-  margin: 10px 5px 0;
+  margin: 7px 5px 0;
   color: var(--muted);
   font-size: 9px;
   opacity: 0.58;
@@ -3060,13 +3085,13 @@ kbd {
     display: none;
   }
   .contextbar {
-    padding: 0 18px;
+    padding: 5px 12px;
   }
   .conversation-scroll {
-    padding: 27px 24px 20px;
+    padding: 20px 20px 16px;
   }
   .composer-wrap {
-    padding: 12px 22px;
+    padding: 9px 18px;
   }
   .input-hint {
     display: none;
@@ -3099,7 +3124,7 @@ kbd {
   }
   .contextbar {
     font-size: 10px;
-    padding: 0 16px;
+    padding: 5px 12px;
   }
   .contextbar .view-button {
     font-size: 9px;
@@ -3144,7 +3169,7 @@ kbd {
 }
 .model-controls {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  border-top: 1px solid var(--border); padding: 9px 12px 11px;
+  border-top: 1px solid var(--border); padding: 6px 10px 7px;
 }
 .model-control {
   display: inline-flex; align-items: center; gap: 7px; background: transparent;

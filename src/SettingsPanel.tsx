@@ -10,6 +10,8 @@ import {
   RotateCcw,
   Download,
   Users,
+  ListTree,
+  PanelTop,
 } from "lucide-react";
 import { Modal } from "./Components";
 import { agentNames, defaults, themes } from "./settings";
@@ -362,6 +364,14 @@ export default function SettingsPanel({
           {section === "behavior" && (
             <>
               <h3>A workspace that fits</h3>
+              <div className="chat-layout-setting">
+                <strong>Chat layout</strong>
+                <p className="muted">Nest chats beneath each project, or keep tabs across the top.</p>
+                <div className="chat-layout-picker">
+                  <button aria-pressed={s.chatLayout === "vertical"} onClick={() => set("chatLayout", "vertical")}><ListTree size={17} />Vertical chats</button>
+                  <button aria-pressed={s.chatLayout === "horizontal"} onClick={() => set("chatLayout", "horizontal")}><PanelTop size={17} />Horizontal tabs</button>
+                </div>
+              </div>
               <Toggle
                 title="Enter to send"
                 detail="Shift + Enter always adds a new line."
