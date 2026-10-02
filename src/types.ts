@@ -105,6 +105,7 @@ export interface Tab {
 }
 export interface McpConnection {
   name: string; source: string; status: string; enabled: boolean; tools: number | null; canToggle: boolean;
+  canReconnect?: boolean; error?: string; authUrl?: string;
 }
 export interface SessionControlsState {
   servers: McpConnection[]; contextTokens: number | null; contextWindow?: number | null; autoCompactTokens: number | null;

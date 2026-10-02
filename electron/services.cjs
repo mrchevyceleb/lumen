@@ -571,6 +571,7 @@ class Sessions {
     if (s.agent === "shell" || s.mode !== "rich" || s.busy || s.stopping || s.transitioning || s.setting)
       throw new Error("Finish this turn in readable view before changing session controls.");
     s.setting = true;
+    let reconnectWarning = "";
     try {
       if (change.resetMcps === true) {
         await this.resetRuntime(s);
@@ -585,6 +586,14 @@ class Sessions {
         else await this.resetRuntime(s);
         if (s.agent === "grok" && s.grokHome) await fs.writeFile(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: null }));
         s.autoCompactTokens = next.autoCompactTokens;
+      } else if (change.reconnect === true || change.reconnectAll === true) {
+        if (s.agent !== "claude" || (change.reconnectAll !== true && typeof change.server !== "string")) throw new Error("Use this CLI's native MCP controls to reconnect.");
+        const info = await this.readControls(s);
+        const targets = change.reconnectAll === true ? info.servers.filter((r) => r.canReconnect && r.enabled && s.mcpOverrides[r.name] !== false && ["failed", "needs-auth", "disconnected", "session-token-rejected"].includes(r.status)) : info.servers.filter((r) => r.name === change.server);
+        if (targets.some((r) => !r.canReconnect || !r.enabled || s.mcpOverrides[r.name] === false) || (change.reconnectAll !== true && !targets.length)) throw new Error("Enable this MCP for this chat before reconnecting it.");
+        const results = await Promise.allSettled(targets.map((server) => s.runtime.request("mcp_reconnect", { serverName: server.name })));
+        const failures = results.flatMap((r, i) => r.status === "rejected" ? [`${targets[i].name}: ${r.reason.message}`] : []);
+        if (failures.length) reconnectWarning = "Some MCPs still need attention. " + failures.join(" · ");
       } else {
         if (typeof change.server !== "string" || typeof change.enabled !== "boolean") throw new Error("Choose an MCP and its connection state.");
         const info = await this.readControls(s);
@@ -596,7 +605,8 @@ class Sessions {
         s.mcpOverrides = { ...s.mcpOverrides, [change.server]: change.enabled };
       }
       this.event(s, { type: "session-controls", autoCompactTokens: s.autoCompactTokens, mcpOverrides: s.mcpOverrides });
-      return await this.readControls(s);
+      const next = await this.readControls(s);
+      return reconnectWarning ? { ...next, warning: [next.warning, reconnectWarning].filter(Boolean).join(" ") } : next;
     } finally { s.setting = false; }
   }
   async resetRuntime(s) {
@@ -940,6 +950,7 @@ class Sessions {
     s.activeTools = new Set();
     s.turn = uuid();
     s.hadText = false;
+    s.messageStreams = new Map();
     s.piRunActive = false;
     s.piCompletionStateId = undefined;
     s.piPromptId = undefined;
@@ -1214,27 +1225,43 @@ class Sessions {
         this.grokPhase(s, undefined);
       }
     }
-    if (event?.type === "message_start")
+    s.messageStreams ||= new Map();
+    const streamScope = e.parent_tool_use_id || "";
+    if (event?.type === "message_start") {
       s.messageId = event.message?.id || uuid();
+      s.messageStreams.set(streamScope, { id: s.messageId });
+    }
+    const stream = s.messageStreams.get(streamScope);
+    if (stream && event?.type === "content_block_start") {
+      stream.index = event.index ?? 0;
+      stream.type = event.content_block?.type;
+    }
     if (
       event?.type === "content_block_delta" &&
       event.delta?.type === "text_delta"
-    )
+    ) {
+      if (stream) { stream.index = event.index ?? 0; stream.type = "text"; }
       this.text(
         s,
         event.delta.text,
-        `${s.messageId || "answer"}:${event.index || 0}`,
+        `${stream?.id || s.messageId || "answer"}:${event.index ?? 0}`,
       );
+    }
     if (e.type === "assistant" && e.message?.content)
       for (let i = 0; i < e.message.content.length; i++) {
         const block = e.message.content[i];
-        if (block.type === "text")
+        if (block.type === "text") {
+          // Newer Claude sends one completed block per assistant record, before
+          // its content_block_stop. Its array index is not the stream's index.
+          const matching = [...s.messageStreams.values()].find((value) => value.id === e.message.id);
+          const index = e.message.content.length === 1 && matching?.type === "text" ? matching.index ?? i : i;
           this.text(
             s,
             block.text,
-            `${e.message.id || s.messageId || "answer"}:${i}`,
+            `${e.message.id || stream?.id || s.messageId || "answer"}:${index}`,
             true,
           );
+        }
         if (block.type === "tool_use")
           this.tool(
             s,

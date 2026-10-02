@@ -1340,7 +1340,7 @@ kbd {
 }
 .composer-wrap {
   flex-shrink: 0;
-  padding: 10px max(20px, calc((100% - 1100px) / 2)) 9px;
+  padding: 6px max(20px, calc((100% - 1100px) / 2)) 8px;
 }
 .composer-anchor { position: relative; }
 .composer-slash { font-size: 17px; font-weight: 500; color: var(--accent); }
@@ -1380,6 +1380,7 @@ kbd {
 .native-terminal.has-command-draft > .terminal-host { height: calc(100% - 42px); }
 @media (prefers-reduced-motion: reduce) { .command-menu, .command-refreshing { animation: none; } }
 .composer {
+  container-type: inline-size;
   border: 1px solid color-mix(in srgb, var(--border) 90%, var(--muted));
   background: color-mix(in srgb, var(--surface) 80%, var(--bg));
   border-radius: 13px;
@@ -1393,46 +1394,51 @@ kbd {
 .composer textarea {
   display: block;
   width: 100%;
+  flex: 1;
+  min-width: 0;
+  field-sizing: content;
   background: none;
   border: 0;
   resize: none;
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.6;
-  padding: 12px 15px 6px;
-  min-height: 64px;
-  max-height: 180px;
+  padding: 10px 13px;
+  min-height: 42px;
+  max-height: min(180px, 25vh);
+  overflow-y: auto;
   outline: none;
 }
 .composer textarea:focus-visible {
   outline: none;
 }
-.composer-footer {
+.composer-input-row {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 5px 10px 7px;
+  align-items: flex-end;
 }
-.composer-footer > div {
+.composer-send-actions {
   display: flex;
   align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 10px;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 6px 8px 6px 0;
 }
-.composer-divider {
-  width: 1px;
-  height: 11px;
-  background: var(--border);
-  margin: 0 4px;
+.composer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  border-top: 1px solid var(--border);
+  padding: 4px 8px 5px;
 }
-.local-tag {
-  opacity: 0.6;
+.composer-toolbar > .icon-button {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
 }
-.input-hint {
-  opacity: 0.55;
-  font-size: 9px;
-  margin-right: 6px;
+@container (max-width: 380px) {
+  .composer-toolbar { flex-wrap: nowrap; overflow-x: auto; }
+  .composer-toolbar .model-control { flex-shrink: 0; max-width: 180px; }
 }
 .send-button {
   width: 30px;
@@ -1453,18 +1459,10 @@ kbd {
   color: var(--bg);
 }
 .composer-caption {
-  display: flex;
-  justify-content: space-between;
-  margin: 7px 5px 0;
+  margin: 5px 5px 0;
   color: var(--muted);
   font-size: 9px;
   opacity: 0.58;
-  gap: 8px;
-}
-.composer-caption > span:first-child {
-  display: flex;
-  align-items: center;
-  gap: 3px;
 }
 .attachment {
   display: flex;
@@ -1477,6 +1475,8 @@ kbd {
   border: 1px solid var(--border);
   border-radius: 5px;
   width: fit-content;
+  max-width: calc(100% - 30px);
+  overflow-wrap: anywhere;
 }
 .attachment button {
   font-size: 15px;
@@ -2702,15 +2702,14 @@ kbd {
 .mcp-server-info { flex: 1; min-width: 0; display: grid; gap: 4px; }
 .mcp-server-info strong { font-size: 12px; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
 .mcp-server-info > span { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.mcp-server-info > .mcp-failure-detail { color: #e4a398; white-space: normal; }
+.mcp-server-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; max-width: 150px; }
+.mcp-recovery-button { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 11px; padding: 4px 2px; }
 .mcp-server-row .toggle { width: 32px; height: 19px; border: 1px solid var(--border); background: var(--surface); border-radius: 20px; padding: 2px; flex-shrink: 0; }
 .mcp-server-row .toggle > span { display: block; width: 13px; height: 13px; background: var(--muted); border-radius: 50%; transition: transform .15s; }
 .mcp-server-row .toggle.on { background: var(--accent); border-color: var(--accent); }
 .mcp-server-row .toggle.on > span { transform: translateX(13px); background: var(--bg); }
 .mcp-server-row .toggle:disabled { opacity: .4; cursor: not-allowed; }
-.session-access-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 6px 14px 10px; }
-.session-access-bar button { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: var(--muted); font-size: 11px; padding: 3px 0; }
-.session-access-bar button:hover { color: var(--text); }
-.session-access-bar button:disabled { opacity: .4; }
 .toggle-row {
   display: flex;
   align-items: center;
@@ -3101,10 +3100,7 @@ kbd {
     padding: 20px 20px 16px;
   }
   .composer-wrap {
-    padding: 9px 18px;
-  }
-  .input-hint {
-    display: none;
+    padding: 6px 18px 8px;
   }
   .status-ticker {
     display: none;
@@ -3164,9 +3160,6 @@ kbd {
   .composer-caption {
     font-size: 8px;
   }
-  .local-tag {
-    display: none;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -3177,14 +3170,16 @@ kbd {
     scroll-behavior: auto !important;
   }
 }
+@media (max-width: 800px) {
+  .sidebar { min-width: 160px; max-width: 160px; }
+}
 .model-controls {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  border-top: 1px solid var(--border); padding: 6px 10px 7px;
+  display: contents;
 }
 .model-control {
   display: inline-flex; align-items: center; gap: 7px; background: transparent;
-  color: var(--muted); padding: 6px 9px; border-radius: 8px; font-size: 12px;
-  max-width: min(360px, 60%); border: 1px solid transparent;
+  color: var(--muted); padding: 5px 7px; border-radius: 7px; font-size: 11px;
+  min-width: 0; max-width: min(280px, 50%); border: 1px solid transparent;
 }
 .model-control span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-control:hover, .model-control:focus-visible { color: var(--text); background: var(--surface); border-color: var(--border); }

@@ -321,7 +321,8 @@ class Runtime {
       raw = (await this.request("mcp_status")).mcpServers || [];
       this.rawServers = raw;
       return raw.map((r) => ({ name: r.name, status: r.status || "unknown", enabled: r.status !== "disabled", tools: r.tools?.length ?? null,
-        source: r.scope || r.config?.scope || "Claude", canToggle: true }));
+        source: r.scope || r.config?.scope || "Claude", canToggle: true, canReconnect: true,
+        error: typeof r.error === "string" ? r.error : "", authUrl: r.scope === "claudeai" || r.config?.type === "claudeai-proxy" ? "https://claude.ai/customize/connectors" : "" }));
     }
     if (s.agent === "codex") {
       raw = []; let cursor;

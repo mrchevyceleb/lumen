@@ -12,10 +12,10 @@ import {
   FolderOpen,
   ArrowUp,
   Square,
-  Command,
   Paperclip,
   ExternalLink,
   Cable,
+  Shrink,
   LogIn,
 } from "lucide-react";
 import { Busy, CopyButton, IconButton } from "./Components";
@@ -212,6 +212,8 @@ export default function Conversation({
   const color = settings.coloredAgents
     ? settings.agents[tab.agent].color
     : settings.accent;
+  const statusCaption = controlPending ? "Reading or applying CLI controls…" : isCommandInput && commandLoading ? "Discovering commands…" : isCommandInput && commandError ? commandError : tab.phase === "finishing" ? "Grok has finished its response; the CLI is closing." : tab.phase === "waiting" ? "Grok's output has paused. Its CLI may still be running hooks or continuing the turn." : "";
+  const compactLabel = tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()} tokens` : "Auto-compact · CLI default";
   return (
     <div className={`conversation ${settings.compact ? "compact" : ""}`}>
       <div
@@ -364,9 +366,10 @@ export default function Conversation({
               </button>
             </div>
           )}
+          <div className="composer-input-row">
           <textarea
             ref={inputRef}
-            rows={2}
+            rows={1}
             role={tab.agent === "shell" ? undefined : "combobox"}
             aria-autocomplete={tab.agent === "shell" ? undefined : "list"}
             aria-expanded={tab.agent === "shell" ? undefined : menuOpen}
@@ -408,8 +411,22 @@ export default function Conversation({
               }
             }}
           />
-          <div className="composer-footer">
-            <div>
+          <div className="composer-send-actions">
+              {tab.busy && (
+                <button className="send-button stop-button" aria-label="Stop running turn" title="Stop running turn" onClick={onStop}>
+                  <Square size={13} fill="currentColor" />
+                </button>
+              )}
+              {(!tab.busy || tab.agent !== "shell") && (
+                <button className="send-button" aria-label={tab.busy ? "Queue message" : "Send message"}
+                  title={`${tab.busy ? "Queue message" : "Send message"} · ${settings.enterSend ? "Enter · Shift+Enter for a new line" : "Ctrl+Enter"}`}
+                  disabled={!input.trim() || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)} onClick={submit}>
+                  <ArrowUp size={18} />
+                </button>
+              )}
+          </div>
+          </div>
+          <div className="composer-toolbar">
               {!tab.projectless && <IconButton
                 label="Attach active file reference"
                 onClick={onAttach}
@@ -421,59 +438,26 @@ export default function Conversation({
                 setCaret(1); setDismissedCommands(false); setFocused(true);
                 requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(1, 1); });
               }}><span className="composer-slash">/</span></IconButton>}
-              <AgentMark agent={tab.agent} color={color} size={16} />
-              <span>{agentNames[tab.agent]}</span>
-              <span className="composer-divider" />
-              <span className="local-tag">
-                {tab.mode === "rich" ? "Readable" : "Native"} view
-              </span>
-            </div>
-            <div>
-              <span className="input-hint">
-                {settings.enterSend ? "↵ send · ⇧↵ new line" : "Ctrl ↵ send"}
-              </span>
-              {tab.busy && (
-                <button
-                  className="send-button stop-button"
-                  aria-label="Stop running turn"
-                  onClick={onStop}
-                >
-                  <Square size={13} fill="currentColor" />
-                </button>
-              )}
-              {(!tab.busy || tab.agent !== "shell") && (
-                <button
-                  className="send-button"
-                  aria-label={tab.busy ? "Queue message" : "Send message"}
-                  disabled={!input.trim() || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)}
-                  onClick={submit}
-                >
-                  <ArrowUp size={18} />
-                </button>
-              )}
-            </div>
-          </div>
           {tab.agent !== "shell" && <ModelControls tab={tab} panel={controlPanel} setPanel={setControlPanel}
             onConfig={onConfig} onPending={setControlPending} onNative={(draft) => onNative(draft ? `${draft}${input.trim() ? `\n\n${input}` : ""}` : input.trim() || undefined)}
             onPlanDraft={() => { setInput(input.startsWith("/plan") ? input : `/plan${input.trim() ? ` ${input}` : " "}`); setDismissedCommands(true);
               requestAnimationFrame(() => inputRef.current?.focus()); }} />}
-          {tab.agent !== "shell" && <div className="session-access-bar"><button disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={13} /> MCPs & context</button>
-            <button disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>{tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()}` : "Auto-compact · CLI default"}</button></div>}
+          {tab.agent !== "shell" && <>
+            <IconButton label="MCPs & context" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={14} /></IconButton>
+            <button className="model-control compact-control" aria-label={compactLabel} title={compactLabel}
+              disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>
+              <Shrink size={13} /><span>{tab.autoCompactTokens ? `${(tab.autoCompactTokens / 1000).toLocaleString()}k` : "Auto-compact"}</span>
+            </button>
+          </>}
+          </div>
           {sessionError && <div className="session-control-error" role="alert"><AlertCircle size={14} />{sessionError}</div>}
         </div>
         </div>
-        <div className="composer-caption">
-          <span>
-            <Command size={11} />K to go anywhere
-          </span>
-          <span>
-            {controlPending ? "Reading or applying CLI controls…" : isCommandInput && commandLoading ? "Discovering commands…" : isCommandInput && commandError ? commandError : tab.phase === "finishing" ? "Grok has finished its response; the CLI is closing." : tab.phase === "waiting" ? "Grok's output has paused. Its CLI may still be running hooks or continuing the turn." : tab.agent === "shell"
-              ? "For interactive programs, open a native terminal."
-              : "Uses your CLI settings and existing account."}
-          </span>
-        </div>
+        {statusCaption && <div className="composer-caption" role="status">{statusCaption}</div>}
       </div>
-      {sessionPanel && <SessionControls tab={tab} onConfig={onConfig} focusContext={sessionPanel === "context"} onClose={() => { setSessionPanel(null); requestAnimationFrame(() => inputRef.current?.focus()); }} />}
+      {sessionPanel && <SessionControls tab={tab} onConfig={onConfig} focusContext={sessionPanel === "context"} onSignIn={onSignIn}
+        onNative={() => { setSessionPanel(null); onNative("/mcp"); }}
+        onClose={() => { setSessionPanel(null); requestAnimationFrame(() => inputRef.current?.focus()); }} />}
     </div>
   );
 }
