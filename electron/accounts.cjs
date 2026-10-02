@@ -31,18 +31,26 @@ function claudeAccountSettings(s, settings) {
   return { ...settings, apiKeyHelper: "", env };
 }
 const readJson = (file) => fsp.readFile(file, "utf8").then(JSON.parse).catch((e) => { if (e.code === "ENOENT") return {}; throw e; });
-const writeJson = async (file, value) => {
+const writeJson = async (file, value, expected) => {
   const temporary = file + "." + crypto.randomUUID() + ".tmp";
   await fsp.writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
+  if (expected !== undefined && signature(await readJson(file)) !== expected) { await fsp.unlink(temporary); return false; }
   await fsp.rename(temporary, file);
+  return true;
 };
-const sourceHome = (agent) => agent === "claude" ? process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude") : process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+const agentNames = { claude: "Claude Code", codex: "Codex", grok: "Grok", pi: "Pi" };
+const sourceHome = (agent) => {
+  const home = { claude: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), codex: process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), grok: process.env.GROK_HOME || path.join(os.homedir(), ".grok"), pi: process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent") }[agent];
+  if (!home) throw new Error("Choose an agent to sign in.");
+  return home.startsWith("~/") || home.startsWith("~\\") ? path.join(os.homedir(), home.slice(2)) : home;
+};
+const signature = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 class Accounts {
   constructor(dataDir, resolveLauncher, notify, inUse = () => false) {
     this.root = path.join(dataDir, "accounts"); this.file = path.join(dataDir, "accounts.json");
     this.resolveLauncher = resolveLauncher; this.notify = notify; this.inUse = inUse;
-    this.profiles = []; this.defaults = { claude: "", codex: "" }; this.logins = new Map(); this.authLocks = new Map(); this.saving = Promise.resolve();
+    this.profiles = []; this.defaults = { claude: "", codex: "" }; this.logins = new Map(); this.loginStarts = new Map(); this.loginReservations = new Map(); this.authLocks = new Map(); this.saving = Promise.resolve();
   }
   async init() {
     await fsp.mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -169,33 +177,68 @@ class Accounts {
     if (this.inUse(id) && !allowIdleReauth) throw new Error("Close this account's chats before signing in again.");
     return this.startLogin(p, home, command, id);
   }
-  loginDefault(command) {
-    const p = { id: "cli-default-claude", agent: "claude", name: "Claude · CLI default" };
-    fs.mkdirSync(sourceHome("claude"), { recursive: true, mode: 0o700 });
-    return this.startLogin(p, sourceHome("claude"), command, "");
+  loginDefault(agent, command) {
+    const home = sourceHome(agent), p = { id: `cli-default-${agent}`, agent, name: `${agentNames[agent]} · CLI default` };
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+    return this.startLogin(p, home, command, "");
   }
-  signingIn(s) { return !!this.logins.get(s.accountId || "cli-default-claude") && !this.logins.get(s.accountId || "cli-default-claude").ended; }
+  signingIn(s) { const id = s.accountId || `cli-default-${s.agent}`, login = this.logins.get(id); return this.loginReservations.has(id) || this.loginStarts.has(id) || !!login && !login.ended; }
+  reserveLogin(agent, accountId) {
+    const id = accountId || `cli-default-${agent}`;
+    if ([...this.loginReservations.values(), ...this.loginStarts.values(), ...this.logins.values()].some((l) => l.agent === agent && !l.ended)) throw new Error("Finish the other sign-in for this provider first.");
+    this.loginReservations.set(id, { agent });
+    return () => this.loginReservations.delete(id);
+  }
   startLogin(p, home, command, accountId) {
+    if (this.loginStarts.has(p.id)) return this.loginStarts.get(p.id).promise;
+    if ([...this.loginStarts.values()].some((l) => l.agent === p.agent)) throw new Error("Finish the other sign-in for this provider first.");
+    const promise = this.launchLogin(p, home, command, accountId);
+    this.loginStarts.set(p.id, { agent: p.agent, promise });
+    const clear = () => this.loginStarts.delete(p.id); promise.then(clear, clear);
+    return promise;
+  }
+  async launchLogin(p, home, command, accountId) {
     const id = p.id;
     if (this.logins.has(id) && !this.logins.get(id).ended) return { id, agent: p.agent, name: p.name };
     if ([...this.logins.values()].some((l) => l.agent === p.agent && !l.ended)) throw new Error("Finish the other sign-in for this provider first.");
     const launcher = this.resolveLauncher(command || p.agent);
-    const args = p.agent === "claude" ? ["--dangerously-skip-permissions", "auth", "login"] : [...codexAccountOptions({ accountId: id }), "login"];
+    // Invalidate the persisted generation before credentials can change, even
+    // when a login is interrupted or Lumen exits before it finishes.
+    if (accountId) { p.revision = crypto.randomUUID(); await this.save(); }
+    const args = { claude: ["--dangerously-skip-permissions", "auth", "login"], codex: [...codexAccountOptions({ accountId }), "login"], grok: ["login"], pi: ["--no-session"] }[p.agent];
     const terminal = require("node-pty").spawn(launcher.file, [...launcher.args, ...args], { name: "xterm-256color", cols: 80, rows: 20, cwd: home,
       env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), });
-    const login = { terminal, agent: p.agent, buffer: "", offset: 0 }; this.logins.set(id, login);
-    terminal.onData((data) => { login.buffer = (login.buffer + data).slice(-100000); login.offset += data.length; this.notify({ type: "terminal", id, data, offset: login.offset }); });
+    const login = { terminal, agent: p.agent, buffer: "", offset: 0, authenticated: false }; this.logins.set(id, login);
+    const checkPiLogin = () => {
+      const output = login.buffer.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      if (!login.ended && !login.authenticated && login.authWritten && /(?:Logged in to|Saved API key for)[\s\S]*(?:Credentials saved|Selected)/i.test(output)) {
+        login.authenticated = true; this.notify({ type: "authenticated", id });
+      }
+    };
+    if (p.agent === "pi") login.watch = fs.watch(home, (_event, file) => {
+      if (String(file) !== "auth.json") return;
+      clearTimeout(login.timer);
+      login.timer = setTimeout(async () => {
+        const auth = await readJson(path.join(home, "auth.json")).catch(() => null);
+        if (login.ended || !auth) return;
+        if (Object.values(auth).some((value) => value && typeof value === "object" && (value.access || value.accessToken || value.key))) {
+          login.authWritten = true; checkPiLogin();
+        }
+      }, 100);
+    });
+    terminal.onData((data) => { login.buffer = (login.buffer + data).slice(-100000); login.offset += data.length; this.notify({ type: "terminal", id, data, offset: login.offset }); if (p.agent === "pi") checkPiLogin(); });
     terminal.onExit(async ({ exitCode }) => {
       login.ended = true; login.exitCode = exitCode;
+      login.watch?.close(); clearTimeout(login.timer);
       if (exitCode === 0 && accountId) { p.revision = crypto.randomUUID(); await this.save().catch(() => {}); }
-      this.notify({ type: "exit", id, code: exitCode }); this.notify({ type: "changed" });
+      this.notify({ type: "exit", id, code: p.agent === "pi" ? login.authenticated ? 0 : 1 : exitCode }); this.notify({ type: "changed" });
     });
     return { id, agent: p.agent, name: p.name };
   }
   write(id, data) { if (typeof data !== "string" || data.length > 100000) throw new Error("Invalid sign-in input."); this.logins.get(id)?.terminal.write(data); }
   resize(id, cols, rows) { if (Number.isInteger(cols) && cols > 0 && cols < 1000 && Number.isInteger(rows) && rows > 0 && rows < 1000) this.logins.get(id)?.terminal.resize(cols, rows); }
-  buffer(id) { const login = this.logins.get(id); return { text: login?.buffer || "", offset: login?.offset || 0, code: login?.ended ? login.exitCode : null }; }
-  cancel(id) { const login = this.logins.get(id); if (!login?.ended) login?.terminal.kill(); else this.logins.delete(id); }
+  buffer(id) { const login = this.logins.get(id); return { text: login?.buffer || "", offset: login?.offset || 0, code: login?.ended ? login.agent === "pi" ? login.authenticated ? 0 : 1 : login.exitCode : null, authenticated: !!login?.authenticated }; }
+  cancel(id) { const login = this.logins.get(id); if (!login?.ended) login?.terminal?.kill(); else this.logins.delete(id); }
   async syncClaude(s) {
     if (!s.claudeHome) return;
     const key = s.accountId || `claude-default:${path.resolve(sourceHome("claude"))}`;
@@ -249,6 +292,37 @@ class Accounts {
     if (!s.claudeHome || s.accountWatches) return;
     s.accountWatches = [s.accountId ? this.home(s.accountId) : sourceHome("claude"), s.claudeHome].filter((folder) => fs.existsSync(folder)).map((folder) => fs.watch(folder, (_event, file) => {
       if (String(file) === ".credentials.json") void this.syncClaude(s).catch(() => {});
+    }));
+  }
+  async syncGrok(s) {
+    if (!s.grokHome) return;
+    const key = `grok:${path.resolve(sourceHome("grok"))}`;
+    const syncing = (this.authLocks.get(key) || Promise.resolve()).catch(() => {}).then(async () => {
+      if (this.signingIn(s)) return;
+      const central = path.join(sourceHome("grok"), "auth.json"), local = path.join(s.grokHome, "auth.json"), marker = path.join(s.grokHome, ".lumen-auth-source");
+      let [a, b] = await Promise.all([readJson(central), readJson(local)]);
+      const baseline = await fsp.readFile(marker, "utf8").catch((e) => { if (e.code === "ENOENT") return ""; throw e; });
+      const current = signature(a);
+      let published = false;
+      if (!s.authInvalid && !s.runtime?.authFailed && baseline === current) {
+        for (const [issuer, value] of Object.entries(a)) {
+          const refresh = b[issuer];
+          const expiry = (v) => typeof v === "number" ? v : Date.parse(v || "");
+          if (value?.user_id && refresh?.user_id === value.user_id && refresh.principal_id === value.principal_id && value.key && refresh.key && refresh.refresh_token && expiry(refresh.expires_at) > expiry(value.expires_at)) {
+            a[issuer] = refresh; published = true;
+          }
+        }
+      }
+      if (published && !await writeJson(central, a, current)) a = await readJson(central);
+      if (signature(b) !== signature(a)) { await writeJson(local, a); s.authChanged = true; }
+      await fsp.writeFile(marker, signature(a), { mode: 0o600 });
+    });
+    this.authLocks.set(key, syncing); await syncing;
+  }
+  watchGrok(s) {
+    if (!s.grokHome || s.accountWatches) return;
+    s.accountWatches = [sourceHome("grok"), s.grokHome].filter((folder) => fs.existsSync(folder)).map((folder) => fs.watch(folder, (_event, file) => {
+      if (String(file) === "auth.json") void this.syncGrok(s).catch(() => {});
     }));
   }
   dispose() { for (const id of this.logins.keys()) this.cancel(id); }

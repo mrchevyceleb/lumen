@@ -48,6 +48,7 @@ function codexConfig(s) {
 // Grok's MCP toggles persist. Give every Lumen chat its own preferences/auth cache;
 // never call server toggles (which can also write project configuration).
 async function grokHome(owner, s) {
+  if (owner.accounts?.signingIn(s)) throw new Error("Finish Grok's sign-in, then retry your message.");
   const base = process.env.GROK_HOME || path.join(os.homedir(), ".grok");
   const target = path.join(owner.dataDir, "grok", s.controlId);
   await fs.mkdir(target, { recursive: true, mode: 0o700 });
@@ -77,6 +78,8 @@ async function grokHome(owner, s) {
     }
   }
   s.grokHome = target;
+  await owner.accounts?.syncGrok(s);
+  owner.accounts?.watchGrok(s);
   return target;
 }
 async function claudeHome(owner, s) {
@@ -199,6 +202,7 @@ class Runtime {
     if (response && this.pending.has(id)) {
       const pending = this.pending.get(id); clearTimeout(pending.timer); this.pending.delete(id);
       const error = claude ? response.subtype === "error" && response.error : response.error;
+      if (error && require("./auth.cjs").authError(JSON.stringify(error))) { this.authFailed = true; s.authInvalid = true; }
       let result = claude ? response.response : response.result;
       if (s.agent === "grok" && result?.result !== undefined) result = result.result;
       error ? pending.reject(new Error(typeof error === "string" ? error : error.message || "CLI control failed.")) : pending.resolve(result || {});
@@ -299,7 +303,7 @@ class Runtime {
       if (this.hadPrompt) o.event(s, { type: "session", sessionRef: s.sessionRef });
     } else {
       const init = await this.request("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "lumen", version: "0.1.11" } });
-      const methodId = init.authMethods?.find((a) => a.id === "cached_token")?.id || init.authMethods?.find((a) => a.id === "xai.api_key")?.id;
+      const methodId = process.env.XAI_API_KEY && init.authMethods?.some((a) => a.id === "xai.api_key") ? "xai.api_key" : init.authMethods?.find((a) => a.id === "cached_token")?.id || init.authMethods?.find((a) => a.id === "xai.api_key")?.id;
       if (methodId) await this.request("authenticate", { methodId, _meta: { headless: true } });
       this.metadata = await this.request(s.sessionRef ? "session/load" : "session/new", { cwd: s.cwd, mcpServers: [], ...(s.sessionRef ? { sessionId: s.sessionRef } : {}) });
       s.sessionRef = this.metadata.sessionId || s.sessionRef;
@@ -490,11 +494,11 @@ class Runtime {
       if (item?.type === "contextCompaction") this.phase(e.method === "item/started");
     }
     if (e.method === "thread/tokenUsage/updated") { this.context = p.tokenUsage?.last?.totalTokens ?? null; this.contextWindow = p.tokenUsage?.modelContextWindow ?? null; this.reportContext(); }
-    if (e.method === "error") o.event(s, { type: "error", message: p.error?.message || "Codex turn failed." });
+    if (e.method === "error") { if (require("./auth.cjs").authError(JSON.stringify(p.error))) { this.authFailed = true; s.authInvalid = true; } o.event(s, { type: "error", message: p.error?.message || "Codex turn failed." }); }
     if (e.method === "turn/completed") {
       if (p.turn?.id && this.activeTurnId && p.turn.id !== this.activeTurnId) return;
       this.activeTurnId = null;
-      if (p.turn?.error) o.event(s, { type: "error", message: p.turn.error.message });
+      if (p.turn?.error) { if (require("./auth.cjs").authError(JSON.stringify(p.turn.error))) { this.authFailed = true; s.authInvalid = true; } o.event(s, { type: "error", message: p.turn.error.message }); }
       o.finish(s, p.turn?.status === "failed" ? 1 : p.turn?.status === "interrupted" ? 130 : 0);
     }
   }
@@ -518,6 +522,7 @@ function claudeContext(usage) {
   return usage.input_tokens + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.output_tokens || 0);
 }
 async function ensureRuntime(owner, s) {
+  if (owner.accounts?.signingIn(s)) throw new Error("Finish this account's sign-in, then retry your message.");
   await recoverGrokMcp(s);
   if (s.agent === "claude") {
     if (owner.accounts?.signingIn(s)) throw new Error("Finish Claude's sign-in, then retry your message.");
@@ -536,11 +541,18 @@ async function ensureRuntime(owner, s) {
     }
     s.claudeAuthChanged = false;
   }
+  if (s.agent === "grok") await grokHome(owner, s);
+  if (s.agent !== "claude" && s.runtime && (s.runtime.authFailed || s.authChanged)) {
+    const child = s.runtime.child; s.runtime.close("Login changed. Reconnecting this conversation.");
+    if (s.process === child) { s.process = null; await owner.kill(child); }
+  }
+  s.authChanged = false;
   if (s.runtime) { await s.runtime.ready; return s.runtime; }
   const runtime = new Runtime(owner, s); s.runtime = runtime;
   runtime.ready = runtime.initialize().catch(async (error) => { runtime.close(error.message); if (runtime.child === s.process) await owner.kill(runtime.child); throw error; });
   await runtime.ready;
   if (s.agent === "claude") s.claudeAuthInvalid = false;
+  s.authInvalid = false;
   return runtime;
 }
 module.exports = { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp };

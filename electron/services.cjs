@@ -645,6 +645,7 @@ class Sessions {
   }
   async commands(id, refresh = false) {
     const s = this.get(id);
+    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before refreshing commands.");
     if (s.agent === "shell") return { commands: [], origin: "Shell" };
     if (s.discoveryPromise) return s.discoveryPromise;
     if (!refresh && s.commands && Date.now() - s.commandsAt < 60000) return s.commands;
@@ -660,6 +661,7 @@ class Sessions {
         result = { commands: normalize(data.commands, "pi"), origin: "Pi RPC" };
       } else {
         if (s.agent === "claude") await claudeHome(this, s);
+        if (s.agent === "grok") await grokHome(this, s);
         result = await discoverCommands(s, resolveLauncher(s.command), (child) => this.kill(child));
       }
       if (!this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Command discovery was canceled.");
@@ -685,6 +687,7 @@ class Sessions {
     request.reject(new Error(message));
   }
   ensurePi(s) {
+    if (this.accounts?.signingIn(s)) throw new Error("Finish Pi's sign-in, then retry your message.");
     if (s.process) return;
     s.piCompacting = false;
     const extensionFile = this.piExtension();
@@ -738,6 +741,7 @@ class Sessions {
   }
   async models(id, refresh = false) {
     const s = this.get(id);
+    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before refreshing models.");
     if (s.agent === "shell") throw new Error("Choose an agent to use model controls.");
     if (s.catalogPromise) return s.catalogPromise;
     if (!refresh && s.catalog && Date.now() - s.catalogAt < 60000) return s.catalog;
@@ -822,17 +826,27 @@ class Sessions {
   }
   async startNative(id) {
     const s = this.get(id);
+    if (s.nativeStart) return s.nativeStart;
+    const starting = this.openNative(id); s.nativeStart = starting;
+    try { return await starting; } finally { if (s.nativeStart === starting) s.nativeStart = null; }
+  }
+  async openNative(id) {
+    const s = this.get(id);
+    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before opening native view.");
     if (s.pty) return;
     if (s.agent === "pi" && Object.keys(s.mcpOverrides).length)
       throw new Error("Use CLI MCP defaults before opening native Pi. Its terminal cannot inherit Lumen's runtime MCP switches.");
     const sessionEnv = {};
-    if (s.agent === "grok") sessionEnv.GROK_HOME = s.grokHome || await grokHome(this, s);
+    if (s.agent === "grok") sessionEnv.GROK_HOME = await grokHome(this, s);
     if (s.agent === "claude") sessionEnv.CLAUDE_CONFIG_DIR = await claudeHome(this, s);
     await syncNativeMcp(s);
+    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before opening native view.");
     if (s.agent === "codex" && Object.keys(s.mcpOverrides).length && !s.codexLocalServers) {
       await (await ensureRuntime(this, s)).servers();
       await this.resetRuntime(s);
     }
+    if (s.stopping || !this.sessions.has(id)) throw new Error("This terminal was closed before it finished starting.");
+    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before opening native view.");
     const pty = require("node-pty");
     const shell =
       process.platform === "win32"
@@ -1515,6 +1529,7 @@ class Sessions {
     if (s.process) await this.kill(s.process);
     for (const watch of s.accountWatches || []) watch.close();
     await this.accounts?.syncClaude(s);
+    await this.accounts?.syncGrok(s);
     this.sessions.delete(id);
   }
   async closeAll() {

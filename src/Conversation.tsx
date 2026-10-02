@@ -26,7 +26,7 @@ import SessionControls, { lumenCommands, parseThreshold } from "./SessionControl
 import type { SessionControlsState } from "./types";
 import QueuedMessages from "./QueuedMessages";
 import { agentNames } from "./settings";
-const claudeAuthError = (text: string) => /failed to authenticate|OAuth session expired|invalid authentication credentials|OAuth access token (?:has been )?(?:revoked|expired)/i.test(text);
+const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
   agent,
   color,
@@ -278,7 +278,7 @@ export default function Conversation({
           </div>
         ) : (
           <div className="message-list">
-            {tab.messages.map((message, index) => tab.agent === "claude" && message.role === "assistant" && claudeAuthError(message.text) && tab.messages[index + 1]?.role === "error" && claudeAuthError(tab.messages[index + 1].text) ? null : (
+            {tab.messages.map((message, index) => tab.agent !== "shell" && message.role === "assistant" && authError(message.text) && tab.messages[index + 1]?.role === "error" && authError(tab.messages[index + 1].text) ? null : (
               <MessageView
                 key={message.id}
                 message={message}
@@ -528,10 +528,10 @@ function MessageView({
       <div className="error-message">
         <AlertCircle size={16} />
         <div>
-          {tab.agent === "claude" && claudeAuthError(m.text) ? <>
-            <strong>Claude needs you to sign in again</strong>
+          {tab.agent !== "shell" && authError(m.text) ? <>
+            <strong>{agentNames[tab.agent]} needs you to sign in again</strong>
             <p>Your chat is saved. Sign in here, then retry your message.</p>
-            <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Sign in to Claude</button>
+            <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Sign in to {agentNames[tab.agent]}</button>
             <details className="auth-error-details"><summary>Error details</summary><p>{m.text}</p></details>
           </> : <><strong>Something needs attention</strong><p>{m.text}</p></>}
         </div>

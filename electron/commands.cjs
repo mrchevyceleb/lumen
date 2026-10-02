@@ -15,7 +15,7 @@ async function discoverCommands(s, launcher, kill) {
   if (!args) return { commands: [], origin: "Shell" };
   const child = spawn(launcher.file, [...launcher.args, ...args, ...extraOptions(s)], {
     cwd: s.root, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-    env: { ...accountEnvironment(s), NO_COLOR: "1" },
+    env: { ...accountEnvironment(s), ...(s.agent === "grok" && s.grokHome ? { GROK_HOME: s.grokHome } : {}), NO_COLOR: "1" },
   });
   s.discoveryChild = child;
   let timer, buffer = "", stderr = "", settled = false, finish, grokCommands, grokReady = false, grokInfo;

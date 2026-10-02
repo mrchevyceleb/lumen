@@ -51,6 +51,7 @@ import {
   type SessionEvent,
   type Entry,
   type AccountProfile,
+  type SignInProfile,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
@@ -131,7 +132,7 @@ export default function App() {
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [split, setSplit] = useState(50);
   const [dialog, setDialog] = useState<Dialog>(null);
-  const [signIn, setSignIn] = useState<Pick<AccountProfile, "id" | "agent" | "name"> | null>(null);
+  const [signIn, setSignIn] = useState<SignInProfile | null>(null);
   const signInLock = useRef(false);
   const [settingsSection, setSettingsSection] = useState("appearance");
   const [agentMenu, setAgentMenu] = useState(false);
@@ -200,7 +201,7 @@ export default function App() {
   const signInChat = async (id: string) => {
     if (signInLock.current || signIn) return;
     signInLock.current = true;
-    try { setSignIn(await api<Pick<AccountProfile, "id" | "agent" | "name">>("accounts:login-session", id)); }
+    try { setSignIn(await api<SignInProfile>("accounts:login-session", id)); }
     catch (e: any) { notify(e.message); }
     finally { signInLock.current = false; }
   };
@@ -1204,7 +1205,7 @@ export default function App() {
                 </div>
                 <div>
                   {active.agent !== "shell" && <ContextIndicator tab={active} />}
-                  {["claude", "codex"].includes(active.agent) && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
+                  {active.agent !== "shell" && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
                     if (id !== (active.accountId || "")) void addTab(active.agent, active.mode, active.projectless ? "" : active.root, undefined, active.cwd, id, active.projectless ? active.scratchId : undefined);
                   }} onManage={() => { setSettingsSection("accounts"); setDialog("settings"); }} onSignIn={() => void signInChat(active.id)} />}
                   <button className="view-button" onClick={switchView}>
@@ -1408,8 +1409,8 @@ export default function App() {
           onAccountChat={(profile) => { void addTab(profile.agent, "rich", root, undefined, undefined, profile.id); setDialog(null); }}
         />
       )}
-      {signIn && <Modal title="Sign in to Claude" onClose={() => setSignIn(null)} wide>
-        <div className="account-sign-in"><AccountLogin profile={signIn} settings={settings} onDone={(success) => { setSignIn(null); if (success) notify("Signed in to Claude. Retry your message in the same chat."); }} /></div>
+      {signIn && <Modal title={`Sign in to ${agentNames[signIn.agent]}`} onClose={() => setSignIn(null)} wide>
+        <div className="account-sign-in"><AccountLogin profile={signIn} settings={settings} onDone={(success) => { setSignIn(null); if (success) notify(`Signed in to ${agentNames[signIn.agent]}. Retry your message in the same chat.`); }} /></div>
       </Modal>}
       {dialog === "open" && (
         <OpenDialog

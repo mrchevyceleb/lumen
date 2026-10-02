@@ -1,6 +1,7 @@
 export type Agent = "shell" | "pi" | "codex" | "claude" | "grok";
 export type Mode = "rich" | "native";
 export interface AccountProfile { id: string; agent: "claude" | "codex"; name: string; signedIn: boolean; email: string; signingIn: boolean; inUse: boolean }
+export interface SignInProfile { id: string; agent: Exclude<Agent, "shell">; name: string }
 export interface AccountInventory { profiles: AccountProfile[]; defaults: { claude: string; codex: string } }
 export interface SlashCommand {
   name: string;
