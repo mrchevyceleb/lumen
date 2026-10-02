@@ -11,12 +11,13 @@ const { installZoom } = require("./zoom.cjs");
 const { openPaths, resolveOpenPath } = require("./launch.cjs");
 const { createUpdates } = require("./updates.cjs");
 const { Accounts } = require("./accounts.cjs");
+const { AgentControl } = require("./agent-control.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
   app.setPath("userData", process.env.LUMEN_TEST_DATA);
 const initialPaths = openPaths(process.argv);
 if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) app.exit(0);
-let window, workspace, sessions, updates, accounts;
+let window, workspace, sessions, updates, accounts, agentControl;
 let restartForUpdate = false;
 let pendingPaths = [...initialPaths];
 app.on("second-instance", (_event, argv, cwd, data) => {
@@ -36,6 +37,8 @@ const devURL = process.env.LUMEN_DEV === "1" ? "http://127.0.0.1:5173" : "";
 const fileURL = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
 function handle(name, callback) {
   ipcMain.handle(name, async (event, ...args) => {
+    if (name.startsWith("agent-control:") && (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame))
+      return { error: "Only Lumen's main app frame can manage agent control." };
     if (
       event.senderFrame?.url !== fileURL &&
       !(devURL && event.senderFrame?.url.startsWith(`${devURL}/`))
@@ -60,6 +63,15 @@ app.whenReady().then(async () => {
     if (window && !window.isDestroyed())
       window.webContents.send("session:event", event);
   }, accounts);
+  agentControl = new AgentControl({ dataDir, window: () => window, notify: (status) => {
+    if (window && !window.isDestroyed()) window.webContents.send("agent-control:status", status);
+  } });
+  handle("agent-control:status", () => agentControl.status());
+  handle("agent-control:change", (enabled) => agentControl.change(enabled));
+  handle("agent-control:ready", (ready) => agentControl.setReady(ready === true));
+  handle("agent-control:reply", (id, result) => agentControl.reply(id, result));
+  handle("agent-control:claim", (id) => !!agentControl.server && agentControl.ready && agentControl.pending.has(id));
+  try { await agentControl.init(); } catch (e) { agentControl.error = e.message; }
   handle("accounts:list", () => accounts.list());
   handle("accounts:add", (value) => accounts.add(value));
   handle("accounts:change", (id, value) => accounts.change(id, value));
@@ -210,11 +222,14 @@ app.whenReady().then(async () => {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
   window.removeMenu();
   installZoom(window.webContents, dataDir);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("did-start-loading", () => agentControl.setReady(false));
+  window.webContents.on("render-process-gone", () => agentControl.setReady(false));
   window.webContents.on("will-navigate", (event, url) => {
     if (url !== fileURL && !(devURL && url.startsWith(`${devURL}/`)))
       event.preventDefault();
@@ -243,6 +258,7 @@ app.whenReady().then(async () => {
       }
     }
     event.preventDefault();
+    agentControl.setReady(false);
     window.webContents.send("app:closing");
     clearTimeout(closeTimer);
     closeTimer = setTimeout(() => {
@@ -263,6 +279,7 @@ app.whenReady().then(async () => {
   updates.start();
 });
 app.on("window-all-closed", async () => {
+  await agentControl?.stop().catch(() => {});
   accounts?.dispose();
   try {
     await sessions?.closeAll();

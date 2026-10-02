@@ -12,12 +12,14 @@ import {
   Users,
   ListTree,
   PanelTop,
+  Plug,
 } from "lucide-react";
 import { Modal } from "./Components";
 import { agentNames, defaults, themes } from "./settings";
 import type { Settings, Agent, AgentConfig } from "./types";
 import UpdatesPanel from "./UpdatesPanel";
 import AccountsPanel from "./AccountsPanel";
+import AgentControlPanel from "./AgentControlPanel";
 import type { AccountProfile } from "./types";
 const backgrounds = [
   ["none", "Solid", "Still & focused"],
@@ -72,6 +74,7 @@ export default function SettingsPanel({
             ["type", Type, "Typography"],
             ["agents", Bot, "Agents"],
             ["accounts", Users, "Accounts"],
+            ["control", Plug, "Agent control"],
             ["behavior", SlidersHorizontal, "Workspace"],
             ["updates", Download, "Updates"],
           ].map(([key, Icon, label]: any) => (
@@ -87,6 +90,7 @@ export default function SettingsPanel({
         </nav>
         <div className="settings-content">
           {section === "updates" && <UpdatesPanel />}
+          {section === "control" && <AgentControlPanel />}
           {section === "accounts" && <AccountsPanel settings={s} onStart={onAccountChat} />}
           {section === "appearance" && (
             <>

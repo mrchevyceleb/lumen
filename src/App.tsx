@@ -63,6 +63,7 @@ import { useUpdates } from "./UpdatesPanel";
 import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
 import SessionTabs from "./SessionTabs";
+import { useAgentControl, taskView, settleControl } from "./useAgentControl";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -167,6 +168,8 @@ export default function App() {
     session: string;
     request: PiRequest;
   }[]>([]);
+  const uiRequestsRef = useRef(uiRequests);
+  uiRequestsRef.current = uiRequests;
   const piRequest = uiRequests[0];
   const [diff, setDiff] = useState<{
     path: string;
@@ -270,6 +273,7 @@ export default function App() {
     startCwd?: string,
     accountId?: string,
     scratchId?: string,
+    control?: Partial<Tab>,
   ) => {
     const config = settingsRef.current.agents[agent];
     try {
@@ -279,12 +283,12 @@ export default function App() {
         agent,
         mode,
         ...config,
-        model: resume?.model ?? config.model,
-        effort: resume?.effort ?? config.effort ?? "",
-        workMode: resume?.workMode || "",
+        model: resume?.model ?? control?.model ?? config.model,
+        effort: resume?.effort ?? control?.effort ?? config.effort ?? "",
+        workMode: resume?.workMode || control?.workMode || "",
         sessionRef: resume?.sessionRef || "",
         scratchId: resume?.scratchId || scratchId || "",
-        controlId: resume?.controlId || "",
+        controlId: resume?.controlId || control?.controlId || "",
         autoCompactTokens: resume?.autoCompactTokens ?? null,
         mcpOverrides: resume?.mcpOverrides || {},
         accountId: resume ? resume.accountId || "" : accountId,
@@ -305,7 +309,8 @@ export default function App() {
         scratchId: created.scratchId,
         agent,
         mode,
-        name: resume?.name || agentNames[agent],
+        name: resume?.name || control?.name || agentNames[agent],
+        managedBy: resume?.managedBy || control?.managedBy,
         accountId: created.accountId,
         accountName: created.accountName,
         color: resume?.color,
@@ -313,9 +318,9 @@ export default function App() {
         draft: resume?.draft || "",
         busy: false,
         sessionRef: resume?.sessionRef,
-        model: resume?.model ?? config.model,
-        effort: resume?.effort ?? config.effort ?? "",
-        workMode: resume?.workMode || "",
+        model: request.model,
+        effort: request.effort,
+        workMode: request.workMode,
         controlId: created.controlId,
         autoCompactTokens: resume?.autoCompactTokens ?? null,
         mcpOverrides: resume?.mcpOverrides || {},
@@ -326,7 +331,7 @@ export default function App() {
         queuePaused: !!resume?.queuedMessages?.length,
       };
       setTabs((old) => [...old, tab]);
-      if (!resume || created.projectless || !isHiddenProject(created.root)) {
+      if ((!control || !activeIdRef.current) && (!resume || created.projectless || !isHiddenProject(created.root))) {
         setActiveId(tab.id);
         setSelectedRoot(folder);
       }
@@ -335,6 +340,7 @@ export default function App() {
       setAgentMenuRoot(undefined);
       return tab;
     } catch (e: any) {
+      if (control) throw e;
       notify(e.message);
     }
   };
@@ -545,7 +551,11 @@ export default function App() {
   useEffect(() => {
     let queue: SessionEvent[] = [];
     let frame = 0;
+    let fallback: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(fallback);
+      fallback = undefined;
       frame = 0;
       const events = queue;
       queue = [];
@@ -628,11 +638,16 @@ export default function App() {
       }
       if (e.type === "terminal") return;
       queue.push(e);
-      if (!frame) frame = requestAnimationFrame(flush);
+      if (!frame) {
+        frame = requestAnimationFrame(flush);
+        // Minimized/hidden windows may not paint; agent clients still need current state.
+        fallback = setTimeout(flush, 30);
+      }
     });
     return () => {
       unsub();
       cancelAnimationFrame(frame);
+      clearTimeout(fallback);
     };
   }, []);
   const send = async (text: string) => {
@@ -697,6 +712,95 @@ export default function App() {
       });
     else action();
   };
+  useAgentControl(loaded, async ({ action, id, body }) => {
+    const find = () => tabsRef.current.find((t) => (t.controlId || t.id) === id);
+    const view = (tab: Tab, full = true) => taskView(tab, uiRequestsRef.current, full);
+    const audit = (tab: Tab, text: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: crypto.randomUUID(), role: "notice", title: "Agent control", text }] } : t));
+    const submit = async (tab: Tab, messageId: string, text: string) => {
+      if (tab.messages.some((m) => m.id === messageId) || tab.queuedMessages?.some((m) => m.id === messageId)) return true;
+      if (tab.mode !== "rich") throw new Error("Return this task to readable view before submitting its prompt.");
+      if (tab.agent === "shell") {
+        if (tab.busy) throw new Error("Wait for this shell command to finish.");
+        setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: messageId, role: "user", text }] } : t));
+        try { await api("session:send", tab.id, text); }
+        catch (e) { setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: t.messages.filter((m) => m.id !== messageId) } : t)); throw e; }
+      } else await api("session:submit", tab.id, { id: messageId, text });
+      return false;
+    };
+    if (action === "list") return { tasks: tabsRef.current.map((t) => view(t, false)) };
+    if (action === "create") {
+      let created = tabsRef.current.find((t) => t.controlId === body.id);
+      const reused = !!created;
+      if (!created) {
+        let folder = "";
+        if (body.root) {
+          const opened = await api<Workspace>("workspace:register", body.root);
+          folder = opened.root; setWorkspaces((old) => ({ ...old, [folder]: opened }));
+        }
+        created = await addTab(body.agent, "rich", folder, undefined, body.cwd, body.accountId, undefined, {
+          controlId: body.id, managedBy: body.owner || "Local agent", name: body.name || `Agent task · ${agentNames[body.agent as Agent]}`,
+          model: body.model, effort: body.effort, workMode: body.workMode,
+        });
+        if (!created) throw new Error("Could not create the chat.");
+        audit(created, `${created.managedBy} created this task through Lumen's local interface.`);
+        notify(`Agent control started ${created.name}`);
+      }
+      await settleControl();
+      let deliveryError = "";
+      if (body.text) {
+        try {
+          await submit(created, body.id, body.text);
+        } catch (e: any) { deliveryError = e.message; audit(created, `Initial prompt was not submitted: ${e.message}. Retry create with task ID ${body.id}.`); }
+      }
+      await settleControl(); persist();
+      return { ...view(tabsRef.current.find((t) => t.id === created!.id) || created), reused, ...(deliveryError ? { deliveryError } : {}) };
+    }
+    const tab = find();
+    if (!tab) throw Object.assign(new Error("This task is no longer open. Use list to find available chats."), { status: 404 });
+    if (action === "get") return view(tab);
+    if (action === "focus") {
+      if (!tab.projectless) rememberProject(tab.root, undefined, true);
+      setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
+    } else if (action === "rename") setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name: body.name } : t));
+    else if (action === "close") {
+      if (tab.busy || tab.queuedMessages?.length || tab.mode === "native") throw new Error("Stop this task and remove queued messages in readable view before closing it.");
+      await api("session:close", tab.id);
+      setTabs((old) => {
+        const next = old.filter((t) => t.id !== tab.id);
+        if (activeIdRef.current === tab.id) {
+          const selected = next.filter((t) => tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root)).at(-1) || next[Math.min(old.findIndex((t) => t.id === tab.id), next.length - 1)];
+          setActiveId(selected?.id || ""); setSelectedRoot(selected && !selected.projectless ? selected.root : "");
+        }
+        return next;
+      });
+      notify(`Agent control closed ${tab.name}`);
+      await settleControl(); persist(); return { id, closed: true };
+    } else {
+      if (tab.mode !== "rich") throw new Error("Return this chat to readable view to control it. Native terminal interaction stays in Lumen.");
+      if (action === "message") {
+        if (await submit(tab, body.id, body.text)) return { ...view(tab), messageId: body.id, reused: true };
+      } else if (action === "queue" || action === "resume") await api("session:queue-action", tab.id, body.messageId || "", action === "resume" ? "resume" : body.action);
+      else if (action === "stop") await api("session:stop", tab.id);
+      else if (action === "models") return api("session:models", tab.id);
+      else if (action === "configure") await api("session:configure", tab.id, body);
+      else if (action === "answer") {
+        const request = uiRequestsRef.current.find((r) => r.session === tab.id && r.request.id === body.requestId)?.request;
+        if (!request) throw new Error("This question is no longer pending.");
+        if (!body.response.cancelled && (request.method === "confirm" ? typeof body.response.confirmed !== "boolean" : request.method === "questions" ? !body.response.answers : typeof body.response.value !== "string" || request.method === "select" && !request.options?.includes(body.response.value))) throw new Error("Use the response shape for this pending question.");
+        if (!body.response.cancelled && request.method === "questions") {
+          const questions = request.questions || [], ids = new Set(questions.map((q) => q.id));
+          if (!questions.length || [body.response.answers, body.response.answerLists, body.response.notes].some((values) => values && Object.keys(values).some((key) => !ids.has(key))) ||
+            questions.some((q) => !body.response.answers[q.id]?.trim() || body.response.answerLists && (!body.response.answerLists[q.id]?.length || body.response.answerLists[q.id].some((value: string) => !value.trim()) || !q.multiSelect && body.response.answerLists[q.id].length > 1)))
+            throw new Error("Answer each pending question using its exact ID, or cancel. Custom written answers are allowed.");
+        }
+        await api("session:pi-response", tab.id, { ...body.response, id: body.requestId });
+        setUiRequests((old) => old.filter((r) => r.session !== tab.id || r.request.id !== body.requestId));
+      } else throw new Error("Unknown agent-control action.");
+    }
+    if (action !== "message") audit(tab, `Local agent requested ${action}${action === "queue" ? ` · ${body.action}` : ""}.`);
+    await settleControl(); persist();
+    return { ...view(find() || tab), ...(action === "message" ? { messageId: body.id } : {}) };
+  });
   const openFile = async (file: string) => {
     if (!root) return;
     const normalized = file
@@ -1085,6 +1189,7 @@ export default function App() {
                   </button>}
                 </div>
                 <div>
+                  {active.managedBy && <button className="agent-control-badge" title={`${active.managedBy} · Task ${active.controlId}`} onClick={() => { setSettingsSection("control"); setDialog("settings"); }}><Sparkles size={12} />Agent control</button>}
                   {active.agent !== "shell" && <ContextIndicator tab={active} />}
                   {active.agent !== "shell" && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
                     if (id !== (active.accountId || "")) void addTab(active.agent, active.mode, active.projectless ? "" : active.root, undefined, active.cwd, id, active.projectless ? active.scratchId : undefined);

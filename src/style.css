@@ -3219,3 +3219,6 @@ kbd {
 .agent-question-option input { width: auto; flex-shrink: 0; margin-top: 3px; accent-color: var(--accent); }
 .agent-question-option small { display: block; color: var(--muted); line-height: 1.5; margin-top: 4px; }
 .agent-request-detail { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; line-height: 1.5; }
+.agent-control-instructions { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); padding: 14px; border-radius: 8px; font-size: 12px; line-height: 1.65; max-height: 270px; overflow: auto; }
+.agent-control-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--accent); background: transparent; padding: 4px 6px; border-radius: 5px; white-space: nowrap; }
+.agent-control-badge:hover { background: var(--surface); }

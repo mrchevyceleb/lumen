@@ -102,7 +102,10 @@ export interface Tab {
   contextStale?: boolean;
   queuedMessages?: QueuedMessage[];
   queuePaused?: boolean;
+  managedBy?: string;
 }
+export interface AgentControlRequest { requestId: string; action: string; id: string; body: Record<string, any> }
+export interface AgentControlStatus { enabled: boolean; running: boolean; ready: boolean; url: string; connectionFile: string; guideFile: string; command: string; error: string }
 export interface McpConnection {
   name: string; source: string; status: string; enabled: boolean; tools: number | null; canToggle: boolean;
   canReconnect?: boolean; error?: string; authUrl?: string;
@@ -206,6 +209,8 @@ declare global {
     lumen: {
       invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
       onSession: (callback: (event: SessionEvent) => void) => () => void;
+      onAgentControl: (callback: (event: AgentControlRequest) => void) => () => void;
+      onAgentControlStatus: (callback: (status: AgentControlStatus) => void) => () => void;
       onUpdate: (callback: (status: UpdateStatus) => void) => () => void;
       onAccounts: (callback: (event: { type: string; id?: string; data?: string; code?: number; offset?: number }) => void) => () => void;
       onOpenPaths: (callback: () => void) => () => void;

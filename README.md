@@ -119,6 +119,12 @@ Aurora, Orbital, Rain, **Star field**, and **Nebula** have visible motion and li
 
 Your theme, recent workspaces, readable tabs, transcripts, and CLI resume references are stored locally in Lumen's user-data directory and flushed when the window closes. A known agent conversation returns in readable view on restart even if you closed it in native view. Standalone native terminal tabs are not restored. Native processes and shell variables live for the lifetime of their shell; stopping a readable command or changing views starts a fresh shell. Unsaved editor changes are not persisted. Readable transcripts stay local, while agent prompts are sent by the chosen CLI to its configured provider, as usual.
 
+## Local agent control
+
+Use **Settings → Agent control → Copy instructions for an agent** to let another AI start and manage visible coding tasks in Lumen. A dependency-free `lumen-agent.cjs` helper supports create, list, get/watch, continue, queue/steer, stop/resume, model configuration, rename, focus, answer, and close. Any installed provider or a shell can be selected, with a workspace or without one. Existing chats are available too. Agent-created chats have a badge, and management actions leave visible notices.
+
+The API is on by default, stays on loopback, requires a private per-launch token, and rejects browser origins. Turn it off in Settings to disconnect clients while chats keep running. The helper discovers `%APPDATA%\Lumen\agent-control.json`, or a copied connection path/`LUMEN_CONTROL_FILE` for portable profiles. Lumen agents inherit the connection path. Task IDs persist with saved chats; messages queue by default. See the [full CLI and HTTP guide](electron/agent-control-guide.md) for retry-safe IDs, output monitoring, and PowerShell examples that don't require Node.js.
+
 ## Develop
 
 Requires Node.js 22.12+ or 24+, Git, and whichever agent CLIs you want to use.
