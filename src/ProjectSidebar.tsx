@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, Plus, Pin, MoreHorizontal, GripVertical, ChevronRight, ChevronDown, ListTree, PanelTop } from "lucide-react";
+import { FolderOpen, Plus, Pin, MoreHorizontal, GripVertical, ChevronRight, ChevronDown, ListTree, PanelTop, PanelLeftClose } from "lucide-react";
 import SessionTabs, { type SessionTabActions } from "./SessionTabs";
 import type { Settings, Tab } from "./types";
 
@@ -13,10 +13,10 @@ export function restoreProjects(): Project[] {
   } catch { return []; }
 }
 
-export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onChange, onRemove, tabs, activeId, settings, onSelect, onCustomize, onClose, onLayout, onNewChat, newChatRoot }: SessionTabActions & {
+export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onChange, onRemove, tabs, activeId, settings, onSelect, onCustomize, onClose, onLayout, onNewChat, newChatRoot, onCollapse }: SessionTabActions & {
   projects: Project[]; activeRoot: string; counts: Record<string, number>; ready: boolean;
   tabs: Tab[]; activeId: string; settings: Settings; onLayout: () => void; onNewChat: (root: string) => void; newChatRoot?: string;
-  onOpen: (project: Project) => void; onAdd: () => void; onChange: (projects: Project[]) => void; onRemove: (project: Project) => void;
+  onOpen: (project: Project) => void; onAdd: () => void; onChange: (projects: Project[]) => void; onRemove: (project: Project) => void; onCollapse: () => void;
 }) {
   const vertical = settings.chatLayout === "vertical";
   const [scratchCollapsed, setScratchCollapsed] = useState(false);
@@ -62,7 +62,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
     setMenu("");
   };
   return <div className={`project-sidebar ${vertical ? "with-chats" : ""}`} ref={container}>
-    <div className="project-heading"><span>PROJECTS <small>{projects.length}</small></span><div><button aria-label={vertical ? "Use horizontal tabs" : "Use vertical chats"} title={vertical ? "Use horizontal tabs" : "Use vertical chats"} onClick={onLayout}>{vertical ? <PanelTop size={14} /> : <ListTree size={14} />}</button><button aria-label="Add project" onClick={onAdd} disabled={!ready}><Plus size={15} /></button></div></div>
+    <div className="project-heading"><span>PROJECTS <small>{projects.length}</small></span><div><button aria-label={vertical ? "Use horizontal tabs" : "Use vertical chats"} title={vertical ? "Use horizontal tabs" : "Use vertical chats"} onClick={onLayout}>{vertical ? <PanelTop size={14} /> : <ListTree size={14} />}</button><button aria-label="Add project" onClick={onAdd} disabled={!ready}><Plus size={15} /></button><button aria-label="Collapse projects sidebar" title="Collapse projects sidebar" onClick={onCollapse}><PanelLeftClose size={14} /></button></div></div>
     {projects.length > 4 && <input aria-label="Search projects" placeholder="Find a project…" value={query} onChange={(e) => setQuery(e.target.value)} />}
     <div className="project-scroll">
       {[true, false].map((pinned) => <div key={String(pinned)}>

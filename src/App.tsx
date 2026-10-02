@@ -18,8 +18,8 @@ import {
   Minus,
   Square,
   Search,
-  PanelLeftClose,
-  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   ArrowDownToLine,
   ArrowUpFromLine,
   RefreshCw,
@@ -116,8 +116,12 @@ export default function App() {
     });
   }, [accounts]);
   const projectTabsRef = useRef<Record<string, string>>({});
-  const [panel, setPanel] = useState<"files" | "git">("files");
-  const [sidebar, setSidebar] = useState(true);
+  const [panelPreferences] = useState(() => { try { return JSON.parse(localStorage.getItem("lumen.panels") || "{}") || {}; } catch { return {}; } });
+  const [panel, setPanel] = useState<"files" | "git">(panelPreferences.panel === "git" ? "git" : "files");
+  const [sidebar, setSidebar] = useState(panelPreferences.projects !== false);
+  const [explorer, setExplorer] = useState(panelPreferences.workspace === true);
+  const projectsToggle = useRef<HTMLButtonElement>(null);
+  const explorerToggle = useRef<HTMLButtonElement>(null);
   const verticalChats = settings.chatLayout === "vertical" && sidebar;
   useEffect(() => {
     const element = contextBar.current;
@@ -126,7 +130,13 @@ export default function App() {
     const observer = new ResizeObserver(measure); observer.observe(element); measure();
     return () => observer.disconnect();
   }, [activeId, verticalChats]);
-  const [sidebarWidth, setSidebarWidth] = useState(250);
+  const [sidebarWidth, setSidebarWidth] = useState(Number.isFinite(panelPreferences.projectsWidth) ? Math.min(420, Math.max(200, panelPreferences.projectsWidth)) : 250);
+  const [explorerWidth, setExplorerWidth] = useState(Number.isFinite(panelPreferences.workspaceWidth) ? Math.min(420, Math.max(200, panelPreferences.workspaceWidth)) : 270);
+  useEffect(() => {
+    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth })); } catch {}
+  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth]);
+  const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
+  const hideExplorer = () => { setExplorer(false); explorerToggle.current?.focus(); };
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocKey, setActiveDocKey] = useState("");
   const [editorExpanded, setEditorExpanded] = useState(false);
@@ -832,9 +842,9 @@ export default function App() {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   });
-  const resize = (event: React.PointerEvent, kind: "sidebar" | "split") => {
+  const resize = (event: React.PointerEvent, kind: "sidebar" | "explorer" | "split") => {
     const start = event.clientX;
-    const initial = kind === "sidebar" ? sidebarWidth : split;
+    const initial = kind === "sidebar" ? sidebarWidth : kind === "explorer" ? explorerWidth : split;
     const host = event.currentTarget.parentElement!;
     const width = host.clientWidth;
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
@@ -843,6 +853,7 @@ export default function App() {
         setSidebarWidth(
           Math.min(420, Math.max(200, initial + e.clientX - start)),
         );
+      else if (kind === "explorer") setExplorerWidth(Math.min(420, Math.max(200, initial + start - e.clientX)));
       else
         setSplit(
           Math.min(
@@ -855,9 +866,11 @@ export default function App() {
     const end = () => {
       target.removeEventListener("pointermove", move as any);
       target.removeEventListener("pointerup", end);
+      target.removeEventListener("pointercancel", end);
     };
     target.addEventListener("pointermove", move as any);
     target.addEventListener("pointerup", end);
+    target.addEventListener("pointercancel", end);
   };
   const githubURL = (remote?: string) => {
     if (!remote) return "";
@@ -934,6 +947,9 @@ export default function App() {
         </div>
         <span className="titlebar-caption">a little more room to think</span>
         <div className="titlebar-right">
+          <button ref={explorerToggle} className={`icon-button ${explorer && panel === "files" ? "active" : ""}`} aria-label={explorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={explorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={explorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); setExplorer(!(explorer && panel === "files")); }}>
+            {explorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
+          </button>
           <button className="command-hint" onClick={() => setDialog("palette")}>
             <Search size={12} />
             <span>Go anywhere</span>
@@ -964,29 +980,23 @@ export default function App() {
       <div className="app-body">
         <nav className="rail" aria-label="Workspace panels">
           <div>
-            <IconButton
-              label="File explorer"
-              active={panel === "files" && sidebar}
-              onClick={() => {
-                setPanel("files");
-                setSidebar(true);
-              }}
-            >
-              <Files size={21} />
-            </IconButton>
-            <IconButton
-              label="Source control"
-              active={panel === "git" && sidebar}
+            <button ref={projectsToggle} className={`icon-button ${sidebar ? "active" : ""}`} aria-label={sidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={sidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={sidebar} aria-controls="projects-sidebar" onClick={() => setSidebar(!sidebar)}><Files size={21} /></button>
+            <button
+              className={`icon-button ${panel === "git" && explorer ? "active" : ""}`}
+              aria-label="Source control"
+              title="Source control"
+              aria-expanded={panel === "git" && explorer}
+              aria-controls="workspace-panel"
               onClick={() => {
                 setPanel("git");
-                setSidebar(true);
+                setExplorer(!(explorer && panel === "git"));
               }}
             >
               <GitBranch size={21} />
               {workspace?.git.files.length > 0 && (
                 <span className="rail-badge">{workspace.git.files.length}</span>
               )}
-            </IconButton>
+            </button>
             <IconButton
               label="Worktrees"
               onClick={() => setDialog("worktrees")}
@@ -1017,8 +1027,8 @@ export default function App() {
         </nav>
         {sidebar && (
           <>
-            <aside className="sidebar" style={{ width: sidebarWidth }}>
-              <ProjectSidebar projects={projects.filter((p) => !p.hidden)} activeRoot={root} ready={loaded}
+            <aside id="projects-sidebar" aria-label="Projects and chats" className="sidebar projects-panel" style={{ width: sidebarWidth }}>
+              <ProjectSidebar projects={projects.filter((p) => !p.hidden)} activeRoot={root} ready={loaded} onCollapse={hideProjects}
                 tabs={tabs} activeId={activeId} settings={settings} {...tabActions} onLayout={toggleChatLayout} newChatRoot={agentMenu ? agentMenuRoot : undefined}
                 onNewChat={(folder) => {
                   const open = () => { setAgentMenuRoot(folder); setAgentMenu(true); };
@@ -1027,143 +1037,15 @@ export default function App() {
                 counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root)).length]))}
                 onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")}
                 onChange={(next) => setProjects((old) => [...next, ...old.filter((p) => p.hidden)])} onRemove={removeProject} />
-              {!verticalChats && <button
-                className="workspace-switch"
-                onClick={() => setDialog("open")}
-              >
-                <span className="workspace-icon">
-                  <FolderOpen size={18} />
-                </span>
-                <span>
-                  <strong>{workspace?.name || (active ? "No workspace" : "Your workspace")}</strong>
-                  <small>
-                    {workspace?.git.available
-                      ? workspace.git.branch
-                      : active ? "Open a folder anytime" : "Open a folder to begin"}
-                  </small>
-                </span>
-                <ChevronDown size={13} />
-              </button>}
-              <div className="sidebar-heading">
-                <span>{panel === "files" ? "EXPLORER" : "SOURCE CONTROL"}</span>
-                <div>
-                  {panel === "files" && (
-                    <>
-                      <IconButton
-                        label="Find a file"
-                        onClick={() => setDialog("palette")}
-                      >
-                        <Search size={14} />
-                      </IconButton>
-                      <IconButton
-                        label="New file"
-                        disabled={!workspace}
-                        onClick={() => setDialog("newfile")}
-                      >
-                        <FilePlus2 size={14} />
-                      </IconButton>
-                    </>
-                  )}
-                  <IconButton
-                    label="Refresh workspace"
-                    disabled={!workspace}
-                    onClick={() => refreshGit()}
-                  >
-                    <RefreshCw size={14} />
-                  </IconButton>
-                  <IconButton
-                    label="Hide sidebar"
-                    onClick={() => setSidebar(false)}
-                  >
-                    <PanelLeftClose size={14} />
-                  </IconButton>
-                </div>
-              </div>
-              {workspace ? (
-                panel === "files" ? (
-                  <>
-                    <div className="tree-scroll">
-                      <div className="repo-label">
-                        <ChevronDown size={12} />
-                        {workspace.name.toUpperCase()}
-                      </div>
-                      <FileTree
-                        root={root}
-                        refresh={refresh}
-                        onOpen={openFile}
-                        changes={Object.fromEntries(
-                          workspace.git.files.map((f) => [f.path, f.code]),
-                        )}
-                      />
-                    </div>
-                    <div className="sidebar-bottom">
-                      <span className="eyebrow">
-                        YOUR WORKSPACE, UNINTERRUPTED
-                      </span>
-                      <button
-                        className="worktree-shortcut"
-                        onClick={() => setDialog("worktrees")}
-                      >
-                        <Layers size={16} />
-                        <span>
-                          Start in a worktree
-                          <small>A fresh branch. A clean space.</small>
-                        </span>
-                        <ArrowRight size={14} />
-                      </button>
-                      <div className="sidebar-tips">
-                        <kbd>Ctrl P</kbd>
-                        <span>Find any file</span>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <GitPanel
-                    workspace={workspace}
-                    busy={gitBusy}
-                    action={gitAction}
-                    onDiff={async (file, staged) => {
-                      try {
-                        setDiff({
-                          path: file.path,
-                          staged,
-                          text: await api("git:diff", root, file.path, staged),
-                        });
-                      } catch (e: any) {
-                        notify(e.message);
-                      }
-                    }}
-                    onFile={openFile}
-                    onGitHub={() => {
-                      const url = githubURL(workspace.git.remote);
-                      if (url)
-                        api("external:open", url).catch((e) =>
-                          notify(e.message),
-                        );
-                      else
-                        notify(
-                          "Add a GitHub origin remote to open this repository.",
-                        );
-                    }}
-                    onWorktree={() => setDialog("worktrees")}
-                    onError={notify}
-                  />
-                )
-              ) : (
-                <div className="sidebar-empty">
-                  <FolderOpen size={30} />
-                  <p>{active ? "This chat has no workspace." : "A home for your code."}</p>
-                  <button className="secondary" onClick={() => openWorkspace()}>
-                    Open a folder
-                  </button>
-                </div>
-              )}
             </aside>
             <div
               className="resizer sidebar-resizer"
               role="separator"
-              aria-label="Resize sidebar"
+              aria-label="Resize projects sidebar"
               aria-orientation="vertical"
+              aria-valuemin={200}
+              aria-valuemax={420}
+              aria-valuenow={sidebarWidth}
               tabIndex={0}
               onPointerDown={(e) => resize(e, "sidebar")}
               onKeyDown={(e) => {
@@ -1177,7 +1059,6 @@ export default function App() {
         )}
         <main className="main">
           {(!verticalChats || !active) && <div className="tabbar">
-            {!sidebar && <IconButton label="Show sidebar" onClick={() => setSidebar(true)}><PanelLeftOpen size={17} /></IconButton>}
             <SessionTabs tabs={tabs.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless)} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
             {sessionActions}
           </div>}
@@ -1353,6 +1234,143 @@ export default function App() {
             </div>
           )}
         </main>
+        {explorer && (
+          <>
+            <div
+              className="resizer sidebar-resizer explorer-resizer"
+              role="separator"
+              aria-label="Resize workspace panel"
+              aria-orientation="vertical"
+              aria-valuemin={200}
+              aria-valuemax={420}
+              aria-valuenow={explorerWidth}
+              tabIndex={0}
+              onPointerDown={(e) => resize(e, "explorer")}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowRight")
+                  setExplorerWidth((n) => Math.max(200, n - 10));
+                if (e.key === "ArrowLeft")
+                  setExplorerWidth((n) => Math.min(420, n + 10));
+              }}
+            />
+            <aside id="workspace-panel" aria-label={panel === "files" ? "File explorer" : "Source control"} className="sidebar workspace-panel" style={{ width: explorerWidth }}>
+              <div className="sidebar-heading">
+                <span>{panel === "files" ? "EXPLORER" : "SOURCE CONTROL"}</span>
+                <div>
+                  {panel === "files" && (
+                    <>
+                      <IconButton
+                        label="Find a file"
+                        onClick={() => setDialog("palette")}
+                      >
+                        <Search size={14} />
+                      </IconButton>
+                      <IconButton
+                        label="New file"
+                        disabled={!workspace}
+                        onClick={() => setDialog("newfile")}
+                      >
+                        <FilePlus2 size={14} />
+                      </IconButton>
+                    </>
+                  )}
+                  <IconButton
+                    label="Refresh workspace"
+                    disabled={!workspace}
+                    onClick={() => refreshGit()}
+                  >
+                    <RefreshCw size={14} />
+                  </IconButton>
+                  <IconButton
+                    label="Hide workspace panel"
+                    onClick={hideExplorer}
+                  >
+                    <PanelRightClose size={14} />
+                  </IconButton>
+                </div>
+              </div>
+              {workspace ? (
+                panel === "files" ? (
+                  <>
+                    <div className="tree-scroll">
+                      <div className="repo-label">
+                        <ChevronDown size={12} />
+                        {workspace.name.toUpperCase()}
+                      </div>
+                      <FileTree
+                        root={root}
+                        refresh={refresh}
+                        onOpen={openFile}
+                        changes={Object.fromEntries(
+                          workspace.git.files.map((f) => [f.path, f.code]),
+                        )}
+                      />
+                    </div>
+                    <div className="sidebar-bottom">
+                      <span className="eyebrow">
+                        YOUR WORKSPACE, UNINTERRUPTED
+                      </span>
+                      <button
+                        className="worktree-shortcut"
+                        onClick={() => setDialog("worktrees")}
+                      >
+                        <Layers size={16} />
+                        <span>
+                          Start in a worktree
+                          <small>A fresh branch. A clean space.</small>
+                        </span>
+                        <ArrowRight size={14} />
+                      </button>
+                      <div className="sidebar-tips">
+                        <kbd>Ctrl P</kbd>
+                        <span>Find any file</span>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <GitPanel
+                    workspace={workspace}
+                    busy={gitBusy}
+                    action={gitAction}
+                    onDiff={async (file, staged) => {
+                      try {
+                        setDiff({
+                          path: file.path,
+                          staged,
+                          text: await api("git:diff", root, file.path, staged),
+                        });
+                      } catch (e: any) {
+                        notify(e.message);
+                      }
+                    }}
+                    onFile={openFile}
+                    onGitHub={() => {
+                      const url = githubURL(workspace.git.remote);
+                      if (url)
+                        api("external:open", url).catch((e) =>
+                          notify(e.message),
+                        );
+                      else
+                        notify(
+                          "Add a GitHub origin remote to open this repository.",
+                        );
+                    }}
+                    onWorktree={() => setDialog("worktrees")}
+                    onError={notify}
+                  />
+                )
+              ) : (
+                <div className="sidebar-empty">
+                  <FolderOpen size={30} />
+                  <p>{active ? "This chat has no workspace." : "A home for your code."}</p>
+                  <button className="secondary" onClick={() => openWorkspace()}>
+                    Open a folder
+                  </button>
+                </div>
+              )}
+            </aside>
+          </>
+        )}
       </div>
       <footer className="statusbar">
         <div className="checkout-status">
@@ -1371,7 +1389,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setPanel("git");
-                  setSidebar(true);
+                  setExplorer(true);
                 }}
               >
                 {statusWorkspace.git.ahead} ↑ {statusWorkspace.git.behind} ↓

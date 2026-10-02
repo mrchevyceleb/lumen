@@ -79,6 +79,8 @@ The bottom bar always identifies the active folder or linked worktree and its Gi
 
 ## Files and Git
 
+The left sidebar contains projects and their chats. Collapse it with the arrow in its Projects heading or the projects icon on the left rail; that icon also brings it back. Chats fall back to horizontal tabs while the sidebar is hidden. The file explorer lives in an independent right panel, hidden by default. Use the panel icon in the top-right title bar to show or hide it, or close it from its heading. Source control opens in the same right panel. Both panels remember their visibility and width across restarts and can be resized by dragging their inside edge or using the focused separator's arrow keys.
+
 Click files in the explorer to view or edit them beside the conversation. Save with **Ctrl S**. The editor checks for changes on disk before saving and asks you to reload rather than overwriting a newer version. Closing unsaved files or the app prompts before discarding edits. Text files up to 2 MB are supported; dependency/build folders are excluded from the explorer.
 
 The Git panel supports individual/all staging and unstaging, readable diffs, commits, fetch, pull, push, and recent history. Pull uses fast-forward only. A first push sets the branch's upstream. The GitHub view lists PRs when the GitHub CLI is installed and signed in, and opens them in your browser. Git remote authentication uses your existing Git configuration.

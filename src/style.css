@@ -494,7 +494,13 @@ kbd {
   background: color-mix(in srgb, var(--surface) 54%, var(--bg) 30%);
   border-right: 1px solid var(--border);
   position: relative;
+  min-height: 0;
+  overflow: hidden;
 }
+.projects-panel > .project-sidebar, .projects-panel > .project-sidebar.with-chats { flex: 1; min-height: 0; max-height: none; border-bottom: 0; }
+.workspace-panel { border-right: 0; border-left: 1px solid var(--border); }
+.workspace-panel .sidebar-heading { padding-top: 12px; padding-bottom: 12px; }
+.workspace-panel .sidebar-empty { overflow: auto; }
 .workspace-switch {
   display: flex;
   align-items: center;
