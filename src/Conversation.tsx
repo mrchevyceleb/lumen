@@ -16,6 +16,7 @@ import {
   Paperclip,
   ExternalLink,
   Cable,
+  LogIn,
 } from "lucide-react";
 import { Busy, CopyButton, IconButton } from "./Components";
 import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand } from "./types";
@@ -25,6 +26,7 @@ import SessionControls, { lumenCommands, parseThreshold } from "./SessionControl
 import type { SessionControlsState } from "./types";
 import QueuedMessages from "./QueuedMessages";
 import { agentNames } from "./settings";
+const claudeAuthError = (text: string) => /failed to authenticate|OAuth session expired|invalid authentication credentials|OAuth access token (?:has been )?(?:revoked|expired)/i.test(text);
 export function AgentMark({
   agent,
   color,
@@ -65,6 +67,7 @@ export default function Conversation({
   onAttach,
   onDetach,
   onConfig,
+  onSignIn,
 }: {
   tab: Tab;
   settings: Settings;
@@ -77,6 +80,7 @@ export default function Conversation({
   onAttach: () => void;
   onDetach: () => void;
   onConfig: (change: Partial<Tab>) => void;
+  onSignIn: () => void;
 }) {
   const input = tab.draft || "";
   const setInput = (value: string) => onConfig({ draft: value });
@@ -274,13 +278,14 @@ export default function Conversation({
           </div>
         ) : (
           <div className="message-list">
-            {tab.messages.map((message) => (
+            {tab.messages.map((message, index) => tab.agent === "claude" && message.role === "assistant" && claudeAuthError(message.text) && tab.messages[index + 1]?.role === "error" && claudeAuthError(tab.messages[index + 1].text) ? null : (
               <MessageView
                 key={message.id}
                 message={message}
                 tab={tab}
                 color={color}
                 onFile={onFile}
+                onSignIn={onSignIn}
               />
             ))}
             {tab.busy && (
@@ -477,11 +482,13 @@ function MessageView({
   tab,
   color,
   onFile,
+  onSignIn,
 }: {
   message: Message;
   tab: Tab;
   color: string;
   onFile: (path: string) => void;
+  onSignIn: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   if (m.role === "user")
@@ -521,8 +528,12 @@ function MessageView({
       <div className="error-message">
         <AlertCircle size={16} />
         <div>
-          <strong>Something needs attention</strong>
-          <p>{m.text}</p>
+          {tab.agent === "claude" && claudeAuthError(m.text) ? <>
+            <strong>Claude needs you to sign in again</strong>
+            <p>Your chat is saved. Sign in here, then retry your message.</p>
+            <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Sign in to Claude</button>
+            <details className="auth-error-details"><summary>Error details</summary><p>{m.text}</p></details>
+          </> : <><strong>Something needs attention</strong><p>{m.text}</p></>}
         </div>
         <CopyButton text={m.text} />
       </div>

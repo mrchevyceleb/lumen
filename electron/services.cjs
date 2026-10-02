@@ -659,7 +659,7 @@ class Sessions {
         const data = await this.piRpc(s, "get_commands");
         result = { commands: normalize(data.commands, "pi"), origin: "Pi RPC" };
       } else {
-        if (s.agent === "claude" && s.accountId) await claudeHome(this, s);
+        if (s.agent === "claude") await claudeHome(this, s);
         result = await discoverCommands(s, resolveLauncher(s.command), (child) => this.kill(child));
       }
       if (!this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Command discovery was canceled.");
@@ -975,11 +975,12 @@ class Sessions {
       },
     );
     s.process = child;
-    child.stdin.on("error", (error) =>
-      this.event(s, { type: "error", message: error.message }),
-    );
+    child.stdin.on("error", (error) => {
+      if (s.process === child) this.event(s, { type: "error", message: error.message });
+    });
     child.on("error", (error) => {
-      if (s.process === child) this.rejectPiCommands(s, error.message);
+      if (s.process !== child) return;
+      this.rejectPiCommands(s, error.message);
       this.event(s, { type: "error", message: error.message });
       this.finish(s, 1);
     });

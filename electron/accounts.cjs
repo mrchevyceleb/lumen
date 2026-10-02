@@ -13,7 +13,10 @@ function codexAccountOptions(s) {
 }
 function accountEnvironment(s, base = process.env) {
   const env = { ...base };
-  if (!s.accountId) return env;
+  if (!s.accountId) {
+    if (s.agent === "claude" && s.claudeHome) env.CLAUDE_CONFIG_DIR = s.claudeHome;
+    return env;
+  }
   for (const key of Object.keys(env)) if (authVariable(s.agent, key)) delete env[key];
   if (s.agent === "claude") { env.CLAUDE_CONFIG_DIR = s.claudeHome || s.accountHome; env.ANTHROPIC_CONFIG_DIR = path.join(s.accountHome, "anthropic"); }
   else env.CODEX_HOME = s.accountHome;
@@ -161,20 +164,30 @@ class Accounts {
     for (const agent of ["claude", "codex"]) if (this.defaults[agent] === id) this.defaults[agent] = "";
     await this.save(); return this.list();
   }
-  login(id, command) {
+  login(id, command, allowIdleReauth = false) {
     const p = this.get(id), home = this.home(id);
-    if (this.inUse(id)) throw new Error("Close this account's chats before signing in again.");
+    if (this.inUse(id) && !allowIdleReauth) throw new Error("Close this account's chats before signing in again.");
+    return this.startLogin(p, home, command, id);
+  }
+  loginDefault(command) {
+    const p = { id: "cli-default-claude", agent: "claude", name: "Claude · CLI default" };
+    fs.mkdirSync(sourceHome("claude"), { recursive: true, mode: 0o700 });
+    return this.startLogin(p, sourceHome("claude"), command, "");
+  }
+  signingIn(s) { return !!this.logins.get(s.accountId || "cli-default-claude") && !this.logins.get(s.accountId || "cli-default-claude").ended; }
+  startLogin(p, home, command, accountId) {
+    const id = p.id;
     if (this.logins.has(id) && !this.logins.get(id).ended) return { id, agent: p.agent, name: p.name };
     if ([...this.logins.values()].some((l) => l.agent === p.agent && !l.ended)) throw new Error("Finish the other sign-in for this provider first.");
     const launcher = this.resolveLauncher(command || p.agent);
     const args = p.agent === "claude" ? ["--dangerously-skip-permissions", "auth", "login"] : [...codexAccountOptions({ accountId: id }), "login"];
     const terminal = require("node-pty").spawn(launcher.file, [...launcher.args, ...args], { name: "xterm-256color", cols: 80, rows: 20, cwd: home,
-      env: accountEnvironment({ agent: p.agent, accountId: id, accountHome: home }), });
+      env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), });
     const login = { terminal, agent: p.agent, buffer: "", offset: 0 }; this.logins.set(id, login);
     terminal.onData((data) => { login.buffer = (login.buffer + data).slice(-100000); login.offset += data.length; this.notify({ type: "terminal", id, data, offset: login.offset }); });
     terminal.onExit(async ({ exitCode }) => {
       login.ended = true; login.exitCode = exitCode;
-      if (exitCode === 0) { p.revision = crypto.randomUUID(); await this.save().catch(() => {}); }
+      if (exitCode === 0 && accountId) { p.revision = crypto.randomUUID(); await this.save().catch(() => {}); }
       this.notify({ type: "exit", id, code: exitCode }); this.notify({ type: "changed" });
     });
     return { id, agent: p.agent, name: p.name };
@@ -184,21 +197,57 @@ class Accounts {
   buffer(id) { const login = this.logins.get(id); return { text: login?.buffer || "", offset: login?.offset || 0, code: login?.ended ? login.exitCode : null }; }
   cancel(id) { const login = this.logins.get(id); if (!login?.ended) login?.terminal.kill(); else this.logins.delete(id); }
   async syncClaude(s) {
-    if (!s.accountId || !s.claudeHome) return;
-    const previous = this.authLocks.get(s.accountId) || Promise.resolve();
+    if (!s.claudeHome) return;
+    const key = s.accountId || `claude-default:${path.resolve(sourceHome("claude"))}`;
+    const previous = this.authLocks.get(key) || Promise.resolve();
     const syncing = previous.catch(() => {}).then(async () => {
+      if (this.signingIn(s)) return;
+      const publish = () => !s.claudeAuthInvalid && !s.runtime?.authFailed && !this.signingIn(s);
+      if (!s.accountId) {
+        const central = path.join(sourceHome("claude"), ".credentials.json"), local = path.join(s.claudeHome, ".credentials.json"), marker = path.join(s.claudeHome, ".lumen-auth-source");
+        const [a, b] = await Promise.all([readJson(central), readJson(local)]);
+        const sourceConfig = process.env.CLAUDE_CONFIG_DIR ? path.join(sourceHome("claude"), ".claude.json") : path.join(os.homedir(), ".claude.json");
+        const localConfig = path.join(s.claudeHome, ".claude.json"), [config, chatConfig] = await Promise.all([readJson(sourceConfig), readJson(localConfig)]);
+        const signature = (value) => crypto.createHash("sha256").update(JSON.stringify(value.claudeAiOauth || null)).digest("hex");
+        let baseline = await fsp.readFile(marker, "utf8").catch((e) => { if (e.code === "ENOENT") return ""; throw e; });
+        let current = signature(a);
+        // Only publish a refresh derived from the source we last copied. A new
+        // terminal login or logout wins over an older chat, even with less expiry.
+        const sameAccount = typeof config.oauthAccount?.accountUuid === "string" && !!config.oauthAccount.accountUuid && config.oauthAccount.accountUuid === chatConfig.oauthAccount?.accountUuid;
+        if (this.signingIn(s)) return;
+        if (publish() && sameAccount && baseline === current && a.claudeAiOauth?.accessToken && b.claudeAiOauth?.accessToken && b.claudeAiOauth?.refreshToken && Number(b.claudeAiOauth.expiresAt) > Number(a.claudeAiOauth.expiresAt || 0)) {
+          a.claudeAiOauth = b.claudeAiOauth; await writeJson(central, a); current = signature(a);
+        } else if (signature(b) !== current) {
+          if (a.claudeAiOauth) b.claudeAiOauth = a.claudeAiOauth; else delete b.claudeAiOauth;
+          await writeJson(local, b);
+          s.claudeAuthChanged = true;
+        }
+        if (JSON.stringify(chatConfig.oauthAccount) !== JSON.stringify(config.oauthAccount)) {
+          if (config.oauthAccount) chatConfig.oauthAccount = config.oauthAccount; else delete chatConfig.oauthAccount;
+          await writeJson(localConfig, chatConfig);
+        }
+        if (baseline !== current) await fsp.writeFile(marker, current, { mode: 0o600 });
+        return;
+      }
       const p = this.get(s.accountId, "claude"), central = path.join(this.home(p.id), ".credentials.json"), local = path.join(s.claudeHome, ".credentials.json");
+      const config = await readJson(path.join(this.home(p.id), ".claude.json")), localConfig = path.join(s.claudeHome, ".claude.json"), chatConfig = await readJson(localConfig);
+      const sameAccount = typeof config.oauthAccount?.accountUuid === "string" && !!config.oauthAccount.accountUuid && config.oauthAccount.accountUuid === chatConfig.oauthAccount?.accountUuid;
+      if (JSON.stringify(config.oauthAccount) !== JSON.stringify(chatConfig.oauthAccount)) {
+        if (config.oauthAccount) chatConfig.oauthAccount = config.oauthAccount; else delete chatConfig.oauthAccount;
+        await writeJson(localConfig, chatConfig);
+      }
       const [a, b] = await Promise.all([readJson(central), readJson(local)]);
       if (JSON.stringify(a) === JSON.stringify(b)) { await fsp.writeFile(path.join(s.claudeHome, ".lumen-account-revision"), p.revision); return; }
       const currentRevision = await fsp.readFile(path.join(s.claudeHome, ".lumen-account-revision"), "utf8").catch(() => "");
-      if (currentRevision === p.revision && Number(b.claudeAiOauth?.expiresAt) > Number(a.claudeAiOauth?.expiresAt || 0)) await writeJson(central, b);
-      else if (a.claudeAiOauth?.accessToken) { await writeJson(local, a); await fsp.writeFile(path.join(s.claudeHome, ".lumen-account-revision"), p.revision); }
+      if (this.signingIn(s)) return;
+      if (publish() && sameAccount && currentRevision === p.revision && Number(b.claudeAiOauth?.expiresAt) > Number(a.claudeAiOauth?.expiresAt || 0)) await writeJson(central, b);
+      else { await writeJson(local, a); await fsp.writeFile(path.join(s.claudeHome, ".lumen-account-revision"), p.revision); s.claudeAuthChanged = true; }
     });
-    this.authLocks.set(s.accountId, syncing); await syncing;
+    this.authLocks.set(key, syncing); await syncing;
   }
   watchClaude(s) {
-    if (!s.accountId || s.accountWatches) return;
-    s.accountWatches = [this.home(s.accountId), s.claudeHome].map((folder) => fs.watch(folder, (_event, file) => {
+    if (!s.claudeHome || s.accountWatches) return;
+    s.accountWatches = [s.accountId ? this.home(s.accountId) : sourceHome("claude"), s.claudeHome].filter((folder) => fs.existsSync(folder)).map((folder) => fs.watch(folder, (_event, file) => {
       if (String(file) === ".credentials.json") void this.syncClaude(s).catch(() => {});
     }));
   }

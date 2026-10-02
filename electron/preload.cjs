@@ -42,7 +42,7 @@ const channels = new Set([
   "updates:check",
   "updates:install",
   "accounts:list", "accounts:add", "accounts:change", "accounts:system", "accounts:remove",
-  "accounts:login", "accounts:write", "accounts:resize", "accounts:buffer", "accounts:cancel",
+  "accounts:login", "accounts:login-default", "accounts:login-session", "accounts:write", "accounts:resize", "accounts:buffer", "accounts:cancel",
 ]);
 contextBridge.exposeInMainWorld("lumen", {
   invoke: async (channel, ...args) => {

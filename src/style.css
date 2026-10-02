@@ -1285,6 +1285,10 @@ kbd {
   flex: 1;
   min-width: 0;
 }
+.error-message .primary { margin: 10px 0 2px; }
+.auth-error-details { margin-top: 12px; color: var(--muted); font-size: 11px; }
+.auth-error-details summary { cursor: pointer; }
+.account-sign-in { padding: 20px 26px 26px; }
 .notice-message {
   font-size: 11px;
   color: var(--muted);

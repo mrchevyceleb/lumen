@@ -18,16 +18,17 @@ export function useAccounts() {
   return { accounts, error, refresh };
 }
 
-export function AccountPicker({ tab, onSelect, onManage }: { tab: Tab; onSelect: (id: string) => void; onManage: () => void }) {
+export function AccountPicker({ tab, onSelect, onManage, onSignIn }: { tab: Tab; onSelect: (id: string) => void; onManage: () => void; onSignIn: () => void }) {
   const { accounts, error } = useAccounts();
   if (!["claude", "codex"].includes(tab.agent)) return null;
   const profiles = accounts.profiles.filter((p) => p.agent === tab.agent);
   return <label className="account-picker" title={error || "Choosing another account starts a new chat in this workspace."}>
     <Users size={13} />
-    <select aria-label={`${agentNames[tab.agent]} account`} value={tab.accountId || ""} onChange={(e) => e.target.value === "manage" ? onManage() : onSelect(e.target.value)}>
+    <select aria-label={`${agentNames[tab.agent]} account`} value={tab.accountId || ""} onChange={(e) => e.target.value === "manage" ? onManage() : e.target.value === "signin" ? onSignIn() : onSelect(e.target.value)}>
       <option value="">CLI default</option>
       {profiles.map((p) => <option key={p.id} value={p.id} disabled={!p.signedIn}>{p.name}{!p.signedIn ? " · sign in first" : ""}</option>)}
       {tab.accountId && !profiles.some((p) => p.id === tab.accountId) && <option value={tab.accountId}>{tab.accountName || "Saved account"}</option>}
+      {tab.agent === "claude" && <option value="signin" disabled={tab.busy}>Sign in to this account…</option>}
       <option value="manage">Manage accounts…</option>
     </select>
   </label>;
@@ -63,6 +64,7 @@ export default function AccountsPanel({ settings, onStart }: { settings: Setting
     {(["claude", "codex"] as const).map((provider) => <section className="account-group" key={provider}>
       <div className="account-group-heading"><h4>{provider === "claude" ? "Claude Code" : "OpenAI · Codex"}</h4>
         <button className="secondary" disabled={working || !accounts.defaults[provider]} onClick={() => void run(async () => { await api("accounts:system", provider); })}>{!accounts.defaults[provider] && <Check size={12} />}Use CLI default</button></div>
+      {provider === "claude" && <button className="secondary" disabled={working} onClick={() => void run(async () => { setLogin(await api<AccountProfile>("accounts:login-default", settings.agents.claude.command)); })}><LogIn size={13} />Sign in to Claude · CLI default</button>}
       {!accounts.profiles.some((p) => p.agent === provider) && <p className="muted account-empty">Using your normal CLI login. Add a named account above to keep another login ready.</p>}
       {accounts.profiles.filter((p) => p.agent === provider).map((p) => <div className="account-card" key={p.id}>
         <div className="account-card-heading"><Users size={17} /><input key={p.name} aria-label={`Rename ${p.name}`} defaultValue={p.name} maxLength={80} disabled={working}
@@ -82,7 +84,7 @@ export default function AccountsPanel({ settings, onStart }: { settings: Setting
   </>;
 }
 
-function AccountLogin({ profile, settings, onDone }: { profile: AccountProfile; settings: Settings; onDone: () => void }) {
+export function AccountLogin({ profile, settings, onDone }: { profile: Pick<AccountProfile, "id" | "agent" | "name">; settings: Settings; onDone: (success: boolean) => void }) {
   const host = useRef<HTMLDivElement>(null);
   const [finished, setFinished] = useState(false);
   const [error, setError] = useState("");
@@ -106,7 +108,7 @@ function AccountLogin({ profile, settings, onDone }: { profile: AccountProfile; 
     const observer = new ResizeObserver(resize); observer.observe(host.current!); resize(); terminal.focus();
     return () => { disposed = true; stop(); observer.disconnect(); input.dispose(); terminal.dispose(); void api("accounts:cancel", profile.id).catch(() => {}); };
   }, [profile.id]);
-  return <div className="account-login"><h3>Sign in to {profile.name}</h3><p className="muted">Complete {agentNames[profile.agent]}'s sign-in in your browser. Choose the account you want to save here.</p>
+  return <div className="account-login"><h3>{profile.name}</h3><p className="muted">Complete {agentNames[profile.agent]}'s sign-in in your browser. If it asks for a code, paste it below. {profile.id === "cli-default-claude" ? "This updates your normal Claude CLI login, too." : "Choose the account you want to save here."}</p>
     <div ref={host} className="account-login-terminal" />{error && <p className="inline-error" role="alert">{error}</p>}
-    <div className="account-actions"><button className={finished ? "primary" : "secondary"} onClick={onDone}>{finished ? "Done" : "Cancel sign-in"}</button>{finished && !error && <span className="muted">Sign-in finished. Your account is ready to use.</span>}</div></div>;
+    <div className="account-actions"><button className={finished && !error ? "primary" : "secondary"} onClick={() => onDone(finished && !error)}>{finished ? error ? "Close and try again" : "Done" : "Cancel sign-in"}</button>{finished && !error && <span className="muted">Signed in. Return to your chat and retry your message.</span>}</div></div>;
 }

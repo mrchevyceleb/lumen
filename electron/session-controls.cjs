@@ -80,6 +80,7 @@ async function grokHome(owner, s) {
   return target;
 }
 async function claudeHome(owner, s) {
+  if (owner.accounts?.signingIn(s)) throw new Error("Finish Claude's sign-in, then retry your message.");
   const source = s.accountHome || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   const target = path.join(owner.dataDir, "claude", s.controlId);
   await fs.mkdir(target, { recursive: true, mode: 0o700 });
@@ -248,6 +249,7 @@ class Runtime {
       if (e.type === "system" && e.subtype === "compact_boundary") this.phase(false);
       if (e.type === "system" && e.subtype === "status") this.phase(e.status === "compacting");
       if (e.type === "result") {
+        if (e.is_error && (e.error_code === "authentication_failed" || /failed to authenticate|OAuth session expired|invalid authentication credentials|OAuth access token (?:has been )?(?:revoked|expired)/i.test([e.result, ...(e.errors || [])].join("\n")))) { this.authFailed = true; s.claudeAuthInvalid = true; }
         const usage = e.modelUsage?.[this.contextModel] || (Object.keys(e.modelUsage || {}).length === 1 ? Object.values(e.modelUsage)[0] : null);
         this.contextWindow = usage?.contextWindow ?? this.contextWindow; this.reportContext(); o.finish(s, e.is_error ? 1 : 0);
       }
@@ -517,10 +519,28 @@ function claudeContext(usage) {
 }
 async function ensureRuntime(owner, s) {
   await recoverGrokMcp(s);
+  if (s.agent === "claude") {
+    if (owner.accounts?.signingIn(s)) throw new Error("Finish Claude's sign-in, then retry your message.");
+    if (s.runtime?.authFailed || s.claudeAuthChanged) {
+      if (s.runtime?.authFailed) s.claudeAuthInvalid = true;
+      if (s.runtime) {
+        const child = s.runtime.child;
+        s.runtime.close("Claude's login changed. Reconnecting this conversation.");
+        if (s.process === child) { s.process = null; await owner.kill(child); }
+      }
+    }
+    await claudeHome(owner, s);
+    if (s.runtime && s.claudeAuthChanged) {
+      const child = s.runtime.child; s.runtime.close("Claude's login changed. Reconnecting this conversation.");
+      if (s.process === child) { s.process = null; await owner.kill(child); }
+    }
+    s.claudeAuthChanged = false;
+  }
   if (s.runtime) { await s.runtime.ready; return s.runtime; }
   const runtime = new Runtime(owner, s); s.runtime = runtime;
   runtime.ready = runtime.initialize().catch(async (error) => { runtime.close(error.message); if (runtime.child === s.process) await owner.kill(runtime.child); throw error; });
   await runtime.ready;
+  if (s.agent === "claude") s.claudeAuthInvalid = false;
   return runtime;
 }
 module.exports = { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp };

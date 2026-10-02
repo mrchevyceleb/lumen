@@ -50,6 +50,7 @@ import {
   type PiRequest,
   type SessionEvent,
   type Entry,
+  type AccountProfile,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
@@ -58,7 +59,7 @@ import Conversation, { AgentMark } from "./Conversation";
 import NativeTerminal from "./NativeTerminal";
 import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./ProjectSidebar";
 import { useUpdates } from "./UpdatesPanel";
-import { AccountPicker, useAccounts } from "./AccountsPanel";
+import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
 import SessionTabs from "./SessionTabs";
 const EditorPane = lazy(() => import("./EditorPane"));
@@ -130,6 +131,8 @@ export default function App() {
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [split, setSplit] = useState(50);
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [signIn, setSignIn] = useState<Pick<AccountProfile, "id" | "agent" | "name"> | null>(null);
+  const signInLock = useRef(false);
   const [settingsSection, setSettingsSection] = useState("appearance");
   const [agentMenu, setAgentMenu] = useState(false);
   const [agentMenuRoot, setAgentMenuRoot] = useState<string | undefined>();
@@ -194,6 +197,13 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
+  const signInChat = async (id: string) => {
+    if (signInLock.current || signIn) return;
+    signInLock.current = true;
+    try { setSignIn(await api<Pick<AccountProfile, "id" | "agent" | "name">>("accounts:login-session", id)); }
+    catch (e: any) { notify(e.message); }
+    finally { signInLock.current = false; }
+  };
   const persist = () => {
     try {
       localStorage.setItem(
@@ -1196,7 +1206,7 @@ export default function App() {
                   {active.agent !== "shell" && <ContextIndicator tab={active} />}
                   {["claude", "codex"].includes(active.agent) && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
                     if (id !== (active.accountId || "")) void addTab(active.agent, active.mode, active.projectless ? "" : active.root, undefined, active.cwd, id, active.projectless ? active.scratchId : undefined);
-                  }} onManage={() => { setSettingsSection("accounts"); setDialog("settings"); }} />}
+                  }} onManage={() => { setSettingsSection("accounts"); setDialog("settings"); }} onSignIn={() => void signInChat(active.id)} />}
                   <button className="view-button" onClick={switchView}>
                     <TerminalSquare size={13} />
                     {active.mode === "rich" ? "Native CLI" : "Readable view"}
@@ -1237,6 +1247,7 @@ export default function App() {
                         )
                       }
                       onFile={openFile}
+                      onSignIn={() => void signInChat(active.id)}
                       onFollowFolder={openWorkspace}
                       onNative={(draft) => typeof draft === "string" ? openNativeCommand(draft) : switchView()}
                       attachment={attachment}
@@ -1397,6 +1408,9 @@ export default function App() {
           onAccountChat={(profile) => { void addTab(profile.agent, "rich", root, undefined, undefined, profile.id); setDialog(null); }}
         />
       )}
+      {signIn && <Modal title="Sign in to Claude" onClose={() => setSignIn(null)} wide>
+        <div className="account-sign-in"><AccountLogin profile={signIn} settings={settings} onDone={(success) => { setSignIn(null); if (success) notify("Signed in to Claude. Retry your message in the same chat."); }} /></div>
+      </Modal>}
       {dialog === "open" && (
         <OpenDialog
           recent={boot.recent}

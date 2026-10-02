@@ -66,6 +66,28 @@ app.whenReady().then(async () => {
   handle("accounts:system", (agent) => accounts.useSystem(agent));
   handle("accounts:remove", (id) => accounts.remove(id));
   handle("accounts:login", (id, command) => accounts.login(id, command));
+  const signInClaude = async (accountId, command) => {
+    const chats = [...sessions.sessions.values()].filter((s) => s.agent === "claude" && (s.accountId || "") === accountId);
+    if (chats.some((s) => s.busy || s.stopping || s.transitioning || s.setting || s.mode === "native"))
+      throw new Error("Finish this account's running turns and switch its native terminals to readable view before signing in.");
+    for (const s of chats) { s.claudeAuthInvalid = true; s.claudeAuthChanged = true; s.setting = true; }
+    try {
+      for (const s of chats) {
+        await sessions.cancelDiscovery(s);
+        const child = s.process;
+        s.runtime?.close("Signing in to Claude. Reconnecting on the next turn.");
+        if (child && s.process === child) { s.process = null; await sessions.kill(child); }
+        await accounts.syncClaude(s);
+      }
+      return accountId ? accounts.login(accountId, command, true) : accounts.loginDefault(command);
+    } finally { for (const s of chats) s.setting = false; }
+  };
+  handle("accounts:login-default", (command) => signInClaude("", command));
+  handle("accounts:login-session", (id) => {
+    const s = sessions.get(id);
+    if (s.agent !== "claude") throw new Error("This chat does not use Claude Code.");
+    return signInClaude(s.accountId || "", s.command);
+  });
   handle("accounts:write", (id, data) => accounts.write(id, data));
   handle("accounts:resize", (id, cols, rows) => accounts.resize(id, cols, rows));
   handle("accounts:buffer", (id) => accounts.buffer(id));
