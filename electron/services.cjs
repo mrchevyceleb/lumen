@@ -58,15 +58,20 @@ function findExecutable(command, environment = process.env) {
 }
 
 // Resolve npm and executable forwarding shims without passing prompts through cmd.exe.
-function resolveLauncher(command, environment = process.env) {
+function resolveLauncher(command, environment = process.env, powerShell) {
   const file = findExecutable(command, environment);
   if (/\.(js|cjs|mjs)$/i.test(file))
     return { file: findExecutable("node", environment), args: [file] };
-  if (/\.ps1$/i.test(file))
+  if (/\.ps1$/i.test(file)) {
+    const shell = powerShell || (() => {
+      try { return findExecutable("pwsh", environment); }
+      catch { return findExecutable("powershell", environment); }
+    })();
     return {
-      file: findExecutable("pwsh", environment),
+      file: shell,
       args: ["-NoLogo", "-NoProfile", "-File", file],
     };
+  }
   if (!/\.(cmd|bat)$/i.test(file)) return { file, args: [] };
   const content = fsSync.readFileSync(file, "utf8");
   const direct = content.match(/"([A-Za-z]:[^"\r\n]+\.exe)"\s+%\*/i);

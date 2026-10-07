@@ -27,7 +27,7 @@ async function prepareProfile(session, dataDir, findExecutable, resolveLauncher)
     const captured = JSON.parse(await fs.readFile(file, "utf8"));
     session.profileEnvironment = captured.environment;
     if (captured.command?.type === "Function" || captured.command?.type === "Filter") session.profileFunction = captured.command.name;
-    else if (captured.command?.path) session.preparedLauncher = resolveLauncher(captured.command.path, session.profileEnvironment);
+    else if (captured.command?.path) session.preparedLauncher = resolveLauncher(captured.command.path, session.profileEnvironment, session.shellExecutable);
     session.launchPrepared = true;
   } catch (error) {
     throw new Error("PowerShell profile or configured command failed to initialize. Use Settings → Workspace to disable profile loading for troubleshooting. " + (error.stderr || error.message).slice(-2000));
@@ -35,7 +35,7 @@ async function prepareProfile(session, dataDir, findExecutable, resolveLauncher)
 }
 function profiledLaunch(session, args, resolveLauncher) {
   if (!session.profileFunction) {
-    const launch = session.preparedLauncher || resolveLauncher(session.command, session.profileEnvironment);
+    const launch = session.preparedLauncher || resolveLauncher(session.command, session.profileEnvironment, session.powerShell ? session.shellExecutable : undefined);
     return { file: launch.file, args: [...launch.args, ...args] };
   }
   // Functions need the PowerShell scope which defines their dependencies. Save
