@@ -38,6 +38,7 @@ import {
   Download,
   ListTree,
   PanelTop,
+  ShieldCheck,
 } from "lucide-react";
 import {
   api,
@@ -52,12 +53,15 @@ import {
   type Entry,
   type AccountProfile,
   type SignInProfile,
+  type AdministratorStatus,
+  type ImageAttachment,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
 import SettingsPanel from "./SettingsPanel";
 import Conversation, { AgentMark } from "./Conversation";
 import NativeTerminal from "./NativeTerminal";
+import AgentForm from "./AgentForm";
 import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./ProjectSidebar";
 import { useUpdates } from "./UpdatesPanel";
 import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
@@ -72,6 +76,7 @@ type Bootstrap = {
   recent: string[];
   platform: string;
   agents: Record<string, { available: boolean; file?: string }>;
+  administrator: AdministratorStatus;
 };
 type Dialog =
   "settings" | "worktrees" | "palette" | "open" | "newfile" | "tab" | null;
@@ -85,6 +90,7 @@ export default function App() {
     recent: [],
     platform: "win32",
     agents: {},
+    administrator: { supported: false, elevated: null, error: "" },
   });
   const [loaded, setLoaded] = useState(false);
   const [projects, setProjects] = useState<Project[]>(restoreProjects);
@@ -211,6 +217,11 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
+  const updateTab = (id: string, change: Partial<Tab>) => {
+    const tab = tabsRef.current.find((value) => value.id === id);
+    setTabs((old) => old.map((value) => value.id === id ? { ...value, ...change } : value));
+    return tab?.controlId ? api("recovery:update", tab.controlId, change).catch((error) => notify("Draft recovery could not be saved: " + error.message)) : Promise.resolve();
+  };
   const signInChat = async (id: string) => {
     if (signInLock.current || signIn) return;
     signInLock.current = true;
@@ -218,32 +229,8 @@ export default function App() {
     catch (e: any) { notify(e.message); }
     finally { signInLock.current = false; }
   };
-  const persist = () => {
-    try {
-      localStorage.setItem(
-        "lumen.tabs",
-        JSON.stringify(
-          tabsRef.current
-            .filter(
-              (t) => t.mode === "rich" || t.messages.length || t.sessionRef,
-            )
-            .map((t) => ({
-              ...t,
-              nativeDraft: undefined,
-              mode: "rich",
-              busy: false,
-              messages: t.messages
-                .slice(-200)
-                .map((m) => ({ ...m, text: m.text.slice(-80000) })),
-            })),
-        ),
-      );
-      localStorage.setItem("lumen.last", rootRef.current);
-      localStorage.setItem("lumen.active", activeIdRef.current);
-      localStorage.setItem("lumen.projects", JSON.stringify(projectsRef.current));
-    } catch {
-      notify("Conversation storage is full. Close older tabs to free space.");
-    }
+  const persist = async () => {
+    await api("recovery:save", { tabs: tabsRef.current, root: rootRef.current, active: activeIdRef.current, projects: projectsRef.current });
   };
   useEffect(
     () =>
@@ -254,7 +241,7 @@ export default function App() {
           ),
           new Promise((resolve) => setTimeout(resolve, 100)),
         ]);
-        persist();
+        await persist();
         await api("settings:save", settingsRef.current);
       }),
     [],
@@ -283,6 +270,7 @@ export default function App() {
         agent,
         mode,
         ...config,
+        command: resume?.command || config.command,
         model: resume?.model ?? control?.model ?? config.model,
         effort: resume?.effort ?? control?.effort ?? config.effort ?? "",
         workMode: resume?.workMode || control?.workMode || "",
@@ -293,14 +281,12 @@ export default function App() {
         mcpOverrides: resume?.mcpOverrides || {},
         accountId: resume ? resume.accountId || "" : accountId,
         queuedMessages: resume?.queuedMessages || [],
+        loadShellProfile: settingsRef.current.loadShellProfile,
+        shellCommand: settingsRef.current.agents.shell.command,
+        savedTab: resume || {},
       };
       let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string };
-      try { created = await api("session:create", request); }
-      catch (error) {
-        if (!resume || !startCwd) throw error;
-        created = await api("session:create", { ...request, cwd: undefined });
-        notify("Saved working folder is unavailable. This chat reopened at its workspace root.");
-      }
+      created = await api("session:create", request);
       const tab: Tab = {
         id: created.id,
         root: created.root,
@@ -316,6 +302,10 @@ export default function App() {
         color: resume?.color,
         messages: resume?.messages || [],
         draft: resume?.draft || "",
+        draftAttachments: resume?.draftAttachments || [],
+        nativeDraft: resume?.nativeDraft,
+        interrupted: resume?.interrupted,
+        command: request.command,
         busy: false,
         sessionRef: resume?.sessionRef,
         model: request.model,
@@ -330,7 +320,7 @@ export default function App() {
         queuedMessages: resume?.queuedMessages?.map((m) => ({ ...m, state: "queued" })) || [],
         queuePaused: !!resume?.queuedMessages?.length,
       };
-      setTabs((old) => [...old, tab]);
+      setTabs((old) => [...old.filter((value) => value.controlId !== tab.controlId), tab]);
       if ((!control || !activeIdRef.current) && (!resume || created.projectless || !isHiddenProject(created.root))) {
         setActiveId(tab.id);
         setSelectedRoot(folder);
@@ -338,9 +328,18 @@ export default function App() {
       if (!created.projectless) rememberProject(created.root, undefined, !resume);
       setAgentMenu(false);
       setAgentMenuRoot(undefined);
+      if (resume && agent !== "shell" && mode === "rich") void api("session:reconnect", tab.id).catch((error) => {
+        setTabs((old) => old.map((value) => value.id === tab.id ? { ...value, recoveryError: error.message } : value));
+      });
       return tab;
     } catch (e: any) {
       if (control) throw e;
+      if (resume?.controlId && resume.agent) {
+        const retained = { ...resume, id: resume.controlId, mode: "rich", busy: false, recoveryError: e.message, messages: resume.messages || [], name: resume.name || agentNames[resume.agent] } as Tab;
+        setTabs((old) => [...old.filter((value) => value.controlId !== retained.controlId), retained]);
+        setActiveId(retained.id);
+        return retained;
+      }
       notify(e.message);
     }
   };
@@ -393,11 +392,19 @@ export default function App() {
         const current = loadSettings(saved);
         settingsRef.current = current;
         setSettings(current);
-        let persisted: Partial<Tab>[] = [];
-        try {
-          persisted = JSON.parse(localStorage.getItem("lumen.tabs") || "[]");
-        } catch {}
-        const last = localStorage.getItem("lumen.last");
+        let recovered = await api<{ tabs: Partial<Tab>[]; root: string; active: string; projects: Project[]; error: string }>("recovery:load");
+        if (!recovered.tabs.length) {
+          let legacy: Partial<Tab>[] = [];
+          try { legacy = JSON.parse(localStorage.getItem("lumen.tabs") || "[]"); } catch {}
+          if (legacy.length) {
+            await api("recovery:save", { tabs: legacy.map((tab) => ({ ...tab, controlId: tab.controlId || tab.id })), root: localStorage.getItem("lumen.last") || "", active: localStorage.getItem("lumen.active") || "", projects: projectsRef.current });
+            recovered = await api("recovery:load");
+          }
+        }
+        if (recovered.error) notify(recovered.error);
+        if (recovered.projects?.length) setProjects(recovered.projects);
+        const persisted: Partial<Tab>[] = current.restoreSessions ? recovered.tabs : [];
+        const last = current.restoreSessions ? recovered.root : "";
         const roots = [
           ...new Set(
             [last, ...persisted.filter((t) => !t.projectless).map((t) => t.root)].filter(Boolean) as string[],
@@ -412,14 +419,14 @@ export default function App() {
         }
         if (!alive) return;
         setWorkspaces(opened);
-        const savedActive = localStorage.getItem("lumen.active");
+        const savedActive = recovered.active;
         let restoredActive = "";
         const restoring = persisted;
         const savedTab = persisted.find((t) => t.id === savedActive);
         if (savedTab && !restoring.includes(savedTab)) restoring.splice(0, 1, savedTab);
         for (const tab of restoring) {
-          if (tab.agent && tab.mode === "rich" && (tab.projectless || (tab.root && opened[tab.root]))) {
-            const restored = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, tab, tab.cwd);
+          if (tab.agent) {
+            const restored = await addTab(tab.agent, tab.mode || "rich", tab.projectless ? "" : tab.root, tab, tab.cwd);
             if (tab.id === savedActive && restored && (tab.projectless || !isHiddenProject(restored.root))) restoredActive = restored.id;
           }
         }
@@ -489,10 +496,13 @@ export default function App() {
   useEffect(() => {
     if (!loaded) return;
     const timer = setTimeout(() => {
-      persist();
-    }, 800);
+      void persist().catch((error) => notify("Session recovery could not be saved: " + error.message));
+    }, 300);
     return () => clearTimeout(timer);
   }, [tabs, root, activeId, projects, loaded]);
+  useEffect(() => {
+    if (loaded) void persist().catch((error) => notify("Session recovery could not be saved: " + error.message));
+  }, [root, activeId, projects, loaded]);
   const switchView = async () => {
     if (!active) return;
     try {
@@ -508,12 +518,14 @@ export default function App() {
                 ...t,
                 mode: result.mode,
                 sessionRef: result.sessionRef,
+                nativeOwned: result.nativeOwned,
                 exited: false,
                 contextStale: true,
               }
             : t,
         ),
       );
+      if (result.pending) notify("Native controls will open when the current turn finishes.");
     } catch (e: any) {
       notify(e.message);
     }
@@ -522,6 +534,7 @@ export default function App() {
     if (!active) return;
     try {
       const result = await api("session:mode", active.id, "native");
+      await updateTab(active.id, { nativeDraft: draft });
       setTabs((old) => old.map((t) => t.id === active.id ? { ...t, mode: result.mode, sessionRef: result.sessionRef, exited: false, contextStale: true, nativeDraft: draft } : t));
     } catch (e: any) { notify(e.message); }
   };
@@ -567,22 +580,39 @@ export default function App() {
           for (const e of changes) {
             if (e.type === "start") {
               t.busy = true;
+              t.interrupted = false;
               t.phase = undefined;
               t.turn = e.turn;
               t.started = Date.now();
             } else if (e.type === "done") {
               t.busy = false;
+              t.stopping = false;
+              t.forceStopAvailable = false;
+              t.interrupted = e.code === 130;
               t.phase = undefined;
               t.exitCode = e.code;
               t.duration = Date.now() - (t.started || Date.now());
               if (e.sessionRef) t.sessionRef = e.sessionRef;
-            } else if (e.type === "phase") t.phase = e.phase;
+            } else if (e.type === "stop-state") { t.stopping = e.stopping; t.forceStopAvailable = e.forceStopAvailable; }
+            else if (e.type === "native-owner") t.nativeOwned = e.nativeOwned;
+            else if (e.type === "terminal-ready") t.terminalReady = true;
+            else if (e.type === "tool-terminal-release") { t.toolTerminals = t.toolTerminals?.filter((terminal) => terminal.id !== e.terminalId); if (t.terminalId === e.terminalId) t.terminalId = t.toolTerminals?.[0]?.id; }
+            else if (e.type === "terminal-needed") {
+              t.terminalOpen = true; t.terminalId = e.terminalId; t.terminalReady ||= !e.terminalId;
+              if (e.nativeDraft) t.nativeDraft = e.nativeDraft;
+              if (e.terminalId && !t.toolTerminals?.some((terminal) => terminal.id === e.terminalId)) t.toolTerminals = [...(t.toolTerminals || []), { id: e.terminalId, title: e.title || "Tool terminal" }];
+            }
+            else if (e.type === "view") { if (e.mode) t.mode = e.mode; if (e.sessionRef) t.sessionRef = e.sessionRef; }
+            else if (e.type === "history") t.messages = e.messages || t.messages;
+            else if (e.type === "reconnected") { t.recoveryError = undefined; t.exited = false; }
+            else if (e.type === "phase") t.phase = e.phase;
             else if (e.type === "session") t.sessionRef = e.sessionRef;
             else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
             else if (e.type === "context") { t.contextTokens = e.contextTokens; t.contextWindow = e.contextWindow; t.contextStale = false; }
             else if (e.type === "queue") { t.queuedMessages = e.queuedMessages; t.queuePaused = e.queuePaused; }
-            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, role: "user", text: e.text || "", delivery: e.delivery });
+            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, role: "user", text: e.text || "", attachments: e.attachments, delivery: e.delivery, deliveryState: e.deliveryState });
+            else if (["message-delivered", "message-delivery-state"].includes(e.type)) t.messages = t.messages.map((message) => message.id === e.messageId ? { ...message, deliveryState: e.type === "message-delivered" ? "confirmed" : e.deliveryState } : message);
             else if (e.type === "user-message-retracted") t.messages = t.messages.filter((m) => m.id !== e.messageId);
             else if (e.type === "cwd") { t.cwd = e.cwd; t.cwdVersion = (t.cwdVersion || 0) + 1; }
             else if (e.type === "exit") t.exited = true;
@@ -630,10 +660,16 @@ export default function App() {
       }
       if (["pi_ui", "agent_ui"].includes(e.type) && e.request) {
         const request = e.request;
-        if (["select", "confirm", "input", "editor", "questions"].includes(request.method))
+        if (["select", "confirm", "input", "editor", "questions", "form", "native"].includes(request.method))
           setUiRequests((old) => [...old, { session: e.id, request }]);
-        else if (request.method === "notify")
-          notify(request.message || "Pi notification");
+        else if (request.method === "notify") notify(request.message || "Pi notification");
+        else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
+        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, name: request.title || tab.name } : tab));
+        else if (request.method === "setStatus" && request.statusText) notify(request.statusText);
+        else if (request.method === "setWidget") {
+          queue.push({ ...e, type: "diagnostic", key: `pi-widget-${request.widgetKey}`, text: request.widgetLines?.join("\n") || "", replace: true });
+          if (!frame) { frame = requestAnimationFrame(flush); fallback = setTimeout(flush, 30); }
+        }
         return;
       }
       if (e.type === "terminal") return;
@@ -650,46 +686,35 @@ export default function App() {
       clearTimeout(fallback);
     };
   }, []);
+  const addImages = async (source: "clipboard" | "choose" | string[]) => {
+    if (!active || active.agent === "shell") return;
+    const target = active.id;
+    try {
+      const imported = source === "clipboard" ? await api<ImageAttachment | null>("attachments:paste", target).then((image) => image ? [image] : []) : source === "choose" ? await api<ImageAttachment[]>("attachments:choose", target) : await api<ImageAttachment[]>("attachments:import", target, source);
+      const tab = tabsRef.current.find((value) => value.id === target);
+      if (tab) updateTab(target, { draftAttachments: [...(tab.draftAttachments || []), ...imported].slice(0, 8) });
+    } catch (error: any) { notify(error.message); }
+  };
   const send = async (text: string) => {
     if (!active) return false;
-    const messageId = crypto.randomUUID();
-    const message = attachment
-      ? `${text}\n\nFile reference: ${attachment}`
-      : text;
-    if (active.agent !== "shell") {
-      try {
-        await api("session:submit", active.id, { id: messageId, text: message });
-        if (activeIdRef.current === active.id) setAttachment((current) => current === attachment ? "" : current);
-        return true;
-      } catch (e: any) { notify(e.message); return false; }
-    }
-    setTabs((old) =>
-      old.map((t) =>
-        t.id === active.id
-          ? {
-              ...t,
-              busy: true,
-              phase: undefined,
-              started: Date.now(),
-              messages: [
-                ...t.messages,
-                { id: messageId, role: "user", text: message },
-              ],
-            }
-          : t,
-      ),
-    );
+    const message = attachment ? `${text}\n\nFile reference: ${attachment}` : text;
+    const images = active.draftAttachments || [];
     try {
-      await api("session:send", active.id, message);
-      if (activeIdRef.current === active.id) setAttachment((current) => current === attachment ? "" : current);
+      if (active.agent === "pi" && message.trimStart().startsWith("/") && !images.length) { await openNativeCommand(message); return false; }
+      const entry = { id: crypto.randomUUID(), text: message, attachments: images };
+      if (active.agent === "shell") await api("session:send", active.id, message, entry);
+      else await api("session:submit", active.id, entry);
+      const current = tabsRef.current.find((tab) => tab.id === active.id);
+      await updateTab(active.id, { draftAttachments: (current?.draftAttachments || []).filter((image) => !images.some((sent) => sent.id === image.id)), ...(current?.draft === text ? { draft: "" } : {}) });
+      if (activeIdRef.current === active.id) setAttachment("");
       return true;
-    } catch (e: any) {
-      setTabs((old) =>
-        old.map((t) => (t.id === active.id ? { ...t, busy: false, messages: t.messages.filter((m) => m.id !== messageId) } : t)),
-      );
-      notify(e.message);
-      return false;
-    }
+    } catch (error: any) { notify(error.message); return false; }
+  };
+  const continueSession = async () => {
+    if (!active) return;
+    const text = "Continue from where you left off. First inspect the current state and completed actions; do not repeat completed work.";
+    try { await api("session:send", active.id, text, { id: crypto.randomUUID(), text }); }
+    catch (error: any) { notify(error.message); }
   };
   const closeTab = (tab: Tab) => {
     const action = () => {
@@ -722,7 +747,7 @@ export default function App() {
       if (tab.agent === "shell") {
         if (tab.busy) throw new Error("Wait for this shell command to finish.");
         setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: messageId, role: "user", text }] } : t));
-        try { await api("session:send", tab.id, text); }
+        try { await api("session:send", tab.id, text, { id: messageId, text }); }
         catch (e) { setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: t.messages.filter((m) => m.id !== messageId) } : t)); throw e; }
       } else await api("session:submit", tab.id, { id: messageId, text });
       return false;
@@ -988,7 +1013,7 @@ export default function App() {
       ? settings.agents[active.agent].color
       : settings.accent
     : settings.accent;
-  const hasNative = tabs.some((t) => t.mode === "native");
+  const hasNative = tabs.some((t) => t.mode === "native" || t.terminalReady || t.toolTerminals?.length);
   const selectTab = (tab: Tab) => {
     setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
     if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
@@ -1215,18 +1240,19 @@ export default function App() {
               </div>
               <div className="workspace-content">
                 <div
-                  className="session-pane"
+                  className={`session-pane ${active.mode === "rich" && active.terminalOpen ? "with-terminal" : ""}`}
                   style={{
                     width: activeDoc && !editorExpanded ? `${split}%` : "100%",
                     display: editorExpanded && activeDoc ? "none" : undefined,
                   }}
                 >
-                  {active.mode === "rich" && (
+                  {active.mode === "rich" && active.terminalOpen && <div className="terminal-reserve" />}
+                  {(active.mode === "rich" || active.recoveryError) && (
                     <Conversation
                       key={active.id}
                       tab={active}
                       settings={settings}
-                      onConfig={(change) => setTabs((old) => old.map((t) => t.id === active.id ? { ...t, ...change } : t))}
+                      onConfig={(change) => updateTab(active.id, change)}
                       onSend={send}
                       onStop={() =>
                         api("session:stop", active.id).catch((e) =>
@@ -1238,13 +1264,21 @@ export default function App() {
                       onFollowFolder={openWorkspace}
                       onNative={(draft) => typeof draft === "string" ? openNativeCommand(draft) : switchView()}
                       attachment={attachment}
-                      onAttach={() => {
-                        if (activeDoc && activeDoc.root === root)
-                          setAttachment(activeDoc.path);
-                        else {
-                          notify("Open a file to add its path as context.");
-                          setDialog("palette");
-                        }
+                      onAttach={() => void addImages("choose")}
+                      onPasteImage={() => void addImages("clipboard")}
+                      onDropImages={(files) => void addImages(files)}
+                      onTerminal={() => {
+                        if (["claude", "grok"].includes(active.agent) && !active.nativeOwned && !active.terminalId) { void switchView(); return; }
+                        setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, terminalOpen: true, terminalReady: !tab.terminalId || tab.terminalReady } : tab));
+                      }}
+                      onForceStop={() => api("session:stop", active.id, true).catch((error) => notify(error.message))}
+                      onContinue={() => void continueSession()}
+                      onReconnect={() => {
+                        if (active.recoveryError) void api("session:reconnect", active.id).then(() => setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, recoveryError: undefined } : tab))).catch(async (error) => {
+                          if (!error.message.includes("session is no longer available")) { updateTab(active.id, { recoveryError: error.message }); notify(error.message); return; }
+                          if (!active.projectless) { try { await api("workspace:register", active.root); } catch (failure: any) { notify(failure.message); return; } }
+                          await addTab(active.agent, active.mode, active.projectless ? "" : active.root, active, active.cwd);
+                        });
                       }}
                       onDetach={() => setAttachment("")}
                     />
@@ -1313,29 +1347,35 @@ export default function App() {
           )}
           {hasNative && (
             <div
-              className="native-layers"
+              className={`native-layers ${active?.mode === "rich" ? "embedded-terminal" : ""}`}
               style={{
-                display:
-                  active?.mode === "native" && !(editorExpanded && activeDoc)
-                    ? "block"
-                    : "none",
+                display: (active?.mode === "native" || active?.terminalOpen) && !(editorExpanded && activeDoc) ? "block" : "none",
                 top: nativeTop,
                 width: activeDoc ? `${split}%` : "100%",
               }}
             >
+              <div className="terminal-panel-heading"><span>{active?.terminalId ? "Tool terminal" : "Interactive terminal"}</span>
+                {active?.mode === "native" && active.interrupted && <span>Interrupted · ready for your next message</span>}
+                {active?.busy && <button disabled={active.stopping} onClick={() => api("session:stop", active.id).catch((error) => notify(error.message))}>{active.stopping ? "Cancelling…" : "Stop"}</button>}
+                {!!active?.toolTerminals?.length && <select aria-label="Choose tool terminal" value={active.terminalId || ""} onChange={(event) => setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, terminalId: event.target.value || undefined } : tab))}><option value="">Session terminal</option>{active.toolTerminals.map((terminal) => <option key={terminal.id} value={terminal.id}>{terminal.title}</option>)}</select>}
+                {active?.forceStopAvailable && <button className="force-stop" onClick={() => api("session:stop", active.id, true).catch((error) => notify(error.message))}>Force stop</button>}
+                <button aria-label="Close terminal panel" onClick={() => { if (active?.mode === "native") void switchView(); else setTabs((old) => old.map((tab) => tab.id === active?.id ? { ...tab, terminalOpen: false } : tab)); }}><X size={15} /></button>
+              </div>
               {tabs
-                .filter((t) => t.mode === "native")
+                .filter((t) => (t.mode === "native" || t.terminalReady) && !t.recoveryError)
                 .map((tab) => (
                   <NativeTerminal
                     draft={tab.nativeDraft}
-                    onDismissDraft={() => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, nativeDraft: undefined } : t))}
+                    onDismissDraft={() => { void updateTab(tab.id, { nativeDraft: undefined }); }}
                     key={tab.id}
                     id={tab.id}
-                    active={activeId === tab.id && active?.mode === "native"}
+                    active={activeId === tab.id && (active?.mode === "native" || !!active?.terminalOpen) && !active?.terminalId}
                     settings={settings}
-                    onError={notify}
+                    onError={(message, recoveryFailure) => { notify(message); if (recoveryFailure) void updateTab(tab.id, { recoveryError: message }); }}
                   />
                 ))}
+              {tabs.flatMap((tab) => (tab.toolTerminals || []).map((terminal) => <NativeTerminal key={`${tab.id}:${terminal.id}`} id={tab.id} terminalId={terminal.id}
+                active={activeId === tab.id && active?.terminalId === terminal.id && !!active?.terminalOpen} settings={settings} onError={notify} onDismissDraft={() => {}} />))}
             </div>
           )}
         </main>
@@ -1507,6 +1547,8 @@ export default function App() {
         </div>
         <div>
           {updateStatus?.phase === "downloaded" && <button className="update-ready" title={`Lumen ${updateStatus.latest} is ready. Close Lumen to install, or restart now.`} onClick={() => api("updates:install").catch((e) => notify(e.message))}><Download size={12} />Update ready</button>}
+          {boot.administrator.supported && <button className={boot.administrator.elevated ? "administrator-active" : ""} title={boot.administrator.elevated ? "Agents and terminals have Windows administrator access" : "Restart Lumen with Windows administrator access"}
+            onClick={() => { setSettingsSection("behavior"); setDialog("settings"); }}><ShieldCheck size={12} />{boot.administrator.elevated ? "Administrator" : "Run as administrator"}</button>}
           {active?.busy ? (
               active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
           ) : (
@@ -1529,6 +1571,8 @@ export default function App() {
           available={boot.agents}
           onError={notify}
           initialSection={settingsSection}
+          administrator={boot.administrator}
+          onAdministratorStatus={(administrator) => setBoot((old) => ({ ...old, administrator }))}
           onAccountChat={(profile) => { void addTab(profile.agent, "rich", root, undefined, undefined, profile.id); setDialog(null); }}
         />
       )}
@@ -1634,11 +1678,17 @@ export default function App() {
           sessionName={(() => { const tab = tabs.find((value) => value.id === piRequest.session); return tab ? `${tab.name} · ${tab.root || "No workspace"}` : "Agent session"; })()}
           onReply={async (response) => {
             try {
+              if (response.native && tabsRef.current.find((tab) => tab.id === piRequest.session)?.agent === "pi") {
+                await api("session:mode", piRequest.session, "native");
+                setUiRequests((old) => old.filter((value) => value.session !== piRequest.session || value.request.id !== piRequest.request.id));
+                return;
+              }
               await api("session:pi-response", piRequest.session, {
                 id: piRequest.request.id,
                 ...response,
               });
               setUiRequests((old) => old.filter((value) => value.session !== piRequest.session || value.request.id !== piRequest.request.id));
+              if (response.native) { await api("session:stop", piRequest.session); await api("session:mode", piRequest.session, "native"); }
             } catch (e: any) {
               notify(e.message);
             }
@@ -2420,6 +2470,7 @@ function PiDialog({
     >
       <div className="dialog-form">
         {v.message && <pre className="agent-request-detail">{v.message}</pre>}
+        {v.url && <button className="secondary" onClick={() => api("external:open", v.url).catch(() => {})}>Open authorization page ↗</button>}
         {v.questions ? <>
           {v.questions.map((q) => <fieldset className="agent-question" key={q.id}>
             <legend>{q.header ? `${q.header} · ` : ""}{q.question}</legend>
@@ -2445,7 +2496,9 @@ function PiDialog({
               {option}
             </button>
           ))
-        ) : v.method === "confirm" ? (
+        ) : v.method === "native" ? <div className="dialog-actions"><button className="primary" disabled={sending} onClick={() => void send({ cancelled: true, native: true })}>Cancel and open Native CLI</button></div>
+        : v.method === "form" ? <AgentForm schema={v.schema} disabled={sending} onSend={(content) => void send({ content })} onNative={() => void send({ cancelled: true, native: true })} />
+        : v.method === "confirm" ? (
           <div className="dialog-actions">
             <button
               className="secondary"

@@ -92,6 +92,8 @@ export const defaults: Settings = {
   compact: false,
   chatLayout: "vertical",
   enterSend: true,
+  restoreSessions: true,
+  loadShellProfile: true,
   agents: {
     shell: { command: "", model: "", extraArgs: [], color: "#a4b0bd" },
     pi: { command: "pi", model: "", extraArgs: [], color: "#e8bf80" },

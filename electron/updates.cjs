@@ -47,6 +47,7 @@ function createUpdates({ app, notify, updater, installed }) {
       startup.unref(); interval.unref();
     },
     dispose() { clearTimeout(startup); clearInterval(interval); },
+    suspendInstall() { if (updater) updater.autoInstallOnAppQuit = false; },
     install() {
       if (state.phase !== "downloaded") return false;
       updater.quitAndInstall(true, true);

@@ -1,5 +1,7 @@
 export type Agent = "shell" | "pi" | "codex" | "claude" | "grok";
 export type Mode = "rich" | "native";
+export interface ImageAttachment { id: string; name: string; mimeType: string; bytes: number; preview: string }
+export interface AdministratorStatus { supported: boolean; elevated: boolean | null; error: string }
 export interface AccountProfile { id: string; agent: "claude" | "codex"; name: string; signedIn: boolean; email: string; signingIn: boolean; inUse: boolean }
 export interface SignInProfile { id: string; agent: Exclude<Agent, "shell">; name: string }
 export interface AccountInventory { profiles: AccountProfile[]; defaults: { claude: string; codex: string } }
@@ -65,8 +67,10 @@ export interface Message {
   turn?: string;
   time?: number;
   delivery?: "steer" | "send";
+  deliveryState?: "sending" | "confirmed" | "uncertain";
+  attachments?: ImageAttachment[];
 }
-export interface QueuedMessage { id: string; text: string; state: "queued" | "sending" | "steering" }
+export interface QueuedMessage { id: string; text: string; attachments?: ImageAttachment[]; deliveryUncertain?: boolean; state: "queued" | "sending" | "steering" }
 export interface Tab {
   id: string;
   root: string;
@@ -103,6 +107,17 @@ export interface Tab {
   queuedMessages?: QueuedMessage[];
   queuePaused?: boolean;
   managedBy?: string;
+  draftAttachments?: ImageAttachment[];
+  terminalReady?: boolean;
+  terminalOpen?: boolean;
+  terminalId?: string;
+  toolTerminals?: { id: string; title: string }[];
+  nativeOwned?: boolean;
+  stopping?: boolean;
+  forceStopAvailable?: boolean;
+  interrupted?: boolean;
+  recoveryError?: string;
+  command?: string;
 }
 export interface AgentControlRequest { requestId: string; action: string; id: string; body: Record<string, any> }
 export interface AgentControlStatus { enabled: boolean; running: boolean; ready: boolean; url: string; connectionFile: string; guideFile: string; command: string; error: string }
@@ -153,6 +168,8 @@ export interface Settings {
   compact: boolean;
   chatLayout: "vertical" | "horizontal";
   enterSend: boolean;
+  restoreSessions: boolean;
+  loadShellProfile: boolean;
   agents: Record<Agent, AgentConfig>;
 }
 export interface SessionEvent {
@@ -182,7 +199,17 @@ export interface SessionEvent {
   queuedMessages?: QueuedMessage[];
   queuePaused?: boolean;
   messageId?: string;
+  deliveryState?: "sending" | "confirmed" | "uncertain";
   delivery?: "steer" | "send";
+  attachments?: ImageAttachment[];
+  terminalId?: string;
+  offset?: number;
+  nativeDraft?: string;
+  mode?: Mode;
+  nativeOwned?: boolean;
+  stopping?: boolean;
+  forceStopAvailable?: boolean;
+  messages?: Message[];
 }
 export interface PiRequest {
   id: string;
@@ -195,6 +222,12 @@ export interface PiRequest {
   text?: string;
   timeout?: number;
   questions?: { id: string; question: string; header?: string; multiSelect?: boolean; isSecret?: boolean; options?: { label: string; description?: string }[] }[];
+  schema?: { properties?: Record<string, any>; required?: string[] };
+  url?: string;
+  widgetKey?: string;
+  widgetLines?: string[];
+  statusKey?: string;
+  statusText?: string;
 }
 export interface UpdateStatus {
   phase: "idle" | "portable" | "checking" | "current" | "downloading" | "downloaded" | "error";
@@ -207,6 +240,7 @@ export interface UpdateStatus {
 declare global {
   interface Window {
     lumen: {
+      filePath: (file: File) => string;
       invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
       onSession: (callback: (event: SessionEvent) => void) => () => void;
       onAgentControl: (callback: (event: AgentControlRequest) => void) => () => void;

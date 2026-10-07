@@ -1,6 +1,8 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const channels = new Set([
   "bootstrap",
+  "administrator:status", "administrator:restart",
+  "recovery:load", "recovery:save", "recovery:update", "attachments:paste", "attachments:choose", "attachments:import", "session:reconnect",
   "agent-control:status", "agent-control:change", "agent-control:ready", "agent-control:reply", "agent-control:claim",
   "workspace:choose",
   "workspace:open",
@@ -46,6 +48,7 @@ const channels = new Set([
   "accounts:login", "accounts:login-default", "accounts:login-session", "accounts:write", "accounts:resize", "accounts:buffer", "accounts:cancel",
 ]);
 contextBridge.exposeInMainWorld("lumen", {
+  filePath: (file) => webUtils.getPathForFile(file),
   invoke: async (channel, ...args) => {
     if (!channels.has(channel)) throw new Error("Unknown action.");
     const result = await ipcRenderer.invoke(channel, ...args);

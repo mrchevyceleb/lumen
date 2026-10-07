@@ -13,13 +13,15 @@ export default function NativeTerminal({
   onError,
   draft,
   onDismissDraft,
+  terminalId,
 }: {
   id: string;
   active: boolean;
   settings: Settings;
-  onError: (text: string) => void;
+  onError: (text: string, recoveryFailure?: boolean) => void;
   draft?: string;
   onDismissDraft: () => void;
+  terminalId?: string;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
@@ -59,12 +61,13 @@ export default function NativeTerminal({
     fit.current = fitter;
     let disposed = false;
     let ready = false;
-    let queued: string[] = [];
+    let queued: { data: string; offset: number }[] = [];
+    let offset = 0;
     const unsub = window.lumen.onSession((event) => {
       if (event.id !== id) return;
-      if (event.type === "terminal") {
-        if (ready) term.write(event.data || "");
-        else queued.push(event.data || "");
+      if (event.type === "terminal" && event.terminalId === terminalId) {
+        if (ready && (event.offset || 0) > offset) { term.write(event.data || ""); offset = event.offset || offset; }
+        else if (!ready) queued.push({ data: event.data || "", offset: event.offset || 0 });
       }
       if (event.type === "exit")
         term.write(
@@ -72,25 +75,28 @@ export default function NativeTerminal({
         );
     });
     // Snapshot first, then start; remounting never drops existing native scrollback.
-    api<string>("session:buffer", id)
+    api<{ data: string; offset: number }>("session:buffer", id, terminalId)
       .then((buffer) => {
         if (disposed) return;
-        term.write(buffer);
+        term.write(buffer.data);
+        offset = buffer.offset;
         ready = true;
-        queued.forEach((data) => term.write(data));
+        queued.forEach((chunk) => { if (chunk.offset > offset) { term.write(chunk.data); offset = chunk.offset; } });
         queued = [];
-        return api("session:start", id).then(() =>
-          api("session:resize", id, term.cols, term.rows),
+        return (terminalId ? Promise.resolve() : api("session:start", id)).then(() =>
+          api("session:resize", id, term.cols, term.rows, terminalId).catch((error) => { if (!disposed) onError(error.message); }),
         );
       })
       .catch((e) => {
-        if (!disposed) onError(e.message);
+        if (!disposed) onError(e.message, true);
       });
     const input = term.onData((data) => {
-      api("session:write", id, data).catch((e) => onError(e.message));
+      // The main-process emulator answers terminal queries even when hidden.
+      if (/^\x1b\[(?:\??\d+(?:;\d+)*[Rcn])$/.test(data)) return;
+      api("session:write", id, data, terminalId).catch((e) => onError(e.message));
     });
     const resize = term.onResize(({ cols, rows }) => {
-      api("session:resize", id, cols, rows).catch(() => {});
+      api("session:resize", id, cols, rows, terminalId).catch(() => {});
     });
     const observer = new ResizeObserver(() => {
       if (host.current?.clientWidth) fitter.fit();
@@ -113,7 +119,7 @@ export default function NativeTerminal({
       term.dispose();
       terminal.current = null;
     };
-  }, [id]);
+  }, [id, terminalId]);
   useEffect(() => {
     if (terminal.current) {
       terminal.current.options.fontSize = settings.terminalFontSize;

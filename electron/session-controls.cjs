@@ -3,6 +3,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 const TOML = require("@iarna/toml");
+const net = require("node:net");
+const WebSocket = require("ws");
 const { cliOptions } = require("./models.cjs");
 const { codexAccountOptions } = require("./accounts.cjs");
 const uuid = () => crypto.randomUUID();
@@ -164,11 +166,14 @@ class Runtime {
   constructor(owner, s) {
     this.owner = owner; this.s = s; this.pending = new Map(); this.closed = false;
     this.uiRequests = new Map();
+    this.serverUiRequests = new Map();
+    this.userAcks = new Map();
     this.hadPrompt = !!s.sessionRef;
   }
   write(message, onWritten) {
     if (this.closed || this.child !== this.s.process) throw new Error("The CLI session closed. Try again.");
-    this.child.stdin.write(JSON.stringify(message) + "\n", onWritten);
+    if (this.socket) this.socket.send(JSON.stringify(message), onWritten);
+    else this.child.stdin.write(JSON.stringify(message) + "\n", onWritten);
   }
   request(method, params = {}, timeout = 45000, onWritten) {
     const id = uuid();
@@ -190,6 +195,11 @@ class Runtime {
     this.pending.clear();
     for (const id of this.uiRequests.keys()) this.owner.event(this.s, { type: "agent_ui_cancel", request: { id } });
     this.uiRequests.clear();
+    this.serverUiRequests.clear();
+    for (const ack of this.userAcks.values()) { clearTimeout(ack.timer); ack.reject(new Error(message)); }
+    this.userAcks.clear();
+    this.socket?.close();
+    this.terminals?.close();
     this.compactionDone?.reject(new Error(message)); this.compactionDone = null;
     if (this.s.runtime === this) this.s.runtime = null;
   }
@@ -211,6 +221,8 @@ class Runtime {
     // Lumen runs with the user's explicitly requested full local access. Questions
     // still need a real answer; tool approvals must never be silently denied here.
     if ((claude && e.type === "control_request") || (!claude && e.method && e.id !== undefined)) {
+      if (s.agent === "codex" && s.mode === "native") return;
+      this.currentServerRequestId = e.id;
       if (claude && e.request?.subtype === "can_use_tool") {
         const reply = (response) => this.write({ type: "control_response", response: { subtype: "success", request_id: e.request_id, response } });
         if (e.request.tool_name === "AskUserQuestion") this.ask({ title: "Claude Code needs your input", questions: e.request.input?.questions?.map((q) => ({ ...q, id: q.question })) || [] },
@@ -241,12 +253,36 @@ class Runtime {
           result: { answers: Object.fromEntries((e.params?.questions || []).map((q) => [q.id, { answers: answer.cancelled ? [] : answer.answerLists?.[q.id] || [answer.answers?.[q.id] || ""] }])) } }));
       } else if (s.agent === "codex" && ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "execCommandApproval", "applyPatchApproval"].includes(e.method)) {
         this.write({ jsonrpc: "2.0", id: e.id, result: { decision: e.method.includes("/") ? "accept" : "approved" } });
-      } else if (claude) this.write({ type: "control_response", response: { subtype: "error", request_id: e.request_id, error: "This CLI control is not supported in readable view." } });
-      else this.write({ jsonrpc: "2.0", id: e.id, error: { code: -32601, message: "This CLI control needs native view." } });
+      } else if (s.agent === "codex" && e.method === "mcpServer/elicitation/request") {
+        const params = e.params || {};
+        if (params.mode === "url" || params.url) this.ask({ method: "confirm", title: params.message || "Complete MCP authorization", message: params.message || "Open the authorization page and then confirm.", url: params.url },
+          (answer) => this.write({ id: e.id, result: { action: answer.confirmed ? "accept" : "cancel", content: null } }));
+        else this.ask({ method: "form", title: params.message || "MCP needs your input", schema: params.requestedSchema },
+          (answer) => this.write({ id: e.id, result: { action: answer.cancelled ? "cancel" : "accept", content: answer.cancelled ? null : answer.content } }));
+      } else if (s.agent === "grok" && e.method.startsWith("terminal/") && this.terminals) {
+        void this.terminals.handle(e.method, e.params || {}).then((result) => this.write({ id: e.id, result }), (error) => this.write({ id: e.id, error: { code: -32602, message: error.message } }));
+      } else {
+        const name = claude ? e.request?.subtype : e.method;
+        this.ask({ method: "native", title: "Native CLI required", message: `${s.agent} requested ${name}. Cancel this request and retry it in Native CLI. Your conversation is retained.` },
+          () => {
+            if (claude) this.write({ type: "control_response", response: { subtype: "error", request_id: e.request_id, error: "This interface needs native controls. The conversation is retained." } });
+            else this.write({ id: e.id, error: { code: -32601, message: "This interface needs native controls. The conversation is retained." } });
+          });
+      }
       return;
     }
     if (claude) {
-      o.messagesEvent(s, !this.hadPrompt && e.session_id ? { ...e, session_id: undefined } : e);
+      if (e.session_id && e.session_id !== s.sessionRef) { o.event(s, { type: "error", message: "Claude returned a different conversation identifier. Reconnect the saved chat before sending more messages." }); return; }
+      if (e.type === "user" && this.userAcks.has(e.uuid)) { const ack = this.userAcks.get(e.uuid); clearTimeout(ack.timer); this.userAcks.delete(e.uuid); ack.resolve(); }
+      if (e.type === "system") {
+        s.nativeBackgroundTasks ||= new Set();
+        if (e.subtype === "background_tasks_changed") { s.nativeBackgroundTasks = new Set((e.tasks || []).map((task) => task.task_id)); this.backgroundSnapshot = true; }
+        else if (!this.backgroundSnapshot && ["task_started", "task_updated"].includes(e.subtype) && e.is_backgrounded !== false) s.nativeBackgroundTasks.add(e.task_id);
+        else if (!this.backgroundSnapshot && e.subtype === "task_notification") s.nativeBackgroundTasks.delete(e.task_id);
+        s.nativeBackgroundWork = s.nativeBackgroundTasks.size > 0;
+      }
+      o.messagesEvent(s, e);
+      if (e.type === "system" && e.session_id) { s.sessionStarted = true; o.event(s, { type: "session", sessionRef: s.sessionRef }); }
       const messageUsage = e.type === "assistant" ? e.message?.usage : e.event?.type === "message_start" ? e.event.message?.usage : null;
       if (messageUsage) { this.claudeUsage = { ...messageUsage }; this.contextModel = e.message?.model || e.event?.message?.model; this.context = claudeContext(this.claudeUsage); this.reportContext(); }
       if (e.event?.type === "message_delta" && e.event.usage && this.claudeUsage) { Object.assign(this.claudeUsage, e.event.usage); this.context = claudeContext(this.claudeUsage); this.reportContext(); }
@@ -266,12 +302,20 @@ class Runtime {
   }
   async initialize() {
     const { owner: o, s } = this;
+    await o.prepareLaunch(s);
     let args, env;
     if (s.agent === "claude") {
+      s.nativeBackgroundTasks = new Set(); s.nativeBackgroundWork = false;
       env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s) };
-      args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
-      if (s.sessionRef) args.push("--resume", s.sessionRef);
-    } else if (s.agent === "codex") args = ["app-server", "--stdio", ...codexAccountOptions(s)];
+      args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
+      if (!s.sessionRef) { s.sessionRef = uuid(); o.event(s, { type: "session", sessionRef: s.sessionRef }); }
+      args.push(s.sessionStarted ? "--resume" : "--session-id", s.sessionRef);
+    } else if (s.agent === "codex") {
+      const port = await new Promise((resolve, reject) => { const listener = net.createServer(); listener.once("error", reject); listener.listen(0, "127.0.0.1", () => { const port = listener.address().port; listener.close(() => resolve(port)); }); });
+      this.remoteAddress = `ws://127.0.0.1:${port}`;
+      this.remoteToken = crypto.randomBytes(32).toString("hex");
+      args = ["app-server", "--listen", this.remoteAddress, "--ws-auth", "capability-token", "--ws-token-sha256", crypto.createHash("sha256").update(this.remoteToken).digest("hex"), ...codexAccountOptions(s)];
+    }
     else {
       env = { GROK_HOME: await grokHome(o, s) };
       const watermark = (await jsonFile(path.join(s.grokHome, "lumen-context.json"))).lastCompactedUsage;
@@ -279,7 +323,22 @@ class Runtime {
       args = [...cliOptions({ ...s, workMode: "" }), "agent", "--no-leader", "stdio"];
     }
     this.child = o.child(s, args, env);
-    o.jsonStream(s, this.child, (e) => this.receive(e));
+    if (s.agent === "codex") {
+      this.child.stdout.resume();
+      const deadline = Date.now() + 15000;
+      while (!this.socket) {
+        if (this.closed || this.child.exitCode !== null) throw new Error("Codex app-server could not start. Its installed CLI must support --listen and remote TUI connections.");
+        try {
+          this.socket = await new Promise((resolve, reject) => {
+            const socket = new WebSocket(this.remoteAddress, { headers: { Authorization: `Bearer ${this.remoteToken}` }, handshakeTimeout: 1000 });
+            socket.once("open", () => resolve(socket)); socket.once("error", (error) => { socket.terminate(); reject(error); });
+          });
+        } catch (error) { if (Date.now() >= deadline) throw new Error("Codex's shared server did not become ready. " + error.message); await new Promise((resolve) => setTimeout(resolve, 100)); }
+      }
+      this.socket.on("message", (message) => { try { this.receive(JSON.parse(message.toString())); } catch (error) { o.event(s, { type: "diagnostic", text: "Codex protocol: " + error.message }); } });
+      this.socket.on("close", () => this.close("Codex disconnected. Reconnect this saved conversation."));
+      this.socket.on("error", () => {});
+    } else o.jsonStream(s, this.child, (e) => this.receive(e));
     this.child.once("close", () => this.close());
     this.child.once("error", (error) => this.close(error.message));
     if (s.agent === "claude") {
@@ -290,7 +349,7 @@ class Runtime {
       }
     }
     else if (s.agent === "codex") {
-      await this.request("initialize", { clientInfo: { name: "lumen", version: "0.1.11" } });
+      await this.request("initialize", { clientInfo: { name: "lumen", version: require("../package.json").version }, capabilities: { experimentalApi: true } });
       this.write({ method: "initialized" });
       const loaded = withoutNulls((await this.request("config/read", { cwd: s.cwd, includeLayers: false })).config?.mcp_servers || {});
       this.localServers = Object.keys(loaded);
@@ -298,15 +357,35 @@ class Runtime {
       const servers = { ...loaded };
       for (const [name, enabled] of Object.entries(s.mcpOverrides)) if (servers[name]) servers[name] = { ...servers[name], enabled };
       const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", config: { ...codexConfig(s), ...(Object.keys(s.mcpOverrides).length ? { mcp_servers: servers } : {}) }, ...(s.model ? { model: s.model } : {}) };
-      const result = await this.request(s.sessionRef ? "thread/resume" : "thread/start", { ...params, ...(s.sessionRef ? { threadId: s.sessionRef, excludeTurns: true } : {}) });
+      const resuming = !!s.sessionRef;
+      // The installed daemon's paginated-history implementation does not yet
+      // persist empty threads reliably. Legacy history can materialize an empty
+      // conversation without sending a model prompt.
+      const result = await this.request(resuming ? "thread/resume" : "thread/start", { ...params, ...(s.sessionRef ? { threadId: s.sessionRef, excludeTurns: true } : { historyMode: "legacy" }) });
+      if (s.sessionRef && result.thread.id !== s.sessionRef) throw new Error("Codex returned a different conversation. The saved chat has been retained.");
       s.sessionRef = result.thread.id;
-      if (this.hadPrompt) o.event(s, { type: "session", sessionRef: s.sessionRef });
+      s.sessionStarted = true;
+      s.model ||= result.model;
+      s.effort ||= result.reasoningEffort || "";
+      o.event(s, { type: "session", sessionRef: s.sessionRef });
+      o.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
+      this.rolloutPath = result.thread.path;
+      if (!resuming) {
+        await this.request("thread/name/set", { threadId: s.sessionRef, name: s.savedTab?.name || "Lumen · " + path.basename(s.cwd) });
+        await this.waitForRollout();
+      }
+      if (resuming) await this.hydrateCodex();
     } else {
-      const init = await this.request("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "lumen", version: "0.1.11" } });
+      const { AcpTerminals } = require("./tool-terminals.cjs");
+      this.terminals = new AcpTerminals(o, s);
+      const init = await this.request("initialize", { protocolVersion: 1, clientCapabilities: { terminal: true }, clientInfo: { name: "lumen", version: require("../package.json").version } });
+      this.agentCapabilities = init.agentCapabilities || {};
       const methodId = process.env.XAI_API_KEY && init.authMethods?.some((a) => a.id === "xai.api_key") ? "xai.api_key" : init.authMethods?.find((a) => a.id === "cached_token")?.id || init.authMethods?.find((a) => a.id === "xai.api_key")?.id;
       if (methodId) await this.request("authenticate", { methodId, _meta: { headless: true } });
       this.metadata = await this.request(s.sessionRef ? "session/load" : "session/new", { cwd: s.cwd, mcpServers: [], ...(s.sessionRef ? { sessionId: s.sessionRef } : {}) });
+      if (s.sessionRef && this.metadata.sessionId && this.metadata.sessionId !== s.sessionRef) throw new Error("Grok returned a different conversation. The saved chat has been retained.");
       s.sessionRef = this.metadata.sessionId || s.sessionRef;
+      s.sessionStarted = true;
       if (!sessionId(s.sessionRef)) throw new Error("Grok did not return a valid session ID.");
       o.event(s, { type: "session", sessionRef: s.sessionRef });
       await this.request("session/set_mode", { sessionId: s.sessionRef, modeId: s.workMode === "plan" ? "plan" : "default" });
@@ -345,6 +424,7 @@ class Runtime {
   ask(request, reply) {
     const id = uuid();
     this.uiRequests.set(id, reply);
+    if (this.s.agent === "codex") this.serverUiRequests.set(id, this.currentServerRequestId);
     this.owner.event(this.s, { type: "agent_ui", request: { method: "questions", ...request, id } });
   }
   reply(response) {
@@ -352,6 +432,7 @@ class Runtime {
     if (!reply) throw new Error("This CLI question is no longer pending.");
     reply(response);
     this.uiRequests.delete(response.id);
+    this.serverUiRequests.delete(response.id);
   }
   async toggle(name, enabled) {
     const s = this.s;
@@ -407,43 +488,67 @@ class Runtime {
     return this.context ?? null;
   }
   reportContext() { this.owner.event(this.s, { type: "context", contextTokens: this.context ?? null, contextWindow: this.contextWindow ?? null }); }
-  async userInput(text, id) {
-    await new Promise((resolve, reject) => this.write({ type: "user", ...(id ? { uuid: id } : {}), session_id: this.s.sessionRef || "", parent_tool_use_id: null,
-      message: { role: "user", content: text } }, (error) => error ? reject(error) : resolve()));
+  async content(text, attachments = []) {
+    const images = await this.owner.attachments?.resolve(this.s.controlId, attachments) || [];
+    return [{ type: "text", text }, ...images.map((image) => this.s.agent === "codex" ? { type: "localImage", path: image.path } : this.s.agent === "claude" ?
+      { type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } } : { type: "image", data: image.data, mimeType: image.mimeType })];
+  }
+  async validateImages(attachments) {
+    if (!attachments?.length) return;
+    if (this.s.agent === "grok" && !this.agentCapabilities?.promptCapabilities?.image) throw new Error("This Grok interface does not accept images. Keep the attachments or choose another agent.");
+    if (this.s.agent === "codex") {
+      const models = (await this.request("model/list")).data || [];
+      const model = models.find((model) => model.model === this.s.model) || models.find((model) => model.isDefault);
+      if (model?.inputModalities && !model.inputModalities.includes("image")) throw new Error("The selected model does not accept images. Choose a model with image input.");
+    }
+    await this.owner.attachments.resolve(this.s.controlId, attachments);
+  }
+  async userInput(text, id, attachments = []) {
+    const content = attachments.length ? await this.content(text, attachments) : text;
+    id ||= uuid();
+    await new Promise((resolve, reject) => {
+      const fail = (error) => { const ack = this.userAcks.get(id); if (!ack) return; clearTimeout(ack.timer); this.userAcks.delete(id); reject(error); };
+      const timer = setTimeout(() => fail(new Error("Claude did not acknowledge this message. Inspect the saved conversation before resending.")), 45000);
+      this.userAcks.set(id, { resolve, reject, timer });
+      try { this.write({ type: "user", uuid: id, session_id: this.s.sessionRef || "", parent_tool_use_id: null, message: { role: "user", content } }, (error) => { if (error) fail(error); }); }
+      catch (error) { fail(error); }
+    });
   }
   async steer(message) {
     if (this.closed || !this.s.busy) throw new Error("This turn has finished.");
     if (this.s.agent === "codex") {
       if (!this.activeTurnId) throw new Error("Codex is still starting its turn.");
-      await this.request("turn/steer", { threadId: this.s.sessionRef, expectedTurnId: this.activeTurnId, input: [{ type: "text", text: message.text }] });
+      await this.request("turn/steer", { threadId: this.s.sessionRef, clientUserMessageId: message.id, expectedTurnId: this.activeTurnId, input: await this.content(message.text, message.attachments) });
     } else if (this.s.agent === "grok") {
       if (!this.grokPromptActive) throw new Error("Grok has not started its turn or is finishing it.");
+      if (message.attachments?.length) throw new Error("Grok interjections accept text only. Keep this image message queued for the next turn.");
       const result = await this.request("_x.ai/interject", { sessionId: this.s.sessionRef, text: message.text, interjectionId: message.id });
       if (result.status !== "queued") throw new Error("Grok did not acknowledge the interjection.");
     } else {
       // Native streaming input is consumed by Claude at its next loop boundary.
       // Keep the current process/tools alive; never emulate steering by killing it.
       const turn = this.s.turn;
-      await this.userInput(message.text, message.id);
+      await this.userInput(message.text, message.id, message.attachments);
       if (this.closed || !this.s.busy || this.s.turn !== turn || this.s.stopping)
         throw new Error("Claude finished before steering was confirmed. The correction may have reached the CLI; review it before retrying.");
     }
   }
-  async prompt(text) {
+  async prompt(text, message = {}) {
     const { s, owner: o } = this;
     this.hadPrompt = true;
     if (s.agent === "codex") o.event(s, { type: "session", sessionRef: s.sessionRef });
-    if (s.agent === "claude") await this.userInput(text);
+    if (s.agent === "claude") await this.userInput(text, message.id, message.attachments);
     else if (s.agent === "codex") {
       await this.servers();
       const disabledPluginIds = [...new Set(this.rawServers.filter((r) => r.pluginId && s.mcpOverrides[r.name] === false).map((r) => r.pluginId))];
-      const result = await this.request("turn/start", { threadId: s.sessionRef, input: [{ type: "text", text }], disabledPluginIds, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}) });
+      const collaborationMode = s.workMode ? { mode: s.workMode, settings: { model: s.model || (await this.request("model/list")).data?.find((model) => model.isDefault)?.model, reasoning_effort: s.effort || null, developer_instructions: null } } : undefined;
+      const result = await this.request("turn/start", { threadId: s.sessionRef, clientUserMessageId: message.id, input: await this.content(text, message.attachments), disabledPluginIds, ...(collaborationMode ? { collaborationMode } : {}), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}) });
       if (s.busy && result.turn?.status === "inProgress") this.activeTurnId = result.turn.id;
     }
     else {
       await new Promise((resolve, reject) => {
         let dispatched = false;
-        void this.grokPrompt(text, () => { dispatched = true; resolve(); }).catch((error) => {
+        void this.grokPrompt(text, () => { dispatched = true; resolve(); }, message.attachments).catch((error) => {
           if (!dispatched) { reject(error); return; }
           if (this.closed || s.stopping || s.process !== this.child) return;
           o.event(s, { type: "error", message: error.message }); o.finish(s, 1);
@@ -451,7 +556,7 @@ class Runtime {
       });
     }
   }
-  async grokPrompt(text, onDispatch) {
+  async grokPrompt(text, onDispatch, attachments = []) {
     const { s, owner: o } = this;
     const turn = s.turn;
     this.messageId = uuid();
@@ -459,7 +564,25 @@ class Runtime {
     if (this.closed || !s.busy || s.turn !== turn || s.stopping) throw new Error("Grok stopped before this message was sent.");
     let result;
     this.grokPromptActive = true;
-    try { result = await this.request("session/prompt", { sessionId: s.sessionRef, prompt: [{ type: "text", text }] }, 24 * 60 * 60 * 1000, (error) => { if (!error) onDispatch(); }); }
+    try {
+      const { readHistory } = require("./session-history.cjs");
+      const before = new Set(((await readHistory(s))?.messages || []).filter((message) => message.role === "user").map((message) => message.id));
+      const pending = this.request("session/prompt", { sessionId: s.sessionRef, prompt: await this.content(text, attachments) }, 24 * 60 * 60 * 1000);
+      let completed = false;
+      const response = pending.finally(() => { completed = true; }); response.catch(() => {});
+      const acknowledge = async () => {
+        const deadline = Date.now() + 45000;
+        while (!this.closed) {
+          const messages = (await readHistory(s))?.messages || [];
+          if (messages.some((message) => message.role === "user" && !before.has(message.id) && message.text === text)) { onDispatch(); return; }
+          if (completed) { const answer = await response; if (answer.stopReason === "end_turn") { onDispatch(); return; } throw new Error("Grok did not confirm this message. Inspect its saved history before resending."); }
+          if (Date.now() >= deadline) { this.write({ method: "session/cancel", params: { sessionId: s.sessionRef } }); throw new Error("Grok did not save this message in time. Cancellation requested; inspect history before resending."); }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error("Grok closed before recording this message. Inspect its saved history before resending.");
+      };
+      [result] = await Promise.all([response, acknowledge()]);
+    }
     finally { this.grokPromptActive = false; }
     if (result.stopReason !== "cancelled") await this.grokCompact();
     if (result.stopReason && !["end_turn", "cancelled"].includes(result.stopReason)) o.event(s, { type: "diagnostic", text: `Grok finished: ${result.stopReason}.` });
@@ -485,12 +608,17 @@ class Runtime {
   codexEvent(e) {
     const { owner: o, s } = this, p = e.params || {};
     if (p.threadId && p.threadId !== s.sessionRef) return;
-    if (e.method === "turn/started") this.activeTurnId = p.turn?.id;
+    if (e.method === "serverRequest/resolved") for (const [id, requestId] of this.serverUiRequests) if (requestId === p.requestId) {
+      this.serverUiRequests.delete(id); this.uiRequests.delete(id); o.event(s, { type: "agent_ui_cancel", request: { id } });
+    }
+    if (e.method === "thread/closed") this.threadClosed?.();
+    if (e.method === "turn/started") { this.activeTurnId = p.turn?.id; if (!s.busy) { s.busy = true; s.turn = p.turn?.id; o.event(s, { type: "start", turn: s.turn }); } }
     if (e.method === "item/agentMessage/delta") o.text(s, p.delta, p.itemId || "answer");
     if (["item/started", "item/completed"].includes(e.method)) {
       const item = p.item;
-      if (item?.type === "agentMessage" && e.method === "item/completed") o.text(s, item.text, item.id, true);
-      else if (item && item.type !== "agentMessage") o.tool(s, item.id, item.type === "commandExecution" ? item.command : item.type.replace(/([A-Z])/g, " $1"),
+      if (item?.type === "userMessage" && e.method === "item/started") o.event(s, { type: "user-message", messageId: item.clientId || item.id, text: item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
+      else if (item?.type === "agentMessage" && e.method === "item/completed") o.text(s, item.text, item.id, true);
+      else if (item && !["agentMessage", "userMessage"].includes(item.type)) o.tool(s, item.id, item.type === "commandExecution" ? item.command : item.type.replace(/([A-Z])/g, " $1"),
         item.aggregatedOutput || item.text || JSON.stringify(item), e.method === "item/completed" ? "done" : "running");
       if (item?.type === "contextCompaction") this.phase(e.method === "item/started");
     }
@@ -502,6 +630,66 @@ class Runtime {
       if (p.turn?.error) { if (require("./auth.cjs").authError(JSON.stringify(p.turn.error))) { this.authFailed = true; s.authInvalid = true; } o.event(s, { type: "error", message: p.turn.error.message }); }
       o.finish(s, p.turn?.status === "failed" ? 1 : p.turn?.status === "interrupted" ? 130 : 0);
     }
+  }
+  async hydrateCodex() {
+    const messages = [], saved = this.owner.recovery?.state.tabs.find((tab) => tab.controlId === this.s.controlId)?.messages || [];
+    let cursor;
+    do {
+      let page;
+      try { page = await this.request("thread/items/list", { threadId: this.s.sessionRef, limit: 100, sortDirection: "asc", ...(cursor ? { cursor } : {}) }); }
+      catch (error) {
+        if (!/not supported|unknown method|method not found/i.test(error.message)) throw error;
+        let history;
+        try { history = await this.request("thread/read", { threadId: this.s.sessionRef, includeTurns: true }); }
+        catch (historyError) {
+          if (!/not supported|not materialized|unknown method|method not found/i.test(historyError.message)) throw historyError;
+          this.owner.event(this.s, { type: "diagnostic", key: "recovery-history", text: "This Codex version cannot list saved history. Lumen retained its transcript and paused uncertain messages; inspect native history before resending them." });
+          break;
+        }
+        page = { data: (history.thread?.turns || []).flatMap((turn) => (turn.items || []).map((item) => ({ item, turnId: turn.id }))) };
+      }
+      for (const entry of page.data || []) {
+        const item = entry.item;
+        if (!item) continue;
+        if (item.type === "userMessage") {
+          const id = item.clientId || item.id, previous = saved.find((message) => message.id === id);
+          messages.push({ ...previous, id, providerMessageId: item.clientId, role: "user", text: item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", turn: entry.turnId });
+        } else if (item.type === "agentMessage") messages.push({ id: `${entry.turnId}-${item.id}`, role: "assistant", text: item.text || "", turn: entry.turnId });
+        else if (item.type === "commandExecution") messages.push({ id: `${entry.turnId}-${item.id}`, role: "tool", title: item.command, text: item.aggregatedOutput || "", state: item.status, turn: entry.turnId });
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    if (messages.length) this.owner.event(this.s, { type: "history", messages });
+    this.s.messageQueue?.reconcile(messages, this.owner.recovery?.state.tabs.find((tab) => tab.controlId === this.s.controlId)?.acceptedMessageIds || []);
+  }
+  async waitForRollout() {
+    if (!this.rolloutPath) throw new Error("Codex did not provide a durable conversation path. This chat is retained; update the CLI before continuing.");
+    const deadline = Date.now() + 10000;
+    while (!await exists(this.rolloutPath)) {
+      if (this.closed || Date.now() >= deadline) throw new Error("Codex has not saved this conversation yet. Its identity is retained; reconnect before continuing.");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  async reconfigureCodex() {
+    const { s } = this;
+    await this.waitForRollout();
+    const loaded = withoutNulls((await this.request("config/read", { cwd: s.cwd, includeLayers: false })).config?.mcp_servers || {});
+    const servers = { ...loaded };
+    for (const [name, enabled] of Object.entries(s.mcpOverrides)) if (servers[name]) servers[name] = { ...servers[name], enabled };
+    await this.request("thread/unsubscribe", { threadId: s.sessionRef });
+    const result = await this.request("thread/resume", { threadId: s.sessionRef, cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", excludeTurns: true,
+      config: { ...codexConfig(s), ...(Object.keys(s.mcpOverrides).length ? { mcp_servers: servers } : {}) }, ...(s.model ? { model: s.model } : {}) });
+    if (result.thread.id !== s.sessionRef) throw new Error("Codex returned a different conversation. The saved chat has been retained.");
+    this.rolloutPath = result.thread.path;
+    s.codexReconfigure = false;
+  }
+  async cancel() {
+    for (const [id, reply] of this.uiRequests) { reply({ cancelled: true, confirmed: false }); this.owner.event(this.s, { type: "agent_ui_cancel", request: { id } }); }
+    this.uiRequests.clear();
+    this.serverUiRequests.clear();
+    if (this.s.agent === "codex" && this.activeTurnId) await this.request("turn/interrupt", { threadId: this.s.sessionRef, turnId: this.activeTurnId }, 10000);
+    else if (this.s.agent === "claude") await this.request("interrupt", {}, 10000);
+    else if (this.s.agent === "grok") this.write({ method: "session/cancel", params: { sessionId: this.s.sessionRef } });
   }
   grokEvent(e) {
     const { owner: o, s } = this, p = e.params || {};
@@ -548,7 +736,12 @@ async function ensureRuntime(owner, s) {
     if (s.process === child) { s.process = null; await owner.kill(child); }
   }
   s.authChanged = false;
-  if (s.runtime) { await s.runtime.ready; return s.runtime; }
+  if (s.runtime) {
+    await s.runtime.ready;
+    if (s.agent !== "codex" || !s.codexReconfigure) return s.runtime;
+    await s.runtime.reconfigureCodex();
+    return s.runtime;
+  }
   const runtime = new Runtime(owner, s); s.runtime = runtime;
   runtime.ready = runtime.initialize().catch(async (error) => { runtime.close(error.message); if (runtime.child === s.process) await owner.kill(runtime.child); throw error; });
   await runtime.ready;

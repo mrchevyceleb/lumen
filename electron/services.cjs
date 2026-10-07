@@ -11,6 +11,8 @@ const { catalog, efforts, piShortcuts, cliOptions, extraOptions } = require("./m
 const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp } = require("./session-controls.cjs");
 const { accountEnvironment } = require("./accounts.cjs");
 const { MessageQueue } = require("./message-queue.cjs");
+const { prepareProfile, profiledLaunch } = require("./profile-launcher.cjs");
+const { TerminalState } = require("./terminal-state.cjs");
 const OMIT = new Set([
   ".git",
   "node_modules",
@@ -35,11 +37,11 @@ const strip = (value) =>
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
 
-function findExecutable(command) {
+function findExecutable(command, environment = process.env) {
   if (path.isAbsolute(command) && fsSync.existsSync(command)) return command;
   const extensions =
     process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+  for (const dir of (environment.PATH || environment.Path || "").split(path.delimiter)) {
     for (const ext of extensions) {
       const candidate = path.join(dir.replace(/^"|"$/g, ""), command + ext);
       if (fsSync.existsSync(candidate) && fsSync.statSync(candidate).isFile())
@@ -56,13 +58,13 @@ function findExecutable(command) {
 }
 
 // Resolve npm and executable forwarding shims without passing prompts through cmd.exe.
-function resolveLauncher(command) {
-  const file = findExecutable(command);
+function resolveLauncher(command, environment = process.env) {
+  const file = findExecutable(command, environment);
   if (/\.(js|cjs|mjs)$/i.test(file))
-    return { file: findExecutable("node"), args: [file] };
+    return { file: findExecutable("node", environment), args: [file] };
   if (/\.ps1$/i.test(file))
     return {
-      file: findExecutable("pwsh"),
+      file: findExecutable("pwsh", environment),
       args: ["-NoLogo", "-NoProfile", "-File", file],
     };
   if (!/\.(cmd|bat)$/i.test(file)) return { file, args: [] };
@@ -73,7 +75,7 @@ function resolveLauncher(command) {
   const script = content.match(/"%dp0%[\\/]([^"\r\n]+\.(?:js|cjs|mjs))"/i);
   if (script)
     return {
-      file: findExecutable("node"),
+      file: findExecutable("node", environment),
       args: [path.join(path.dirname(file), script[1])],
     };
   throw new Error(
@@ -436,12 +438,14 @@ class WorkspaceService {
 }
 
 class Sessions {
-  constructor(workspaces, dataDir, emit, accounts = null) {
+  constructor(workspaces, dataDir, emit, accounts = null, recovery = null, attachments = null) {
     this.workspaces = workspaces;
     this.dataDir = dataDir;
     this.emit = emit;
     this.sessions = new Map();
     this.accounts = accounts;
+    this.recovery = recovery;
+    this.attachments = attachments;
   }
   create({
     root = "",
@@ -460,6 +464,9 @@ class Sessions {
     mcpOverrides = {},
     accountId,
     queuedMessages = [],
+    loadShellProfile = true,
+    shellCommand = "",
+    savedTab = {},
   }) {
     if (
       !["shell", "pi", "codex", "claude", "grok"].includes(agent) ||
@@ -473,7 +480,7 @@ class Sessions {
       throw new Error("Extra arguments must be a JSON array of strings.");
     if ([model, effort, workMode].some((value) => typeof value !== "string" || value.length > 300 || /[\x00-\x1f]/.test(value)))
       throw new Error("Invalid session controls.");
-    if (workMode && (!["claude", "grok"].includes(agent) || !["plan", "default"].includes(workMode))) throw new Error("Invalid planning mode.");
+    if (workMode && (!["claude", "grok", "codex"].includes(agent) || !["plan", "default"].includes(workMode))) throw new Error("Invalid planning mode.");
     if (sessionRef && agent !== "pi" && !/^[0-9a-f-]{36}$/i.test(sessionRef))
       throw new Error("Invalid CLI session identifier.");
     if (
@@ -492,6 +499,7 @@ class Sessions {
     const id = uuid();
     controlId ||= id;
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(controlId)) throw new Error("Invalid session controls identifier.");
+    if ([...this.sessions.values()].some((session) => session.controlId === controlId)) throw new Error("This saved chat is already open.");
     const controls = policy({ autoCompactTokens, mcpOverrides });
     if (!this.accounts && accountId) throw new Error("Saved accounts are unavailable.");
     const account = this.accounts?.select(agent, accountId) || { accountId: "", accountName: "CLI default", accountHome: "" };
@@ -513,7 +521,7 @@ class Sessions {
     if (cwd) {
       if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw new Error("Use an absolute working folder.");
       cwd = fsSync.realpathSync(cwd);
-      if ((!projectless && !inside(root, cwd)) || !fsSync.statSync(cwd).isDirectory()) throw new Error("Working folder is outside the workspace.");
+      if (!fsSync.statSync(cwd).isDirectory()) throw new Error("Working folder is unavailable.");
     }
     const s = {
       id,
@@ -523,6 +531,8 @@ class Sessions {
       agent,
       mode,
       command: command || agent,
+      shellCommand: agent === "shell" ? (command === "shell" ? "" : command || shellCommand) : shellCommand,
+      loadShellProfile: loadShellProfile !== false,
       model,
       effort,
       workMode,
@@ -533,9 +543,14 @@ class Sessions {
       ...controls,
       busy: false,
       output: "",
+      scratchId,
+      sessionStarted: !!sessionRef,
+      savedTab,
+      piSessionHeader: savedTab.piSessionHeader,
     };
     s.messageQueue = new MessageQueue(this, s, queuedMessages);
     this.sessions.set(id, s);
+    this.recovery?.bind(s, savedTab);
     return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls, accountId: s.accountId, accountName: s.accountName, ...s.messageQueue.state() };
   }
   async sessionControls(id) {
@@ -610,41 +625,22 @@ class Sessions {
     } finally { s.setting = false; }
   }
   async resetRuntime(s) {
-    if (["claude", "codex"].includes(s.agent) && s.runtime && !s.runtime.hadPrompt) {
-      s.sessionRef = "";
-      this.event(s, { type: "session", sessionRef: "" });
+    if (s.agent === "codex") {
+      if (s.pty) throw new Error("Exit Codex's native CLI before changing MCP or compaction settings. Its shared runtime will keep running.");
+      if ((await s.runtime?.request("thread/backgroundTerminals/list", { threadId: s.sessionRef }))?.data?.length) throw new Error("Background terminals are still running. Finish them before changing these settings.");
+      s.codexReconfigure = true; return;
     }
-    s.runtime?.close("Session controls changed.");
-    if (s.process) { await this.kill(s.process); s.process = null; }
+    await this.releaseRuntime(s);
   }
-  async piMcp(s, name, enabled) {
-    if (s.piMcpSupported === undefined) s.piMcpSupported = (await this.piRpc(s, "get_commands")).commands?.some((c) => c.name === "mcp") || false;
-    if (!s.piMcpSupported) return { servers: [], warning: "Pi's MCP manager extension is not installed or enabled. Configure it in native Pi, then restart this chat." };
-    if (name !== undefined && (!/^[\w.-]+$/.test(name) || ["add", "remove", "list"].includes(name.toLowerCase())))
-      throw new Error("This Pi MCP needs its native controls.");
-    const list = async () => {
-      s.piMcpNotification = "";
-      await this.piRpc(s, "prompt", { message: "/mcp list" });
-      const message = s.piMcpNotification;
-      if (!message) return { servers: [], warning: "Pi's MCP manager did not return a server list. Install or enable your MCP extension in native Pi." };
-      const servers = [...message.matchAll(/^\s*([^\s:]+):\s*(global|project),\s*(connected|disabled|disconnected)\s*\((\d+) tools?\)/gm)]
-        .map((m) => ({ name: m[1], source: m[2], status: m[3], tools: Number(m[4]), enabled: m[3] !== "disabled", canToggle: /^[\w.-]+$/.test(m[1]) && !["add", "remove", "list"].includes(m[1].toLowerCase()) }));
-      return { servers, warning: "Pi uses its MCP manager's runtime switches. Tool exposure still follows your Pi mode." };
-    };
-    const info = await list();
-    if (name === undefined) return info;
-    const server = info.servers.find((r) => r.name === name);
-    if (!server) throw new Error("This Pi MCP is no longer available. Refresh the list.");
-    if (server.enabled !== enabled) await this.piRpc(s, "prompt", { message: `/mcp ${name}` });
-    const next = await list();
-    if (next.servers.find((r) => r.name === name)?.enabled !== enabled) throw new Error("Pi did not change this MCP. Check its connection in native view.");
-    return next;
+  async piMcp(s, name) {
+    if (name !== undefined) throw new Error("This Pi MCP manager uses native widgets. Open /mcp in the terminal to change its connections.");
+    return { servers: [], warning: "Pi's MCP manager uses native widgets. Open /mcp in the terminal to inspect or change connections." };
   }
   async ensurePiPolicy(s) {
-    this.ensurePi(s);
+    await this.ensurePi(s);
     if (s.piPolicyReady) return;
     if (s.autoCompactTokens) await this.piBridge(s, "autocompact", { tokens: s.autoCompactTokens });
-    for (const [name, enabled] of Object.entries(s.mcpOverrides)) await this.piMcp(s, name, enabled);
+
     s.piPolicyReady = true;
   }
   get(id) {
@@ -665,14 +661,16 @@ class Sessions {
     }
     s.discoveryPromise = (async () => {
       let result;
-      if (s.agent === "pi" && s.process) {
+      await this.prepareLaunch(s);
+      if (s.agent === "pi") {
+        await this.ensurePi(s);
         // Query the actual persistent session, including extensions reloaded there.
         const data = await this.piRpc(s, "get_commands");
-        result = { commands: normalize(data.commands, "pi"), origin: "Pi RPC" };
+        result = { commands: normalize(data.commands, "pi"), origin: "Pi terminal bridge" };
       } else {
         if (s.agent === "claude") await claudeHome(this, s);
         if (s.agent === "grok") await grokHome(this, s);
-        result = await discoverCommands(s, resolveLauncher(s.command), (child) => this.kill(child));
+        result = await discoverCommands(s, (args) => profiledLaunch(s, args, resolveLauncher), (child) => this.kill(child));
       }
       if (!this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Command discovery was canceled.");
       s.commands = result;
@@ -696,16 +694,46 @@ class Sessions {
     clearTimeout(request.timer);
     request.reject(new Error(message));
   }
-  ensurePi(s) {
+  async ensurePi(s) {
     if (this.accounts?.signingIn(s)) throw new Error("Finish Pi's sign-in, then retry your message.");
-    if (s.process) return;
-    s.piCompacting = false;
-    const extensionFile = this.piExtension();
-    const args = ["--mode", "rpc", "--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s),
-      "--extension", extensionFile];
-    if (s.sessionRef) args.push("--session", s.sessionRef);
-    const child = this.child(s, args, { LUMEN_RPC_CONTROLS: "1", LUMEN_COMPACT_STATE_FILE: this.compactStateFile(s) });
-    this.jsonStream(s, child, (e) => this.piEvent(s, e));
+    if (s.piNativeBridge && s.pty) return;
+    if (s.piStarting) return s.piStarting;
+    s.piStarting = (async () => {
+      await this.prepareLaunch(s);
+      if (!s.sessionRef) {
+        const folder = path.join(this.dataDir, "pi"); await fs.mkdir(folder, { recursive: true });
+        s.sessionRef = path.join(folder, `lumen-${uuid()}.jsonl`);
+        await fs.writeFile(s.sessionRef, "", { flag: "wx", mode: 0o600 });
+        this.event(s, { type: "session", sessionRef: s.sessionRef });
+      } else await fs.access(s.sessionRef).catch(async () => {
+        const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId) || s.savedTab;
+        if (!s.piSessionHeader || saved?.messages?.some((message) => message.role === "user")) throw new Error("Pi's saved session file is unavailable. This chat has been retained.");
+        await fs.writeFile(s.sessionRef, JSON.stringify(s.piSessionHeader) + "\n", { flag: "wx", mode: 0o600 });
+      });
+      let readyResolve, readyReject;
+      const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+      const timer = setTimeout(() => readyReject(new Error("Pi's terminal bridge did not initialize. Open its terminal to finish startup or project trust.")), 30000);
+      s.piNativeBridge = await require("./local-bridge.cjs").localBridge((event) => {
+        if (event.type === "bridge_ready") { s.sessionRef = event.sessionFile || s.sessionRef; s.piSessionHeader = event.sessionHeader; s.sessionStarted = true; this.event(s, { type: "session", sessionRef: s.sessionRef, piSessionHeader: s.piSessionHeader }); readyResolve(event); }
+        if (event.type === "bridge_closed") { this.rejectPiCommands(s, "Pi's terminal bridge disconnected."); return; }
+        if (event.type === "agent_ui_cancel") { this.event(s, { type: "agent_ui_cancel", request: { id: event.id } }); return; }
+        if (event.type === "native_command") { s.messageQueue?.pause(); this.event(s, { type: "terminal-needed", title: "Pi command", nativeDraft: event.text }); this.finish(s, 0); return; }
+        if (event.type === "ui_prompt_start" && event.kind === "custom") this.event(s, { type: "terminal-needed", title: "Pi interactive controls" });
+        if (event.type === "extension_ui_request" && event.method === "setWidget" && event.native) this.event(s, { type: "terminal-needed", title: "Pi custom widget" });
+        if (event.type === "agent_start" && !s.busy) { s.busy = true; s.turn = uuid(); this.event(s, { type: "start", turn: s.turn }); }
+        this.piEvent(s, event);
+      });
+      const args = ["--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s), ...extraOptions(s), "--extension", this.piExtension()];
+      if (s.sessionRef) args.push("--session", s.sessionRef);
+      this.spawnTerminal(s, profiledLaunch(s, args, resolveLauncher), {
+        LUMEN_PI_BRIDGE: s.piNativeBridge.endpoint, LUMEN_PI_BRIDGE_TOKEN: s.piNativeBridge.token,
+        LUMEN_PI_VIEW: s.mode,
+        LUMEN_RPC_CONTROLS: "1", LUMEN_AUTO_COMPACT_TOKENS: String(s.autoCompactTokens || ""), LUMEN_COMPACT_STATE_FILE: this.compactStateFile(s),
+      });
+      this.event(s, { type: "terminal-needed", title: "Pi startup" });
+      try { const state = await ready; this.piEvent(s, { type: "response", command: "get_state", success: true, data: state }); } finally { clearTimeout(timer); }
+    })();
+    try { return await s.piStarting; } finally { s.piStarting = null; }
   }
   piExtension() {
     // External Node processes cannot read Electron's virtual .asar filesystem.
@@ -720,34 +748,29 @@ class Sessions {
     const folder = path.join(this.dataDir, "context"); fsSync.mkdirSync(folder, { recursive: true });
     return path.join(folder, `${s.controlId}.json`);
   }
-  piRpc(s, type, data = {}) {
-    if (s.stopping || s.transitioning || !this.sessions.has(s.id)) return Promise.reject(new Error("Pi controls were canceled."));
-    this.ensurePi(s);
+  async piRpc(s, type, data = {}) {
+    if (s.stopping || s.transitioning || !this.sessions.has(s.id)) throw new Error("Pi controls were canceled.");
+    await this.ensurePi(s);
     return new Promise((resolve, reject) => {
       const id = uuid();
       s.piRequests ||= new Map();
-      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi did not finish this control. Try again or open native view.")); }, 30000);
+      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi did not finish this control. Its live terminal remains available.")); }, 30000);
       s.piRequests.set(id, { resolve, reject, timer });
-      s.process.stdin.write(JSON.stringify({ id, type, ...data }) + "\n", (error) => {
-        if (error && s.piRequests.has(id)) { clearTimeout(timer); s.piRequests.delete(id); reject(error); }
-      });
+      try { s.piNativeBridge.write({ id, type, ...data }); }
+      catch (error) { clearTimeout(timer); s.piRequests.delete(id); reject(error); }
     });
   }
   async piBridge(s, action, data = {}) {
-    this.ensurePi(s);
+    await this.ensurePi(s);
     const id = uuid();
     const result = new Promise((resolve, reject) => {
       s.piRequests ||= new Map();
-      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi's Lumen controls did not load. Try native view.")); }, 30000);
+      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi's Lumen controls did not respond.")); }, 30000);
       s.piRequests.set(id, { resolve, reject, timer });
     });
-    // The registered extension consumes this command without invoking an agent.
-    const ack = this.piRpc(s, "prompt", { message: `/__lumen_controls ${JSON.stringify({ ...data, id, action })}` });
+    const ack = this.piRpc(s, "controls", { action, data: { ...data, id, action } });
     try { const [info] = await Promise.all([result, ack]); return info; }
-    finally {
-      const pending = s.piRequests.get(id);
-      if (pending) { clearTimeout(pending.timer); s.piRequests.delete(id); pending.reject(new Error("Pi control canceled.")); }
-    }
+    finally { const pending = s.piRequests.get(id); if (pending) { clearTimeout(pending.timer); s.piRequests.delete(id); pending.reject(new Error("Pi control canceled.")); } }
   }
   async models(id, refresh = false) {
     const s = this.get(id);
@@ -769,6 +792,9 @@ class Sessions {
         info = catalog("pi", available.models, { currentModel: state.model ? `${state.model.provider}/${state.model.id}` : "",
           currentEffort: state.thinkingLevel || "", currentEfforts: efforts(levels.levels), favorites: bridge.favorites,
           shortcuts: piShortcuts() });
+      } else if (s.agent === "codex") {
+        const runtime = await ensureRuntime(this, s);
+        info = catalog("codex", (await runtime.request("model/list")).data, { currentModel: s.model, currentEffort: s.effort, currentMode: s.workMode });
       } else info = (await this.commands(id, refresh)).catalog;
       if (!info || !this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Model discovery was canceled.");
       s.catalog = info; s.catalogAt = Date.now();
@@ -809,7 +835,7 @@ class Sessions {
           s.effort = change.effort;
         }
         if (change.workMode !== undefined) {
-          if (!["claude", "grok"].includes(s.agent) || !["plan", "default"].includes(change.workMode)) throw new Error("Use this agent's native planning workflow.");
+          if (!["claude", "grok", "codex"].includes(s.agent) || !["plan", "default"].includes(change.workMode)) throw new Error("Use this agent's native planning workflow.");
           s.workMode = change.workMode;
         }
       }
@@ -820,20 +846,30 @@ class Sessions {
         s.catalog = { ...info, currentModel: s.model, currentEffort: s.effort,
           currentEfforts: efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) };
       } else s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode };
-      if (s.agent !== "pi" && s.runtime) await this.resetRuntime(s);
+      if (s.agent === "codex" && s.runtime) {
+        const model = s.model || info.currentModel || info.models[0]?.id;
+        await s.runtime.request("thread/settings/update", { threadId: s.sessionRef, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}),
+          ...(s.workMode ? { collaborationMode: { mode: s.workMode, settings: { model, reasoning_effort: s.effort || null, developer_instructions: null } } } : {}) });
+      } else if (s.agent !== "pi" && s.runtime) await this.resetRuntime(s);
       if (s.model !== previousModel) this.event(s, { type: "context", contextTokens: null, contextWindow: null });
       this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       return { model: s.model, effort: s.effort, workMode: s.workMode, catalog: s.catalog };
     } finally { s.setting = false; }
   }
   event(s, event) {
+    if (event.type === "history") {
+      const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId)?.messages || s.savedTab?.messages;
+      event = { ...event, messages: require("./session-history.cjs").preserveAttachments(event.messages, saved) };
+    }
     if (event.type === "context") {
       s.contextTokens = Number.isFinite(event.contextTokens) && event.contextTokens >= 0 ? event.contextTokens : null;
       if (Object.hasOwn(event, "contextWindow")) s.contextWindow = Number.isFinite(event.contextWindow) && event.contextWindow > 0 ? event.contextWindow : null;
       event = { ...event, contextTokens: s.contextTokens, contextWindow: s.contextWindow ?? null };
     }
+    this.recovery?.event(s, event);
     this.emit({ id: s.id, ...event });
   }
+  prepareLaunch(s) { return prepareProfile(s, this.dataDir, findExecutable, resolveLauncher); }
   async startNative(id) {
     const s = this.get(id);
     if (s.nativeStart) return s.nativeStart;
@@ -844,59 +880,53 @@ class Sessions {
     const s = this.get(id);
     if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before opening native view.");
     if (s.pty) return;
-    if (s.agent === "pi" && Object.keys(s.mcpOverrides).length)
-      throw new Error("Use CLI MCP defaults before opening native Pi. Its terminal cannot inherit Lumen's runtime MCP switches.");
-    const sessionEnv = {};
-    if (s.agent === "grok") sessionEnv.GROK_HOME = await grokHome(this, s);
-    if (s.agent === "claude") sessionEnv.CLAUDE_CONFIG_DIR = await claudeHome(this, s);
-    await syncNativeMcp(s);
-    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before opening native view.");
-    if (s.agent === "codex" && Object.keys(s.mcpOverrides).length && !s.codexLocalServers) {
-      await (await ensureRuntime(this, s)).servers();
-      await this.resetRuntime(s);
+    await this.prepareLaunch(s);
+    if (s.agent === "pi") { await this.ensurePi(s); return; }
+    let launch, sessionEnv = {};
+    if (s.agent === "shell") {
+      const shell = s.shellExecutable || s.shellCommand || (process.platform === "win32" ? findExecutable("powershell") : process.env.SHELL || "/bin/bash");
+      launch = { file: shell, args: [...s.extraArgs] };
+      if (process.platform === "win32" && s.powerShell) {
+        launch.args.unshift("-NoLogo", ...(s.loadShellProfile ? [] : ["-NoProfile"]), "-NoExit", "-EncodedCommand",
+          Buffer.from(`$global:lumenPromptBlock=(Get-Item function:prompt).ScriptBlock; function global:prompt { [Console]::Write([char]27+']9;9;"'+(Get-Location).Path+'"'+[char]7); & $global:lumenPromptBlock }`, "utf16le").toString("base64"));
+      } else if (/(?:^|[\\/])cmd(?:\.exe)?$/i.test(shell)) {
+        s.cmdShell = true;
+        launch.args.unshift("/Q", "/K", 'prompt $E]9;9;"$P"\x07$P$G ');
+      }
+    } else {
+      if (s.agent === "codex") {
+        const runtime = await ensureRuntime(this, s);
+        if (!runtime.remoteAddress) throw new Error("This Codex version cannot share its terminal runtime. Update Codex to use Native CLI without restarting the conversation.");
+        sessionEnv = { LUMEN_CODEX_REMOTE_TOKEN: runtime.remoteToken };
+        launch = profiledLaunch(s, ["resume", s.sessionRef, "--remote", runtime.remoteAddress, "--remote-auth-token-env", "LUMEN_CODEX_REMOTE_TOKEN", ...cliOptions(s), ...extraOptions(s)], resolveLauncher);
+      } else {
+        if (s.agent === "grok") sessionEnv.GROK_HOME = await grokHome(this, s);
+        if (s.agent === "claude") sessionEnv.CLAUDE_CONFIG_DIR = await claudeHome(this, s);
+        await syncNativeMcp(s);
+        if (!s.sessionRef) { s.sessionRef = uuid(); this.event(s, { type: "session", sessionRef: s.sessionRef }); }
+        const history = await require("./session-history.cjs").readHistory(s);
+        const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId) || s.savedTab;
+        if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The saved CLI conversation is unavailable. This chat is retained; restore its original history before continuing.");
+        s.sessionStarted = !!history;
+        launch = profiledLaunch(s, [s.sessionStarted ? "--resume" : "--session-id", s.sessionRef, ...cliOptions(s), ...extraOptions(s), ...launchOptions(s)], resolveLauncher);
+        s.nativeOwned = true;
+      }
     }
     if (s.stopping || !this.sessions.has(id)) throw new Error("This terminal was closed before it finished starting.");
-    if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before opening native view.");
+    this.spawnTerminal(s, launch, sessionEnv);
+  }
+  spawnTerminal(s, launch, sessionEnv = {}) {
     const pty = require("node-pty");
-    const shell =
-      process.platform === "win32"
-        ? (() => {
-            try {
-              return findExecutable("pwsh");
-            } catch {
-              return findExecutable("powershell");
-            }
-          })()
-        : process.env.SHELL || "/bin/bash";
-    const launch =
-      s.agent === "shell"
-        ? { file: shell, args: process.platform === "win32" ? ["-NoLogo"] : [] }
-        : resolveLauncher(s.command);
-    if (s.agent !== "shell") {
-      if (s.sessionRef)
-        launch.args.push(
-          ...(s.agent === "codex"
-            ? ["resume", s.sessionRef]
-            : [s.agent === "pi" ? "--session" : "--resume", s.sessionRef]),
-        );
-      launch.args.push(
-        ...cliOptions(s),
-        ...extraOptions(s),
-        ...launchOptions(s),
-      );
-      if (s.agent === "pi") { launch.args.push("--extension", this.piExtension()); sessionEnv.LUMEN_AUTO_COMPACT_TOKENS = String(s.autoCompactTokens || ""); sessionEnv.LUMEN_COMPACT_STATE_FILE = this.compactStateFile(s); }
-    } else if (process.platform === "win32") {
-      // Keep the existing PowerShell prompt, adding its real folder as an OSC event.
-      launch.args.push("-NoExit", "-Command", '$global:lumenPromptBlock=(Get-Item function:prompt).ScriptBlock; function global:prompt { [Console]::Write([char]27+\']9;9;"\'+(Get-Location).Path+\'"\'+[char]7); & $global:lumenPromptBlock }');
-    }
-    s.pty = pty.spawn(launch.file, launch.args, {
-      name: "xterm-256color",
-      cwd: s.cwd || s.root,
-      cols: 100,
-      rows: 30,
-      env: { ...accountEnvironment(s), TERM: "xterm-256color", COLORTERM: "truecolor", ...sessionEnv },
+    s.terminalState ||= new TerminalState(100, 30, (data) => s.pty?.write(data));
+    const terminal = pty.spawn(launch.file, launch.args, {
+      name: "xterm-256color", cwd: s.cwd || s.root, cols: 100, rows: 30,
+      useConptyDll: process.platform === "win32",
+      env: { ...accountEnvironment(s, s.profileEnvironment || process.env), TERM: "xterm-256color", COLORTERM: "truecolor", ...sessionEnv },
     });
-    s.pty.onData((data) => {
+    s.pty = terminal;
+    this.event(s, { type: "terminal-ready" });
+    terminal.onData((data) => {
+      if (s.pty !== terminal) return;
       s.cwdOscBuffer = (s.cwdOscBuffer || "") + data;
       const osc = /\x1b\](?:9;9;([^\x07\x1b]*)|7;([^\x07\x1b]*))(?:\x07|\x1b\\)/g;
       let match;
@@ -904,47 +934,69 @@ class Sessions {
         try {
           const cwd = match[1] ? match[1].replace(/^"|"$/g, "") : decodeURIComponent(new URL(match[2]).pathname).replace(/^\/([A-Za-z]:)/, "$1");
           if (path.isAbsolute(cwd)) { s.cwd = cwd; this.event(s, { type: "cwd", cwd }); }
+          if (s.stopRequested && s.agent === "shell") this.finish(s, 130);
         } catch {}
       }
       const lastEscape = s.cwdOscBuffer.lastIndexOf("\x1b]");
       s.cwdOscBuffer = lastEscape >= 0 && !/(?:\x07|\x1b\\)/.test(s.cwdOscBuffer.slice(lastEscape)) ? s.cwdOscBuffer.slice(lastEscape).slice(-10000) : "";
+      if (s.agent === "shell") this.shellOutput(s, data);
       s.output = (s.output + data).slice(-500000);
-      this.event(s, { type: "terminal", data });
+      s.terminalState.write(data, (chunk) => this.event(s, { type: "terminal", ...chunk }));
+      if (/\x1b\[\?(?:1049|1047|47)h/.test(data)) this.event(s, { type: "terminal-needed", title: "Interactive terminal" });
     });
-    s.pty.onExit(({ exitCode }) => {
+    terminal.onExit(({ exitCode }) => {
+      if (s.pty !== terminal) return;
       s.pty = null;
+      s.piNativeBridge?.close(); s.piNativeBridge = null;
       this.event(s, { type: "exit", code: exitCode });
+      if (s.nativeOwned) {
+        s.nativeOwned = false; clearInterval(s.nativeHistoryTimer);
+        this.event(s, { type: "native-owner", nativeOwned: false });
+        void this.importNativeHistory(s).then(() => s.mode === "rich" && !s.stopping ? this.reconnect(s.id) : undefined).catch((error) => this.event(s, { type: "error", message: error.message }));
+      }
+      if (s.busy && s.agent !== "codex") this.finish(s, exitCode || 130);
     });
+    return terminal;
   }
-  write(id, data) {
+  write(id, data, terminalId) {
     const s = this.get(id);
+    if (typeof data !== "string" || data.length > 2 * 1024 * 1024) throw new Error("Invalid terminal input.");
+    if (terminalId) { const item = s.toolTerminals?.get(terminalId); if (!item || item.exitStatus) throw new Error("This tool terminal has exited."); item.pty.write(data); return; }
     if (!s.pty) throw new Error("Terminal has exited. Start a new terminal.");
     s.pty.write(data);
   }
-  resize(id, cols, rows) {
+  resize(id, cols, rows, terminalId) {
     const s = this.get(id);
-    if (s.pty)
+    if (!Number.isFinite(cols) || !Number.isFinite(rows)) throw new Error("Invalid terminal size.");
+    if (terminalId) { const item = s.toolTerminals?.get(terminalId); if (item && !item.exitStatus) { item.state.resize(Math.max(20, Math.min(500, Math.floor(cols))), Math.max(5, Math.min(200, Math.floor(rows)))); item.pty.resize(Math.max(20, Math.min(500, Math.floor(cols))), Math.max(5, Math.min(200, Math.floor(rows)))); } return; }
+    if (s.pty) {
+      s.terminalState?.resize(Math.max(20, Math.min(500, Math.floor(cols))), Math.max(5, Math.min(200, Math.floor(rows))));
       s.pty.resize(
         Math.max(20, Math.min(500, Math.floor(cols))),
         Math.max(5, Math.min(200, Math.floor(rows))),
       );
+    }
   }
-  terminalBuffer(id) {
-    return this.get(id).output;
+  terminalBuffer(id, terminalId) {
+    const s = this.get(id);
+    if (terminalId) { const item = s.toolTerminals?.get(terminalId); if (!item) throw new Error("This tool terminal has been released."); return item.state.snapshot(); }
+    return s.terminalState ? s.terminalState.snapshot() : { data: s.output || "", offset: 0 };
   }
   async send(id, prompt, queuedMessage) {
     const s = this.get(id);
-    if (s.stopping || s.transitioning || s.setting || s.catalogPromise)
+    if (s.stopping || s.stopRequested || s.transitioning || s.setting || s.catalogPromise)
       throw new Error(
         "This session is stopping. Wait a moment before continuing.",
       );
     if (s.busy)
       throw new Error("Wait for this turn to finish or stop it first.");
-    if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 200000)
+    if (typeof prompt !== "string" || (!prompt.trim() && !queuedMessage?.attachments?.length) || prompt.length > 200000)
       throw new Error("Enter a message under 200,000 characters.");
     if (s.mode === "native")
       throw new Error("Type directly into the terminal.");
-    if (queuedMessage) this.event(s, { type: "user-message", messageId: queuedMessage.id, text: prompt, delivery: "send" });
+    if (s.nativeOwned && s.pty) throw new Error("The native CLI still owns this conversation. Exit it when ready; Readable will reconnect to the same saved session.");
+    await this.validateMessage(s, queuedMessage || { text: prompt });
+    this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], delivery: "send", deliveryState: "sending" });
     s.busy = true;
     s.phase = undefined;
     s.activeTools = new Set();
@@ -957,29 +1009,44 @@ class Sessions {
     this.event(s, { type: "start", turn: s.turn });
     try {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
-      else await this.agentTurn(s, prompt);
+      else await this.agentTurn(s, prompt, queuedMessage);
+      if (queuedMessage) this.event(s, { type: "message-delivered", messageId: queuedMessage.id });
     } catch (error) {
       if (queuedMessage) this.event(s, { type: "user-message-retracted", messageId: queuedMessage.id });
       this.event(s, { type: "error", message: error.message });
       this.finish(s, 1);
-      if (queuedMessage) throw error;
+      throw error;
     }
   }
   finish(s, code = 0) {
     if (s.stopping) return;
     if (!s.busy) return;
+    if (s.stopRequested && code === 0) code = 130;
     clearTimeout(s.progressTimer);
     s.busy = false;
     s.phase = undefined;
+    s.stopRequested = false;
+    clearTimeout(s.stopTimer);
+    this.event(s, { type: "stop-state", stopping: false, forceStopAvailable: false });
     this.event(s, { type: "done", code, sessionRef: s.sessionRef });
     s.messageQueue?.finish(code);
+    if (s.pendingMode) { const mode = s.pendingMode; s.pendingMode = null; void this.setMode(s.id, mode).then((value) => this.event(s, { type: "view", ...value }), (error) => this.event(s, { type: "diagnostic", text: error.message })); }
+  }
+  async validateMessage(s, message) {
+    if (s.agent === "pi" && message.text?.trimStart().startsWith("/")) throw new Error("Open this Pi command in Native CLI and press Enter there. The draft is retained.");
+    if (s.nativeOwned && s.pty) throw new Error("Exit the native CLI when ready to reconnect this conversation in Readable.");
+    if (!message.attachments?.length) return;
+    if (!this.attachments) throw new Error("Image attachments are unavailable.");
+    if (s.agent === "pi") { await this.piRpc(s, "validate_images"); await this.attachments.resolve(s.controlId, message.attachments); }
+    else if (s.agent === "shell") throw new Error("Use an agent chat for image attachments.");
+    else await (await ensureRuntime(this, s)).validateImages(message.attachments);
   }
   submit(id, message) { return this.get(id).messageQueue.submit(message); }
   queueAction(id, messageId, action) { return this.get(id).messageQueue.action(messageId, action); }
   async steer(s, message) {
     if (!s.busy || s.mode !== "rich" || s.stopping || s.transitioning || s.setting || s.phase === "compacting") throw new Error("This turn cannot accept steering right now.");
     if (message.text.trimStart().startsWith("/") || (s.agent === "codex" && message.text.trimStart().startsWith("$"))) throw new Error("Steer with a normal message. Run CLI commands after this turn finishes.");
-    if (s.agent === "pi") { if (!s.process) throw new Error("Pi is still starting."); await this.piRpc(s, "steer", { message: message.text }); }
+    if (s.agent === "pi") { const images = (await this.attachments.resolve(s.controlId, message.attachments || [])).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType })); await this.piRpc(s, "steer", { message: message.text, clientId: message.id, images }); }
     else { if (!s.runtime || s.runtime.closed) throw new Error("The CLI is still starting or closing."); await s.runtime.steer(message); }
   }
   grokPhase(s, phase) {
@@ -988,15 +1055,15 @@ class Sessions {
     this.event(s, { type: "phase", phase });
   }
   child(s, args, env = {}) {
-    const launch = resolveLauncher(s.command);
+    const launch = profiledLaunch(s, [...args, ...extraOptions(s)], resolveLauncher);
     const child = spawn(
       launch.file,
-      [...launch.args, ...args, ...extraOptions(s)],
+      launch.args,
       {
         cwd: s.cwd || s.root,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...accountEnvironment(s), NO_COLOR: "1", ...env },
+        env: { ...accountEnvironment(s, s.profileEnvironment || process.env), NO_COLOR: "1", ...env },
       },
     );
     s.process = child;
@@ -1088,87 +1155,48 @@ class Sessions {
     });
   }
   async shellTurn(s, prompt) {
-    // Keep a non-interactive shell alive for command blocks. Native tabs use a full PTY.
-    if (!s.shell) {
-      const win = process.platform === "win32";
-      const shell = win
-        ? (() => {
-            try {
-              return findExecutable("pwsh");
-            } catch {
-              return findExecutable("powershell");
-            }
-          })()
-        : process.env.SHELL || "/bin/bash";
-      s.shell = spawn(
-        shell,
-        win
-          ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"]
-          : ["--noprofile", "--norc"],
-        {
-          cwd: s.cwd || s.root,
-          windowsHide: true,
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, TERM: "dumb", NO_COLOR: "1", PS1: "" },
-        },
-      );
-      const shellChild = s.shell;
-      const output = (data) => {
-        if (!s.busy || s.shell !== shellChild) return;
-        s.shellBuffer += data;
-        const clean = strip(s.shellBuffer);
-        const match = clean.match(
-          new RegExp(`${s.marker}:(-?\\d+):([^\\n]*)\\n`),
-        );
-        if (match) {
-          this.text(s, clean.slice(0, match.index).trimEnd(), "shell", true);
-          try {
-            s.cwd = Buffer.from(match[2].trim(), "base64").toString("utf8");
-            this.event(s, { type: "cwd", cwd: s.cwd });
-          } catch {}
-          this.finish(s, Number(match[1]));
-        } else this.text(s, clean, "shell", true);
-      };
-      s.shell.stdout.setEncoding("utf8");
-      s.shell.stderr.setEncoding("utf8");
-      s.shell.stdout.on("data", output);
-      s.shell.stderr.on("data", output);
-      s.shell.on("error", (error) => {
-        this.event(s, { type: "error", message: error.message });
-        this.finish(s, 1);
-      });
-      s.shell.on("close", (code) => {
-        if (s.shell !== shellChild) return;
-        s.shell = null;
-        this.finish(s, code ?? 1);
-      });
-    }
-    s.shellBuffer = "";
-    s.marker = `LUMEN_DONE_${uuid().replace(/-/g, "")}`;
-    const win = process.platform === "win32";
-    // Prompts never pass through command-line shell quoting.
-    if (win) {
-      const encoded = Buffer.from(prompt, "utf8").toString("base64");
-      const wrapper = `$global:LASTEXITCODE=0; try { Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))); $lumenOK=$?; $lumenCode=if($lumenOK){0}elseif($LASTEXITCODE){$LASTEXITCODE}else{1} } catch { Write-Output $_; $lumenCode=1 }; Write-Output ('${s.marker}'+':'+$lumenCode+':'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)))\n`;
-      s.shell.stdin.write(wrapper);
+    await this.startNative(s.id);
+    s.marker = uuid().replace(/-/g, "");
+    s.shellCapture = { buffer: "", started: false };
+    if (process.platform === "win32" && s.powerShell) {
+      const payload = Buffer.from(prompt, "utf8").toString("base64");
+      const wrapper = `[Console]::Write([char]27+']633;LumenBegin;${s.marker}'+[char]7); $global:LASTEXITCODE=0; try { Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}'))); $lumenOK=$?; $lumenCode=if($lumenOK){0}elseif($LASTEXITCODE){$LASTEXITCODE}else{1} } catch { Write-Output $_; $lumenCode=1 }; [Console]::Write([char]27+']633;LumenEnd;${s.marker};'+$lumenCode+';'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path))+[char]7)\r`;
+      s.pty.write(wrapper);
+    } else if (s.cmdShell) {
+      s.pty.write(`echo \x1b]633;LumenBegin;${s.marker}\x07\r${prompt}\recho \x1b]633;LumenEnd;${s.marker};%ERRORLEVEL%;raw:%CD%\x07\r`);
     } else {
-      s.shell.stdin.write(
-        `eval "$(printf %s '${Buffer.from(prompt).toString("base64")}' | base64 -d)"; lumen_code=$?; printf '\\n${s.marker}:%s:%s\\n' "$lumen_code" "$(pwd | tr -d '\\n' | base64 | tr -d '\\n')"\n`,
-      );
+      s.pty.write(String.raw`printf '\033]633;LumenBegin;${s.marker}\007'; eval "$(printf %s '${Buffer.from(prompt).toString("base64")}' | base64 -d)"; lumen_code=$?; printf '\033]633;LumenEnd;${s.marker};%s;%s\007' "$lumen_code" "$(pwd | base64 | tr -d '\n')"` + "\r");
+    }
+    this.event(s, { type: "terminal-needed", title: "Command terminal" });
+  }
+  shellOutput(s, data) {
+    const capture = s.shellCapture;
+    if (!capture) return;
+    capture.buffer += data;
+    const begin = `\x1b]633;LumenBegin;${s.marker}\x07`;
+    if (!capture.started) {
+      const index = capture.buffer.indexOf(begin);
+      if (index < 0) { capture.buffer = capture.buffer.slice(-begin.length * 2); return; }
+      capture.buffer = capture.buffer.slice(index + begin.length); capture.started = true;
+    }
+    const end = new RegExp(`\x1b\\]633;LumenEnd;${s.marker};(-?\\d+);([^\x07]*)\x07`);
+    const match = capture.buffer.match(end);
+    this.text(s, strip(match ? capture.buffer.slice(0, match.index) : capture.buffer).slice(-200000).trimEnd(), "shell", true);
+    if (match) {
+      s.shellCapture = null;
+      s.cwd = match[2].startsWith("raw:") ? match[2].slice(4) : Buffer.from(match[2], "base64").toString("utf8").trimEnd();
+      this.event(s, { type: "cwd", cwd: s.cwd });
+      this.finish(s, Number(match[1]));
     }
   }
-  async agentTurn(s, prompt) {
+  async agentTurn(s, prompt, message = {}) {
     if (s.agent === "pi") {
       await this.ensurePiPolicy(s);
-      s.process.stdin.write(JSON.stringify({ id: uuid(), type: "get_state" }) + "\n");
-      s.piPromptId = uuid();
-      s.piSlashPrompt = prompt.startsWith("/");
-      s.process.stdin.write(
-        JSON.stringify({ id: s.piPromptId, type: "prompt", message: prompt }) + "\n",
-      );
+      const images = (await this.attachments?.resolve(s.controlId, message.attachments || []) || []).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
+      await this.piRpc(s, "prompt", { message: prompt, clientId: message?.id, images });
       return;
     }
-    await (await ensureRuntime(this, s)).prompt(prompt);
+    await (await ensureRuntime(this, s)).prompt(prompt, message);
   }
   codexEvent(s, e) {
     if (e.type === "thread.started") {
@@ -1360,7 +1388,7 @@ class Sessions {
       // Extensions may finish without running the agent. Check the authoritative
       // state after their acknowledgement, rather than timing out a completed command.
       s.piCompletionStateId = uuid();
-      s.process?.stdin.write(JSON.stringify({ id: s.piCompletionStateId, type: "get_state" }) + "\n");
+      s.piNativeBridge?.write({ id: s.piCompletionStateId, type: "get_state" });
     }
     if (e.type === "response" && e.command === "get_state" && e.id === s.piCompletionStateId && e.success &&
         !s.piRunActive && !e.data?.isStreaming && !e.data?.isCompacting && !e.data?.pendingMessageCount) {
@@ -1388,6 +1416,7 @@ class Sessions {
     }
     if (e.type === "message_start" && e.message?.role === "assistant")
       s.messageId = uuid();
+    if (e.type === "message_start" && e.message?.role === "user") this.event(s, { type: "user-message", messageId: e.clientId || uuid(), text: e.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
     if (e.type === "message_update") {
       const a = e.assistantMessageEvent;
       if (a?.type === "text_delta")
@@ -1421,103 +1450,139 @@ class Sessions {
     if (e.type === "agent_settled") {
       s.piRunActive = false;
       if (!s.piCompacting) this.finish(s, 0);
-      s.process?.stdin.write(
-        JSON.stringify({ id: uuid(), type: "get_state" }) + "\n",
-      );
+      s.piNativeBridge?.write({ id: uuid(), type: "get_state" });
     }
   }
   piResponse(id, response) {
     const s = this.get(id);
     if (s.agent !== "pi" && s.runtime) return s.runtime.reply(response);
-    if (s.agent !== "pi" || !s.process)
-      throw new Error("Pi session has ended.");
-    s.process.stdin.write(
-      JSON.stringify({ type: "extension_ui_response", ...response }) + "\n",
-    );
+    if (!s.piNativeBridge) throw new Error("Pi session has ended.");
+    s.piNativeBridge.write({ type: "extension_ui_response", ...response });
+  }
+  async importNativeHistory(s) {
+    if (!["claude", "grok"].includes(s.agent) || !s.sessionRef) return;
+    const history = await require("./session-history.cjs").readHistory(s);
+    if (history) {
+      s.sessionStarted = true;
+      const fingerprint = crypto.createHash("sha256").update(JSON.stringify(history.messages)).digest("hex");
+      if (fingerprint !== s.historyFingerprint) { s.historyFingerprint = fingerprint; this.event(s, { type: "history", messages: history.messages }); }
+    }
+  }
+  async reconnect(id) {
+    const s = this.get(id);
+    if (s.nativeOwned && s.pty) return;
+    await this.prepareLaunch(s);
+    if (s.agent === "shell") { await this.startNative(id); return; }
+    if (s.agent === "pi") {
+      await this.ensurePi(s);
+      const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId);
+      const history = await require("./session-history.cjs").readHistory(s);
+      s.messageQueue.reconcile(history?.messages || [], saved?.acceptedMessageIds || []);
+      this.event(s, { type: "reconnected" }); return;
+    }
+    if (["claude", "grok"].includes(s.agent) && s.sessionRef) {
+      if (s.agent === "claude") await claudeHome(this, s); else await grokHome(this, s);
+      const history = await require("./session-history.cjs").readHistory(s);
+      const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId) || s.savedTab;
+      if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The saved CLI conversation is unavailable. This chat is retained; choose its original session before continuing.");
+      s.sessionStarted = !!history;
+      if (history?.messages.length) this.event(s, { type: "history", messages: history.messages });
+      s.messageQueue.reconcile(history?.messages || [], saved?.acceptedMessageIds || []);
+    }
+    await ensureRuntime(this, s);
+    this.event(s, { type: "reconnected" });
+  }
+  async releaseRuntime(s) {
+    const runtime = s.runtime, child = s.process;
+    if (!child) return;
+    if (runtime?.terminals?.running || s.nativeBackgroundWork) throw new Error("Background work still belongs to this CLI. Keep its current runtime open until that work finishes.");
+    const exited = new Promise((resolve) => child.once("close", resolve));
+    child.stdin.end();
+    let timer;
+    try { await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("The CLI has not exited gracefully. Its session remains open; wait or use Force stop.")), 10000); })]); }
+    finally { clearTimeout(timer); }
+    runtime?.close("Transferring conversation ownership.");
+    if (s.process === child) s.process = null;
   }
   async setMode(id, mode) {
     const s = this.get(id);
-    if (!["rich", "native"].includes(mode))
-      throw new Error("Invalid session view.");
-    if (s.busy || s.stopping || s.transitioning || s.setting)
-      throw new Error("Stop or finish this turn before changing views.");
-    if (s.mode === mode) return { mode: s.mode, sessionRef: s.sessionRef };
-    if (mode === "native" && s.agent === "pi" && Object.keys(s.mcpOverrides).length)
-      throw new Error("Use CLI MCP defaults in this chat's controls before opening native view. Pi cannot carry Lumen's runtime MCP switches into its native terminal.");
+    if (!["rich", "native"].includes(mode)) throw new Error("Invalid session view.");
+    if (s.stopping || s.transitioning || s.setting) throw new Error("Wait for the current session action to finish.");
+    if (s.mode === mode) return { mode, sessionRef: s.sessionRef, nativeOwned: !!s.nativeOwned };
+    if (["claude", "grok"].includes(s.agent) && s.busy) {
+      s.pendingMode = mode;
+      return { mode: s.mode, sessionRef: s.sessionRef, pending: true };
+    }
+    s.messageQueue?.pause();
     s.transitioning = true;
-    s.messageQueue?.pause();
     try {
-      await this.cancelDiscovery(s);
-      if (s.runtime && !s.runtime.hadPrompt && ["codex", "claude"].includes(s.agent)) s.sessionRef = "";
-      s.runtime?.close("Switching session views.");
-      if (s.process) {
-        await this.kill(s.process);
-        s.process = null;
-      }
-      if (mode === "native") await syncNativeMcp(s);
-      if (s.shell) {
-        await this.kill(s.shell);
-        s.shell = null;
-      }
-      if (s.pty) {
-        const native = s.pty;
-        const exited = new Promise((resolve) => native.onExit(resolve));
-        native.kill();
-        let timer;
-        try {
-          await Promise.race([
-            exited,
-            new Promise((_, reject) => {
-              timer = setTimeout(
-                () =>
-                  reject(
-                    new Error("Terminal is still closing. Try again shortly."),
-                  ),
-                10000,
-              );
-            }),
-          ]);
-        } finally {
-          clearTimeout(timer);
+      if (["shell", "pi", "codex"].includes(s.agent)) {
+        if (s.agent === "shell") await this.startNative(id);
+        else if (s.agent === "pi") { await this.ensurePi(s); s.piNativeBridge.write({ id: uuid(), type: "view", mode }); }
+        else { await ensureRuntime(this, s); if (mode === "native") await this.startNative(id); }
+      } else if (mode === "native") {
+        await this.releaseRuntime(s);
+        await syncNativeMcp(s);
+        if (s.sessionRef) {
+          if (s.agent === "claude") await claudeHome(this, s); else await grokHome(this, s);
+          const history = await require("./session-history.cjs").readHistory(s);
+          const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId);
+          if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The CLI has not saved this conversation yet. Its identity is retained; retry once its history is available.");
+          s.sessionStarted = !!history;
         }
-        s.pty = null;
+        await this.startNative(id);
+      } else if (s.pty) {
+        // Keep the native CLI and any editor draft alive. Its saved history can
+        // be read now; protocol ownership transfers only after it exits itself.
+        await this.importNativeHistory(s);
+        clearInterval(s.nativeHistoryTimer);
+        s.nativeHistoryTimer = setInterval(() => void this.importNativeHistory(s).catch(() => {}), 1500);
+        s.nativeHistoryTimer.unref();
+        this.event(s, { type: "terminal-needed", title: "Native CLI · exit when ready to reconnect Readable" });
       }
-      s.output = "";
       s.mode = mode;
-      return { mode: s.mode, sessionRef: s.sessionRef };
-    } finally {
-      s.transitioning = false;
-    }
+      this.event(s, { type: "native-owner", nativeOwned: !!s.nativeOwned && !!s.pty });
+      this.event(s, { type: "view", mode, sessionRef: s.sessionRef });
+      return { mode, sessionRef: s.sessionRef, nativeOwned: !!s.nativeOwned && !!s.pty };
+    } finally { s.transitioning = false; }
   }
-  async stop(id) {
+  async stop(id, force = false) {
     const s = this.get(id);
-    if (s.stopping) return;
-    clearTimeout(s.progressTimer);
-    s.stopping = true;
     s.messageQueue?.pause();
-    try {
-      await this.cancelDiscovery(s);
-      s.runtime?.close("Turn stopped.");
-      if (s.shell) {
-        await this.kill(s.shell);
-        s.shell = null;
-      }
-      if (s.process) {
-        await this.kill(s.process);
-        s.process = null;
-      }
-    } finally {
-      s.stopping = false;
+    s.pendingMode = null;
+    if (force) {
+      s.stopping = true;
+      clearTimeout(s.stopTimer);
+      try {
+        s.runtime?.close("Force stopped. Conversation history is retained.");
+        if (s.process) { await this.kill(s.process, true); s.process = null; }
+        if (s.pty) { const terminal = s.pty; s.pty = null; terminal.kill(); }
+        s.nativeOwned = false; clearInterval(s.nativeHistoryTimer);
+        this.event(s, { type: "native-owner", nativeOwned: false });
+        s.piNativeBridge?.close(); s.piNativeBridge = null;
+        this.rejectPiCommands(s, "Force stopped.");
+      } finally { s.stopping = false; s.stopRequested = false; }
+      this.finish(s, 130);
+      this.event(s, { type: "stop-state", stopping: false, forceStopAvailable: false });
+      return;
     }
-    this.finish(s, 130);
+    if (s.stopRequested || !s.busy) return;
+    s.stopRequested = true;
+    this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: false });
+    s.stopTimer = setTimeout(() => { if (s.stopRequested) this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: true }); }, 10000);
+    try {
+      if (s.agent === "pi" && s.piNativeBridge) { s.piNativeBridge.write({ id: uuid(), type: "abort" }); s.pty?.write("\x1b"); }
+      else if (s.agent === "shell" || s.nativeOwned) s.pty?.write("\x03");
+      else if (s.runtime) await s.runtime.cancel();
+    } catch (error) { this.event(s, { type: "diagnostic", text: "Cancellation is still pending. " + error.message }); }
   }
-  async kill(child) {
+  async kill(child, forceTree = false) {
     if (!child.pid || child.exitCode !== null || child.signalCode !== null)
       return;
     let timer, killError;
-    const exited = new Promise((resolve) => child.once("close", resolve));
+    const exited = new Promise((resolve) => child.once("exit", resolve));
     try {
-      if (process.platform === "win32") {
+      if (process.platform === "win32" && forceTree) {
         try {
           await execute("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
             windowsHide: true,
@@ -1547,13 +1612,17 @@ class Sessions {
     const s = this.sessions.get(id);
     if (!s) return;
     clearTimeout(s.progressTimer);
+    clearTimeout(s.stopTimer);
+    clearInterval(s.nativeHistoryTimer);
     s.stopping = true;
     s.messageQueue?.close();
     await this.cancelDiscovery(s);
     s.runtime?.close("Chat closed.");
     s.pty?.kill();
-    if (s.shell) await this.kill(s.shell);
-    if (s.process) await this.kill(s.process);
+    s.piNativeBridge?.close();
+    s.terminalState?.dispose();
+    if (s.shell) await this.kill(s.shell, true);
+    if (s.process) await this.kill(s.process, true);
     for (const watch of s.accountWatches || []) watch.close();
     await this.accounts?.syncClaude(s);
     await this.accounts?.syncGrok(s);

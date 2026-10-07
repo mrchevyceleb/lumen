@@ -68,6 +68,12 @@ export default function Conversation({
   onDetach,
   onConfig,
   onSignIn,
+  onPasteImage,
+  onDropImages,
+  onTerminal,
+  onForceStop,
+  onContinue,
+  onReconnect,
 }: {
   tab: Tab;
   settings: Settings;
@@ -81,6 +87,12 @@ export default function Conversation({
   onDetach: () => void;
   onConfig: (change: Partial<Tab>) => void;
   onSignIn: () => void;
+  onPasteImage: () => void;
+  onDropImages: (files: string[]) => void;
+  onTerminal: () => void;
+  onForceStop: () => void;
+  onContinue: () => void;
+  onReconnect: () => void;
 }) {
   const input = tab.draft || "";
   const setInput = (value: string) => onConfig({ draft: value });
@@ -160,7 +172,7 @@ export default function Conversation({
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
   const isLocalCommand = tab.agent !== "shell" && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
   const submit = async () => {
-    if (!input.trim() || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && commandLoading)) return;
+    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && commandLoading)) return;
     submitLock.current = true;
     try {
     const hostCommand = input.trim();
@@ -215,7 +227,11 @@ export default function Conversation({
   const statusCaption = controlPending ? "Reading or applying CLI controls…" : isCommandInput && commandLoading ? "Discovering commands…" : isCommandInput && commandError ? commandError : tab.phase === "finishing" ? "Grok has finished its response; the CLI is closing." : tab.phase === "waiting" ? "Grok's output has paused. Its CLI may still be running hooks or continuing the turn." : "";
   const compactLabel = tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()} tokens` : "Auto-compact · CLI default";
   return (
-    <div className={`conversation ${settings.compact ? "compact" : ""}`}>
+    <div className={`conversation ${settings.compact ? "compact" : ""}`} onDragOver={(event) => { if (tab.agent !== "shell" && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => { if (tab.agent === "shell") return; event.preventDefault(); const files = Array.from(event.dataTransfer.files).map((file) => window.lumen.filePath(file)).filter(Boolean); if (files.length) onDropImages(files); }}>
+      {tab.recoveryError && <div className="recovery-banner" role="alert"><span>{tab.recoveryError}</span><button onClick={onReconnect}>Retry connection</button></div>}
+      {tab.nativeOwned && <div className="recovery-banner"><span>Native CLI is still open. Exit it when ready; Readable will reconnect to this conversation.</span><button onClick={onTerminal}>Show terminal</button></div>}
+      {tab.interrupted && !tab.busy && !tab.recoveryError && <div className="recovery-banner"><span>{tab.agent === "shell" ? "This shell was interrupted. Open its terminal or enter a new command." : "This turn was interrupted. Your conversation is restored."}</span><button onClick={tab.agent === "shell" ? onTerminal : onContinue}>{tab.agent === "shell" ? "Open terminal" : "Continue"}</button></div>}
       <div
         className="conversation-scroll"
         ref={scroll}
@@ -357,6 +373,7 @@ export default function Conversation({
           warning={inventory.warning} origin={inventory.origin} agent={agentNames[tab.agent]}
           onSelect={selectCommand} onHover={setSelectedCommand} onRefresh={() => void loadCommands(true)} onNative={() => onNative()} />}
         <div className="composer">
+          {!!tab.draftAttachments?.length && <div className="image-attachments">{tab.draftAttachments.map((image) => <div key={image.id}><img src={image.preview} alt={image.name} /><span>{image.name}</span><button aria-label={`Remove ${image.name}`} onClick={() => onConfig({ draftAttachments: tab.draftAttachments?.filter((value) => value.id !== image.id) })}>×</button></div>)}</div>}
           {attachment && (
             <div className="attachment">
               <Paperclip size={12} />
@@ -384,7 +401,8 @@ export default function Conversation({
                 : "Ask, build, or explore… / for commands"
             }
             value={input}
-            disabled={(tab.busy && tab.agent === "shell") || submitting}
+            disabled={(tab.busy && tab.agent === "shell") || submitting || tab.nativeOwned || !!tab.recoveryError}
+            onPaste={(event) => { if (tab.agent !== "shell" && Array.from(event.clipboardData.items).some((item) => item.type.startsWith("image/"))) { event.preventDefault(); onPasteImage(); } }}
             onChange={(e) => { setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => setFocused(true)}
@@ -413,26 +431,28 @@ export default function Conversation({
           />
           <div className="composer-send-actions">
               {tab.busy && (
-                <button className="send-button stop-button" aria-label="Stop running turn" title="Stop running turn" onClick={onStop}>
+                <button className="send-button stop-button" disabled={tab.stopping} aria-label="Stop running turn" title={tab.stopping ? "Cancellation requested" : "Stop running turn"} onClick={onStop}>
                   <Square size={13} fill="currentColor" />
                 </button>
               )}
               {(!tab.busy || tab.agent !== "shell") && (
                 <button className="send-button" aria-label={tab.busy ? "Queue message" : "Send message"}
                   title={`${tab.busy ? "Queue message" : "Send message"} · ${settings.enterSend ? "Enter · Shift+Enter for a new line" : "Ctrl+Enter"}`}
-                  disabled={!input.trim() || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)} onClick={submit}>
+                  disabled={(!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || !!tab.recoveryError || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)} onClick={submit}>
                   <ArrowUp size={18} />
                 </button>
               )}
           </div>
           </div>
           <div className="composer-toolbar">
-              {!tab.projectless && <IconButton
-                label="Attach active file reference"
+              {tab.agent !== "shell" && <IconButton
+                label="Attach images"
                 onClick={onAttach}
               >
                 <Paperclip size={16} />
               </IconButton>}
+              <IconButton label="Show interactive terminal" onClick={onTerminal}><TerminalSquare size={16} /></IconButton>
+              {tab.forceStopAvailable && <button className="force-stop" onClick={onForceStop}>Force stop</button>}
               {tab.agent !== "shell" && <IconButton label="Discover slash commands" disabled={tab.busy} onClick={() => {
                 if (!input.startsWith("/") && !(tab.agent === "codex" && input.startsWith("$"))) setInput(input ? `/ ${input}` : "/");
                 setCaret(1); setDismissedCommands(false); setFocused(true);
@@ -478,7 +498,8 @@ function MessageView({
   if (m.role === "user")
     return (
       <div className="user-message">
-        <div>{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}{m.text}</div>
+        {!!m.attachments?.length && <div className="message-images">{m.attachments.map((image) => <img key={image.id} src={image.preview} alt={image.name} />)}</div>}
+        <div>{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}{m.text}</div>
         <CopyButton text={m.text} />
       </div>
     );

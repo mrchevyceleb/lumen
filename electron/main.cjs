@@ -12,13 +12,22 @@ const { openPaths, resolveOpenPath } = require("./launch.cjs");
 const { createUpdates } = require("./updates.cjs");
 const { Accounts } = require("./accounts.cjs");
 const { AgentControl } = require("./agent-control.cjs");
+const { createAdministrator, restoreRestartProfile, waitForRestartParent } = require("./administrator.cjs");
+const { RecoveryStore } = require("./recovery.cjs");
+const { Attachments } = require("./attachments.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
   app.setPath("userData", process.env.LUMEN_TEST_DATA);
+restoreRestartProfile(app);
 const initialPaths = openPaths(process.argv);
-if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) app.exit(0);
-let window, workspace, sessions, updates, accounts, agentControl;
+const startup = waitForRestartParent().then(() => {
+  if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) { app.exit(0); return false; }
+  return true;
+});
+let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments;
 let restartForUpdate = false;
+let restartForAdministrator = false, administratorRestartPending = false;
+const administrator = createAdministrator(app);
 let pendingPaths = [...initialPaths];
 app.on("second-instance", (_event, argv, cwd, data) => {
   const paths = Array.isArray(data?.openPaths) && data.openPaths.every((value) => typeof value === "string" && path.isAbsolute(value)) ? data.openPaths : openPaths(argv, cwd);
@@ -37,8 +46,8 @@ const devURL = process.env.LUMEN_DEV === "1" ? "http://127.0.0.1:5173" : "";
 const fileURL = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
 function handle(name, callback) {
   ipcMain.handle(name, async (event, ...args) => {
-    if (name.startsWith("agent-control:") && (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame))
-      return { error: "Only Lumen's main app frame can manage agent control." };
+    if ((name.startsWith("agent-control:") || name.startsWith("administrator:") || name.startsWith("attachments:") || name.startsWith("recovery:")) && (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame))
+      return { error: "Only Lumen's main app frame can manage this action." };
     if (
       event.senderFrame?.url !== fileURL &&
       !(devURL && event.senderFrame?.url.startsWith(`${devURL}/`))
@@ -51,7 +60,9 @@ function handle(name, callback) {
     }
   });
 }
-app.whenReady().then(async () => {
+startup.then(async (start) => {
+  if (!start) return;
+  await app.whenReady();
   const dataDir = app.getPath("userData");
   workspace = new WorkspaceService(dataDir);
   await workspace.init();
@@ -59,10 +70,18 @@ app.whenReady().then(async () => {
     if (window && !window.isDestroyed()) window.webContents.send("accounts:event", event);
   }, (id) => [...(sessions?.sessions.values() || [])].some((s) => s.accountId === id));
   await accounts.init();
+  recovery = new RecoveryStore(dataDir);
+  attachments = new Attachments(dataDir);
   sessions = new Sessions(workspace, dataDir, (event) => {
     if (window && !window.isDestroyed())
       window.webContents.send("session:event", event);
-  }, accounts);
+  }, accounts, recovery, attachments);
+  handle("recovery:load", () => recovery.load());
+  handle("recovery:save", (value) => recovery.saveWorkspace(value));
+  handle("recovery:update", (controlId, changes) => recovery.update(controlId, changes));
+  handle("attachments:paste", (id) => attachments.paste(sessions.get(id).controlId));
+  handle("attachments:choose", (id) => attachments.choose(window, sessions.get(id).controlId));
+  handle("attachments:import", (id, files) => attachments.import(sessions.get(id).controlId, files));
   agentControl = new AgentControl({ dataDir, window: () => window, notify: (status) => {
     if (window && !window.isDestroyed()) window.webContents.send("agent-control:status", status);
   } });
@@ -113,6 +132,7 @@ app.whenReady().then(async () => {
   handle("updates:status", () => updates.status());
   handle("updates:check", () => updates.check());
   handle("updates:install", () => {
+    if (administratorRestartPending || restartForAdministrator) return false;
     if (updates.status().phase !== "downloaded") return false;
     restartForUpdate = true;
     window.close();
@@ -121,6 +141,7 @@ app.whenReady().then(async () => {
   handle("bootstrap", async () => ({
     recent: workspace.recent,
     platform: process.platform,
+    administrator: await administrator.status(),
     agents: Object.fromEntries(
       ["pi", "codex", "claude", "grok"].map((agent) => {
         try {
@@ -163,14 +184,21 @@ app.whenReady().then(async () => {
   handle("git:prs", (root) => workspace.prs(root));
   handle("session:create", (options) => { const created = sessions.create(options); accounts.notify({ type: "changed" }); return created; });
   handle("session:start", (id) => sessions.startNative(id));
-  handle("session:send", (id, message) => sessions.send(id, message));
+  handle("session:send", (id, message, metadata) => sessions.send(id, message, metadata));
   handle("session:submit", (id, message) => sessions.submit(id, message));
   handle("session:queue-action", (id, messageId, action) => sessions.queueAction(id, messageId, action));
-  handle("session:stop", (id) => sessions.stop(id));
-  handle("session:close", async (id) => { await sessions.close(id); accounts.notify({ type: "changed" }); });
-  handle("session:write", (id, data) => sessions.write(id, data));
-  handle("session:resize", (id, cols, rows) => sessions.resize(id, cols, rows));
-  handle("session:buffer", (id) => sessions.terminalBuffer(id));
+  handle("session:stop", (id, force) => sessions.stop(id, force === true));
+  handle("session:reconnect", (id) => sessions.reconnect(id));
+  handle("session:close", async (id) => {
+    const session = sessions.sessions.get(id);
+    const controlId = session?.controlId || recovery.state.tabs.find((tab) => tab.id === id || tab.controlId === id)?.controlId;
+    if (session) await sessions.close(id);
+    if (controlId) recovery.remove(controlId);
+    accounts.notify({ type: "changed" });
+  });
+  handle("session:write", (id, data, terminalId) => sessions.write(id, data, terminalId));
+  handle("session:resize", (id, cols, rows, terminalId) => sessions.resize(id, cols, rows, terminalId));
+  handle("session:buffer", (id, terminalId) => sessions.terminalBuffer(id, terminalId));
   handle("session:pi-response", (id, response) =>
     sessions.piResponse(id, response),
   );
@@ -208,6 +236,23 @@ app.whenReady().then(async () => {
       window.isMaximized() ? window.unmaximize() : window.maximize();
     else if (action === "close") window.close();
   });
+  handle("administrator:status", () => administrator.status());
+  handle("administrator:restart", async () => {
+    if (administratorRestartPending || restartForAdministrator || restartForUpdate || allowClose) return { started: false, cancelled: false };
+    // Save edits explicitly; a privilege change must not discard work.
+    if (dirtyEditors) throw new Error("Save your unsaved files before restarting as administrator.");
+    if (!confirmClose(true)) return { started: false, cancelled: true };
+    administratorRestartPending = true;
+    try {
+      const result = await administrator.restart();
+      if (result.started) {
+        restartForAdministrator = true;
+        updates.suspendInstall();
+        window.close();
+      }
+      return result;
+    } finally { administratorRestartPending = false; }
+  });
   window = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -236,26 +281,10 @@ app.whenReady().then(async () => {
   });
   window.on("close", (event) => {
     if (allowClose) return;
-    if (
-      dirtyEditors ||
-      [...sessions.sessions.values()].some((s) => s.busy || s.pty)
-    ) {
-      const response = dialog.showMessageBoxSync(window, {
-        type: "question",
-        buttons: ["Keep working", "Close and stop sessions"],
-        defaultId: 0,
-        cancelId: 0,
-        message: dirtyEditors
-          ? "Some files have unsaved changes."
-          : "An agent, command, or native terminal is still open.",
-        detail:
-          "Closing Lumen discards unsaved editor changes and stops its processes. Saved files and CLI session history remain available.",
-      });
-      if (response === 0) {
-        restartForUpdate = false;
-        event.preventDefault();
-        return;
-      }
+    if (!restartForAdministrator && (administratorRestartPending || !confirmClose())) {
+      restartForUpdate = false;
+      event.preventDefault();
+      return;
     }
     event.preventDefault();
     agentControl.setReady(false);
@@ -277,13 +306,26 @@ app.whenReady().then(async () => {
   });
   await window.loadURL(devURL || fileURL);
   updates.start();
-});
+}).catch((error) => { dialog.showErrorBox("Lumen could not start", error.message); app.exit(1); });
+function confirmClose(restarting = false) {
+  if (!dirtyEditors && ![...sessions.sessions.values()].some((s) => s.busy || s.pty)) return true;
+  return dialog.showMessageBoxSync(window, {
+    type: "question",
+    buttons: ["Keep working", restarting ? "Restart and stop sessions" : "Close and stop sessions"],
+    defaultId: 0, cancelId: 0,
+    message: dirtyEditors ? "Some files have unsaved changes." : "An agent, command, or native terminal is still open.",
+    detail: restarting
+      ? "Restarting as administrator stops running sessions. Your chats and CLI session history will be restored; continue agents with your next message. Windows will ask for administrator access."
+      : "Closing Lumen discards unsaved editor changes and stops its processes. Saved files and CLI session history remain available.",
+  }) === 1;
+}
 app.on("window-all-closed", async () => {
   await agentControl?.stop().catch(() => {});
   accounts?.dispose();
   try {
     await sessions?.closeAll();
   } catch {}
+  try { recovery?.flush(); } catch {}
   updates?.dispose();
   if (restartForUpdate && updates?.install()) return;
   app.quit();

@@ -20,6 +20,8 @@ import type { Settings, Agent, AgentConfig } from "./types";
 import UpdatesPanel from "./UpdatesPanel";
 import AccountsPanel from "./AccountsPanel";
 import AgentControlPanel from "./AgentControlPanel";
+import AdministratorPanel from "./AdministratorPanel";
+import type { AdministratorStatus } from "./types";
 import type { AccountProfile } from "./types";
 const backgrounds = [
   ["none", "Solid", "Still & focused"],
@@ -42,6 +44,8 @@ export default function SettingsPanel({
   onError,
   initialSection = "appearance",
   onAccountChat,
+  administrator,
+  onAdministratorStatus,
 }: {
   settings: Settings;
   update: (next: Settings) => void;
@@ -50,6 +54,8 @@ export default function SettingsPanel({
   onError: (text: string) => void;
   initialSection?: string;
   onAccountChat: (profile: AccountProfile) => void;
+  administrator: AdministratorStatus;
+  onAdministratorStatus: (status: AdministratorStatus) => void;
 }) {
   const [section, setSection] = useState(initialSection);
   const set = (key: keyof Settings, value: any) =>
@@ -368,6 +374,9 @@ export default function SettingsPanel({
           {section === "behavior" && (
             <>
               <h3>A workspace that fits</h3>
+              <AdministratorPanel status={administrator} onStatus={onAdministratorStatus} />
+              <Toggle title="Restore sessions on launch" detail="Reconnect saved conversations after restarts. Interrupted work waits for Continue; queued messages stay paused." value={s.restoreSessions} onChange={(value) => set("restoreSessions", value)} />
+              <Toggle title="Load PowerShell profiles" detail="Use your normal environment, aliases, and functions in new sessions. Disable while troubleshooting profile startup." value={s.loadShellProfile} onChange={(value) => set("loadShellProfile", value)} />
               <div className="chat-layout-setting">
                 <strong>Chat layout</strong>
                 <p className="muted">Nest chats beneath each project, or keep tabs across the top.</p>

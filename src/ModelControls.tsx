@@ -137,7 +137,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
         {tab.agent === "pi" && <p className="picker-note">Favorites come from Pi's scoped model list. Your model and thinking shortcuts work in readable view.</p>}
         <p className="picker-note">{applying ? "Applying to your chat…" : "Native CLI options · changes apply to the next turn"}</p>
       </> : <div className="plan-choices">
-        {["claude", "grok"].includes(tab.agent) ? <>
+        {["claude", "grok", "codex"].includes(tab.agent) ? <>
           <button disabled={locked} onClick={() => void apply({ workMode: "plan" })}><ListChecks size={20} /><div><strong>Plan mode</strong><p>Use {agentNames[tab.agent]}'s native plan permission mode for your next turns.</p></div>{workMode === "plan" && <Check size={16} />}</button>
           <button disabled={locked} onClick={() => void apply({ workMode: "default" })}><Check size={20} /><div><strong>Full access</strong><p>Run tools and commands with your normal local account access.</p></div>{workMode !== "plan" && <Check size={16} />}</button>
         </> : tab.agent === "pi" ?

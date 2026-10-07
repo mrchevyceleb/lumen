@@ -9,13 +9,14 @@ async function discoverCommands(s, launcher, kill) {
   const args = {
     pi: ["--mode", "rpc", "--no-session", ...model],
     claude: ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...model],
-    codex: ["app-server", "--stdio", ...codexAccountOptions(s)],
+    codex: ["app-server", "--listen", "stdio://", ...codexAccountOptions(s)],
     grok: [...model, "agent", "--no-leader", "stdio"],
   }[s.agent];
   if (!args) return { commands: [], origin: "Shell" };
-  const child = spawn(launcher.file, [...launcher.args, ...args, ...extraOptions(s)], {
-    cwd: s.root, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-    env: { ...accountEnvironment(s), ...(s.agent === "grok" && s.grokHome ? { GROK_HOME: s.grokHome } : {}), NO_COLOR: "1" },
+  const launch = typeof launcher === "function" ? launcher([...args, ...extraOptions(s)]) : { file: launcher.file, args: [...launcher.args, ...args, ...extraOptions(s)] };
+  const child = spawn(launch.file, launch.args, {
+    cwd: s.cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    env: { ...accountEnvironment(s, s.profileEnvironment || process.env), ...(s.agent === "grok" && s.grokHome ? { GROK_HOME: s.grokHome } : {}), NO_COLOR: "1" },
   });
   s.discoveryChild = child;
   let timer, buffer = "", stderr = "", settled = false, finish, grokCommands, grokReady = false, grokInfo;
@@ -136,7 +137,7 @@ function normalize(values, agent) {
       source, scope: c.sourceInfo?.scope || c.scope || c._meta?.scope || "",
       // Grok's ACP shell builtins can return UI-only output in its one-shot print mode.
       // Keep those in the actual terminal; discovered skills/workflows work in readable view.
-      native: agent === "grok" && !c._meta?.path && !c._meta?.workflowPath,
+      native: c.native === true || (agent === "grok" && !c._meta?.path && !c._meta?.workflowPath),
     }];
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
