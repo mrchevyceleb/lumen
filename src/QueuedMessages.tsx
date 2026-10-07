@@ -1,11 +1,18 @@
 import { useRef, useState } from "react";
 import { X } from "lucide-react";
 import { api, type Tab } from "./types";
+export function sendingMessage(tab: Tab) {
+  const first = tab.queuedMessages?.[0];
+  if (!first || first.deliveryUncertain || first.state === "steering") return undefined;
+  return first.state === "sending" || first.dispatchReady ? first : undefined;
+}
 export default function QueuedMessages({ tab, onConfig }: { tab: Tab; onConfig: (change: Partial<Tab>) => void }) {
   const [pending, setPending] = useState(false), [error, setError] = useState("");
   const lock = useRef(false), draft = useRef(tab.draft || ""); draft.current = tab.draft || "";
-  const messages = tab.queuedMessages || [];
-  const busy = pending || messages.some((m) => m.state !== "queued");
+  const entries = tab.queuedMessages || [];
+  const sending = sendingMessage(tab);
+  const messages = entries.filter((m) => m.id !== sending?.id);
+  const busy = pending || entries.some((m) => m.state !== "queued");
   const action = async (id: string, operation: string) => {
     if (lock.current) return; lock.current = true; setPending(true); setError("");
     try {

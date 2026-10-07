@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -24,7 +24,7 @@ import CommandMenu from "./CommandMenu";
 import ModelControls, { type ControlPanel } from "./ModelControls";
 import SessionControls, { lumenCommands, parseThreshold } from "./SessionControls";
 import type { SessionControlsState } from "./types";
-import QueuedMessages from "./QueuedMessages";
+import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames } from "./settings";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
@@ -157,13 +157,17 @@ export default function Conversation({
   };
   const stick = useRef(true);
   const [away, setAway] = useState(false);
+  const sending = sendingMessage(tab);
+  const messages = useMemo<Message[]>(() => sending && !tab.messages.some((message) => message.id === sending.id)
+    ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, delivery: "send", deliveryState: "sending" }]
+    : tab.messages, [tab.messages, sending]);
   useEffect(() => {
     if (stick.current)
       scroll.current?.scrollTo({
         top: scroll.current.scrollHeight,
         behavior: "instant",
       });
-  }, [tab.messages, tab.busy]);
+  }, [messages, tab.busy]);
   useEffect(() => {
     stick.current = true;
     setAway(false);
@@ -242,7 +246,7 @@ export default function Conversation({
           setAway(!stick.current);
         }}
       >
-        {tab.messages.length === 0 ? (
+        {messages.length === 0 ? (
           <div className="session-empty">
             <div className="session-emblem" style={{ color }}>
               <AgentMark agent={tab.agent} color={color} size={44} />
@@ -296,7 +300,7 @@ export default function Conversation({
           </div>
         ) : (
           <div className="message-list">
-            {tab.messages.map((message, index) => tab.agent !== "shell" && message.role === "assistant" && authError(message.text) && tab.messages[index + 1]?.role === "error" && authError(tab.messages[index + 1].text) ? null : (
+            {messages.map((message, index) => tab.agent !== "shell" && message.role === "assistant" && authError(message.text) && messages[index + 1]?.role === "error" && authError(messages[index + 1].text) ? null : (
               <MessageView
                 key={message.id}
                 message={message}
@@ -499,7 +503,7 @@ function MessageView({
     return (
       <div className="user-message">
         {!!m.attachments?.length && <div className="message-images">{m.attachments.map((image) => <img key={image.id} src={image.preview} alt={image.name} />)}</div>}
-        <div>{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}{m.text}</div>
+        <div>{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}{m.text}</div>
         <CopyButton text={m.text} />
       </div>
     );

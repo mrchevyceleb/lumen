@@ -70,7 +70,7 @@ export interface Message {
   deliveryState?: "sending" | "confirmed" | "uncertain";
   attachments?: ImageAttachment[];
 }
-export interface QueuedMessage { id: string; text: string; attachments?: ImageAttachment[]; deliveryUncertain?: boolean; state: "queued" | "sending" | "steering" }
+export interface QueuedMessage { id: string; text: string; attachments?: ImageAttachment[]; deliveryUncertain?: boolean; dispatchReady?: boolean; state: "queued" | "sending" | "steering" }
 export interface Tab {
   id: string;
   root: string;

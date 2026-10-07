@@ -13,7 +13,12 @@ class MessageQueue {
     if (new Set(this.items.map((m) => m.id)).size !== this.items.length) throw new Error("Duplicate queued message.");
     this.pending = false; this.closed = false;
   }
-  state() { return { queuedMessages: this.items.map((m) => ({ ...m })), queuePaused: this.paused }; }
+  state() {
+    const s = this.s;
+    const dispatchReady = !this.closed && !this.pending && !this.paused && !s.busy && !s.stopping && !s.transitioning &&
+      !s.setting && !s.catalogPromise && !s.discoveryPromise && !s.nativeOwned && s.mode === "rich";
+    return { queuedMessages: this.items.map((m, i) => ({ ...m, dispatchReady: i === 0 && !m.deliveryUncertain && dispatchReady })), queuePaused: this.paused };
+  }
   emit() { this.owner.event(this.s, { type: "queue", ...this.state() }); }
   async submit(message) {
     if (this.closed || this.s.mode !== "rich" || this.s.agent === "shell") throw new Error("Use the readable agent chat to queue messages.");
