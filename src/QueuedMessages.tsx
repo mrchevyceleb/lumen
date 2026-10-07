@@ -4,7 +4,8 @@ import { api, type Tab } from "./types";
 export function sendingMessage(tab: Tab) {
   const first = tab.queuedMessages?.[0];
   if (!first || first.deliveryUncertain || first.state === "steering") return undefined;
-  return first.state === "sending" || first.dispatchReady ? first : undefined;
+  return first.state === "sending" || (first.dispatchReady && tab.mode === "rich" && !tab.busy && !tab.queuePaused &&
+    !tab.stopping && !tab.nativeOwned && !tab.recoveryError) ? first : undefined;
 }
 export default function QueuedMessages({ tab, onConfig }: { tab: Tab; onConfig: (change: Partial<Tab>) => void }) {
   const [pending, setPending] = useState(false), [error, setError] = useState("");
