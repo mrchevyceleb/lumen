@@ -7,6 +7,40 @@ export default function lumenControls(pi) {
   let context, socket, view = process.env.LUMEN_PI_VIEW === "native" ? "native" : "rich";
   const dialogs = new Map();
   const deliveries = new Map();
+  const activeTools = new Map();
+  const questionnaireQuestions = (input) => {
+    const questions = input?.questions;
+    if (!Array.isArray(questions) || !questions.length || questions.some((q) =>
+      !q || typeof q.id !== "string" || !q.id || typeof q.prompt !== "string" || !q.prompt ||
+      !Array.isArray(q.options) || (!q.options.length && q.allowOther === false) ||
+      q.options.some((o) => !o || typeof o.label !== "string" || !o.label || (o.value !== undefined && typeof o.value !== "string")))) return;
+    if (new Set(questions.map((q) => q.id)).size !== questions.length) return;
+    return questions.map((q, i) => ({ ...q, label: q.label || `Q${i + 1}`, allowOther: q.allowOther !== false,
+      options: q.options.map((o) => ({ ...o, value: o.value ?? o.label })) }));
+  };
+  const askQuestionnaire = async (ui, questions) => {
+    // Keep the questionnaire extension's result contract; it still formats and saves the result.
+    const answers = [];
+    const cancelled = () => ({ questions, answers, cancelled: true });
+    for (const [i, q] of questions.entries()) {
+      const title = questions.length > 1 ? `${i + 1} of ${questions.length}: ${q.prompt}` : q.prompt;
+      const choices = q.options.map((o, index) => `${index + 1}. ${o.label}${o.description ? ` — ${o.description}` : ""}`);
+      if (q.allowOther) choices.push(`${choices.length + 1}. Write my own answer`);
+      const selected = await ui.select(title, choices);
+      const index = choices.indexOf(selected);
+      if (index < 0) return cancelled();
+      if (index === q.options.length) {
+        const text = await ui.input(title, "Your answer");
+        if (text === undefined) return cancelled();
+        const value = text.trim() || "(no response)";
+        answers.push({ id: q.id, value, label: value, wasCustom: true });
+      } else {
+        const option = q.options[index];
+        answers.push({ id: q.id, value: option.value, label: option.label, wasCustom: false, index: index + 1 });
+      }
+    }
+    return { questions, answers, cancelled: false };
+  };
   const saveEmptySession = (ctx) => {
     const file = ctx.sessionManager.getSessionFile(), header = ctx.sessionManager.getHeader();
     if (!file || !header) throw new Error("Pi has not allocated a resumable session.");
@@ -39,6 +73,15 @@ export default function lumenControls(pi) {
         });
       };
     }
+    const custom = ui.custom.bind(ui);
+    ui.custom = (...args) => {
+      // Only adapt the known questionnaire when no parallel tool can own this custom UI.
+      const tool = activeTools.size === 1 ? activeTools.values().next().value : undefined;
+      const questions = tool?.questions;
+      if (view === "native" || !socket || socket.destroyed || !questions) return custom(...args);
+      tool.questions = undefined;
+      return askQuestionnaire(ui, questions);
+    };
     const notify = ui.notify.bind(ui);
     ui.notify = (message, type) => { output({ type: "extension_ui_request", method: "notify", message, notificationType: type }); if (!message.startsWith("LUMEN_")) notify(message, type); };
     for (const method of ["setStatus", "setTitle", "setWidget", "setEditorText"]) {
@@ -82,6 +125,14 @@ export default function lumenControls(pi) {
     } catch (error) { output({ type: "response", id: request.id, command: request.type, success: false, error: error.message }); }
   };
   if (process.env.LUMEN_PI_BRIDGE) {
+    pi.on("tool_execution_start", (event) => { activeTools.set(event.toolCallId, { name: event.toolName }); });
+    pi.on("tool_call", (event) => {
+      const tool = activeTools.get(event.toolCallId);
+      // Arm after permission hooks and argument mutations, not at the earlier start event.
+      if (tool?.name === "questionnaire" && event.toolName === "questionnaire") tool.questions = questionnaireQuestions(event.input);
+    });
+    pi.on("tool_execution_end", (event) => { activeTools.delete(event.toolCallId); });
+    pi.on("agent_settled", () => activeTools.clear());
     socket = net.createConnection(process.env.LUMEN_PI_BRIDGE);
     socket.setEncoding("utf8");
     let buffer = "";
@@ -89,7 +140,7 @@ export default function lumenControls(pi) {
     socket.on("error", () => {});
     socket.on("close", () => { for (const dialog of [...dialogs.values()]) dialog.native(); });
     socket.on("data", (chunk) => { buffer += chunk; let index; while ((index = buffer.indexOf("\n")) !== -1) { const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); try { void dispatch(JSON.parse(line)); } catch {} } });
-    pi.on("session_start", (_event, ctx) => { context = ctx; saveEmptySession(ctx); installUI(ctx); output({ type: "bridge_ready", ...state() }); });
+    pi.on("session_start", (_event, ctx) => { activeTools.clear(); context = ctx; saveEmptySession(ctx); installUI(ctx); output({ type: "bridge_ready", ...state() }); });
     for (const event of ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "session_compact", "model_select", "ui_prompt_start", "ui_prompt_end"])
       pi.on(event, (message, ctx) => { context = ctx;
         const delivery = message.message?.role === "user" && [...deliveries.values()].find((request) => message.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") === request.message);

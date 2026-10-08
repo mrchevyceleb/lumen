@@ -701,8 +701,8 @@ class Sessions {
   }
   async ensurePi(s) {
     if (this.accounts?.signingIn(s)) throw new Error("Finish Pi's sign-in, then retry your message.");
-    if (s.piNativeBridge && s.pty) return;
     if (s.piStarting) return s.piStarting;
+    if (s.piNativeBridge && s.pty) return;
     s.piStarting = (async () => {
       await this.prepareLaunch(s);
       if (!s.sessionRef) {
@@ -717,26 +717,42 @@ class Sessions {
       });
       let readyResolve, readyReject;
       const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+      // Bridge setup can fail before we reach the readiness await.
+      void ready.catch(() => {});
       const timer = setTimeout(() => readyReject(new Error("Pi's terminal bridge did not initialize. Open its terminal to finish startup or project trust.")), 30000);
-      s.piNativeBridge = await require("./local-bridge.cjs").localBridge((event) => {
-        if (event.type === "bridge_ready") { s.sessionRef = event.sessionFile || s.sessionRef; s.piSessionHeader = event.sessionHeader; s.sessionStarted = true; this.event(s, { type: "session", sessionRef: s.sessionRef, piSessionHeader: s.piSessionHeader }); readyResolve(event); }
-        if (event.type === "bridge_closed") { this.rejectPiCommands(s, "Pi's terminal bridge disconnected."); return; }
-        if (event.type === "agent_ui_cancel") { this.event(s, { type: "agent_ui_cancel", request: { id: event.id } }); return; }
-        if (event.type === "native_command") { s.messageQueue?.pause(); this.event(s, { type: "terminal-needed", title: "Pi command", nativeDraft: event.text }); this.finish(s, 0); return; }
-        if (event.type === "ui_prompt_start" && event.kind === "custom") this.event(s, { type: "terminal-needed", title: "Pi interactive controls" });
-        if (event.type === "extension_ui_request" && event.method === "setWidget" && event.native) this.event(s, { type: "terminal-needed", title: "Pi custom widget" });
-        if (event.type === "agent_start" && !s.busy) { s.busy = true; s.turn = uuid(); this.event(s, { type: "start", turn: s.turn }); }
-        this.piEvent(s, event);
-      });
-      const args = ["--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s), ...extraOptions(s), "--extension", this.piExtension()];
-      if (s.sessionRef) args.push("--session", s.sessionRef);
-      this.spawnTerminal(s, profiledLaunch(s, args, resolveLauncher), {
-        LUMEN_PI_BRIDGE: s.piNativeBridge.endpoint, LUMEN_PI_BRIDGE_TOKEN: s.piNativeBridge.token,
-        LUMEN_PI_VIEW: s.mode,
-        LUMEN_RPC_CONTROLS: "1", LUMEN_AUTO_COMPACT_TOKENS: String(s.autoCompactTokens || ""), LUMEN_COMPACT_STATE_FILE: this.compactStateFile(s),
-      });
-      this.event(s, { type: "terminal-needed", title: "Pi startup" });
-      try { const state = await ready; this.piEvent(s, { type: "response", command: "get_state", success: true, data: state }); } finally { clearTimeout(timer); }
+      s.piBridgeState = "starting";
+      try {
+        s.piNativeBridge = await require("./local-bridge.cjs").localBridge((event) => {
+          if (event.type === "bridge_ready") { s.piBridgeState = "ready"; s.sessionRef = event.sessionFile || s.sessionRef; s.piSessionHeader = event.sessionHeader; s.sessionStarted = true; this.event(s, { type: "session", sessionRef: s.sessionRef, piSessionHeader: s.piSessionHeader }); readyResolve(event); }
+          if (event.type === "bridge_closed") {
+            s.piBridgeState = "disconnected";
+            this.rejectPiCommands(s, "Pi's terminal bridge disconnected.");
+            if (!s.stopping && s.pty) this.event(s, { type: "terminal-needed", title: "Pi terminal bridge disconnected" });
+            readyReject(new Error("Pi's terminal bridge disconnected. Open its terminal to continue."));
+            return;
+          }
+          if (event.type === "agent_ui_cancel") { this.event(s, { type: "agent_ui_cancel", request: { id: event.id } }); return; }
+          if (event.type === "native_command") { s.messageQueue?.pause(); this.event(s, { type: "terminal-needed", title: "Pi command", nativeDraft: event.text }); this.finish(s, 0); return; }
+          if (event.type === "ui_prompt_start" && event.kind === "custom") this.event(s, { type: "terminal-needed", title: "Pi interactive controls" });
+          if (event.type === "extension_ui_request" && event.method === "setWidget" && event.native) this.event(s, { type: "terminal-needed", title: "Pi custom widget" });
+          if (event.type === "agent_start" && !s.busy) { s.busy = true; s.turn = uuid(); this.event(s, { type: "start", turn: s.turn }); }
+          this.piEvent(s, event);
+        });
+        const args = ["--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s), ...extraOptions(s), "--extension", this.piExtension()];
+        if (s.sessionRef) args.push("--session", s.sessionRef);
+        this.spawnTerminal(s, profiledLaunch(s, args, resolveLauncher), {
+          LUMEN_PI_BRIDGE: s.piNativeBridge.endpoint, LUMEN_PI_BRIDGE_TOKEN: s.piNativeBridge.token,
+          LUMEN_PI_VIEW: s.mode,
+          LUMEN_RPC_CONTROLS: "1", LUMEN_AUTO_COMPACT_TOKENS: String(s.autoCompactTokens || ""), LUMEN_COMPACT_STATE_FILE: this.compactStateFile(s),
+        });
+        const state = await ready;
+        this.piEvent(s, { type: "response", command: "get_state", success: true, data: state });
+      } catch (error) {
+        if (!s.pty) { s.piNativeBridge?.close(); s.piNativeBridge = null; }
+        s.piBridgeState = "failed";
+        if (!s.stopping && s.pty) this.event(s, { type: "terminal-needed", title: "Pi startup needs attention" });
+        throw error;
+      } finally { clearTimeout(timer); }
     })();
     try { return await s.piStarting; } finally { s.piStarting = null; }
   }
@@ -947,11 +963,14 @@ class Sessions {
       if (s.agent === "shell") this.shellOutput(s, data);
       s.output = (s.output + data).slice(-500000);
       s.terminalState.write(data, (chunk) => this.event(s, { type: "terminal", ...chunk }));
-      if (/\x1b\[\?(?:1049|1047|47)h/.test(data)) this.event(s, { type: "terminal-needed", title: "Interactive terminal" });
+      // Pi's readable bridge keeps its TUI running; alternate-screen output
+      // alone does not mean it needs input. Its bridge reports native prompts.
+      if ((s.agent !== "pi" || !["starting", "ready"].includes(s.piBridgeState)) && /\x1b\[\?(?:1049|1047|47)h/.test(data)) this.event(s, { type: "terminal-needed", title: "Interactive terminal" });
     });
     terminal.onExit(({ exitCode }) => {
       if (s.pty !== terminal) return;
       s.pty = null;
+      s.piBridgeState = "disconnected";
       s.piNativeBridge?.close(); s.piNativeBridge = null;
       this.event(s, { type: "exit", code: exitCode });
       if (s.nativeOwned) {
