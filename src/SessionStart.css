@@ -1,0 +1,22 @@
+.session-start {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: clamp(24px, 5vw, 64px);
+  display: flex;
+}
+.session-start-content { width: 590px; max-width: 100%; margin: auto; }
+.session-start-project { display: flex; align-items: center; gap: 10px; color: var(--accent); font-size: 15px; }
+.session-start-project span { overflow-wrap: anywhere; }
+.session-start p { color: var(--muted); font-size: 14px; line-height: 1.7; }
+.session-start .session-start-path { font-size: 12px; overflow-wrap: anywhere; margin: 8px 0 28px; }
+.session-start h1 { font-size: clamp(25px, 3vw, 36px); line-height: 1.2; font-weight: 500; letter-spacing: -1px; margin: 20px 0 12px; }
+.session-start-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(235px, 100%), 1fr)); gap: 10px; margin: 26px 0 20px; }
+.session-start-options button { display: flex; align-items: center; gap: 14px; padding: 18px; text-align: left; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface) 75%, transparent); }
+.session-start-options button:hover:not(:disabled) { border-color: var(--accent); background: var(--surface); }
+.session-start-options button > span:nth-child(2) { flex: 1; min-width: 0; }
+.session-start-options strong { display: block; font-size: 14px; font-weight: 500; }
+.session-start-options small { display: block; font-size: 11px; color: var(--muted); margin-top: 5px; }
+.session-start-options svg { flex-shrink: 0; }
+.session-start-options button > svg { color: var(--muted); }
