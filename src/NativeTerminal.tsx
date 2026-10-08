@@ -6,11 +6,13 @@ import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { api, type Settings } from "./types";
 import { CopyButton } from "./Components";
+import { activateWebLink, findWebLinks, webLink, webLinkMenu } from "./ChatLinks";
 export default function NativeTerminal({
   id,
   active,
   settings,
   onError,
+  onWeb,
   draft,
   onDismissDraft,
   terminalId,
@@ -19,6 +21,7 @@ export default function NativeTerminal({
   active: boolean;
   settings: Settings;
   onError: (text: string, recoveryFailure?: boolean) => void;
+  onWeb: (url: string) => void;
   draft?: string;
   onDismissDraft: () => void;
   terminalId?: string;
@@ -27,6 +30,8 @@ export default function NativeTerminal({
   const terminal = useRef<Terminal | null>(null);
   const fit = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  const callbacks = useRef({ onWeb, onError });
+  callbacks.current = { onWeb, onError };
   const [finding, setFinding] = useState(false);
   const [query, setQuery] = useState("");
   useEffect(() => {
@@ -50,6 +55,45 @@ export default function NativeTerminal({
     term.loadAddon(fitter);
     term.loadAddon(search);
     term.open(host.current!);
+    let hoveredURL: string | null = null;
+    const activate = (event: MouseEvent, text: string) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      const url = webLink(text);
+      if (url) activateWebLink(event, url, callbacks.current.onWeb, callbacks.current.onError);
+    };
+    const hover = (_event: MouseEvent, text: string) => { hoveredURL = webLink(text); };
+    const leave = () => { hoveredURL = null; };
+    // OSC 8 links and plain server output share the chat's embedded-browser routing.
+    term.options.linkHandler = { activate, hover, leave };
+    const links = term.registerLinkProvider({ provideLinks(lineNumber, callback) {
+      const buffer = term.buffer.active;
+      let first = lineNumber - 1, last = first;
+      while (first > 0 && last - first < 32 && buffer.getLine(first)?.isWrapped) first--;
+      while (last + 1 < buffer.length && last - first < 32 && buffer.getLine(last + 1)?.isWrapped) last++;
+      let text = "";
+      const positions: { x: number; y: number; width: number }[] = [];
+      for (let y = first; y <= last; y++) {
+        const line = buffer.getLine(y);
+        if (!line) continue;
+        for (let x = 0; x < line.length; x++) {
+          const cell = line.getCell(x);
+          if (!cell || cell.getWidth() === 0) continue;
+          const chars = cell.getChars() || " ";
+          for (let index = 0; index < chars.length; index++) positions.push({ x: x + 1, y: y + 1, width: cell.getWidth() });
+          text += chars;
+        }
+      }
+      callback(findWebLinks(text).map((link) => {
+        const start = positions[link.start], end = positions[link.end - 1];
+        return { text: link.url, range: { start: { x: start.x, y: start.y }, end: { x: end.x + end.width - 1, y: end.y } }, activate, hover, leave };
+      }).filter((link) => link.range.start.y <= lineNumber && link.range.end.y >= lineNumber));
+    } });
+    const contextMenu = (event: MouseEvent) => {
+      if (!hoveredURL) return;
+      event.preventDefault();
+      void webLinkMenu(hoveredURL, callbacks.current.onWeb, callbacks.current.onError);
+    };
+    host.current!.addEventListener("contextmenu", contextMenu);
     term.attachCustomKeyEventHandler((event) => {
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") {
         if (event.type === "keydown") setFinding(true);
@@ -114,8 +158,10 @@ export default function NativeTerminal({
       unsub();
       input.dispose();
       resize.dispose();
+      links.dispose();
       observer.disconnect();
       host.current?.removeEventListener("keydown", find);
+      host.current?.removeEventListener("contextmenu", contextMenu);
       term.dispose();
       terminal.current = null;
     };

@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const channels = new Set([
   "bootstrap",
+  "browser:activate", "browser:layout", "browser:action", "browser:attach", "browser:link-menu",
   "administrator:status", "administrator:restart",
   "recovery:load", "recovery:save", "recovery:update", "attachments:paste", "attachments:choose", "attachments:import", "session:reconnect",
   "agent-control:status", "agent-control:change", "agent-control:ready", "agent-control:reply", "agent-control:claim",
@@ -59,6 +60,16 @@ contextBridge.exposeInMainWorld("lumen", {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on("session:event", listener);
     return () => ipcRenderer.removeListener("session:event", listener);
+  },
+  onBrowser: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on("browser:state", listener);
+    return () => ipcRenderer.removeListener("browser:state", listener);
+  },
+  onBrowserCommand: (callback) => {
+    const listener = (_event, command) => callback(command);
+    ipcRenderer.on("browser:command", listener);
+    return () => ipcRenderer.removeListener("browser:command", listener);
   },
   onAgentControl: (callback) => {
     const listener = (_event, data) => callback(data);

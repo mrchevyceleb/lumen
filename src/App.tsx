@@ -39,6 +39,7 @@ import {
   ListTree,
   PanelTop,
   ShieldCheck,
+  Globe,
 } from "lucide-react";
 import {
   api,
@@ -55,6 +56,7 @@ import {
   type SignInProfile,
   type AdministratorStatus,
   type ImageAttachment,
+  type BrowserPage,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
@@ -67,6 +69,7 @@ import { useUpdates } from "./UpdatesPanel";
 import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
 import SessionTabs from "./SessionTabs";
+import BrowserPane from "./BrowserPane";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
@@ -127,9 +130,21 @@ export default function App() {
   const [panel, setPanel] = useState<"files" | "git">(panelPreferences.panel === "git" ? "git" : "files");
   const [sidebar, setSidebar] = useState(panelPreferences.projects !== false);
   const [explorer, setExplorer] = useState(panelPreferences.workspace === true);
+  const [browserOpen, setBrowserOpen] = useState(panelPreferences.browser === true);
+  const [browserWidth, setBrowserWidth] = useState(Number.isFinite(panelPreferences.browserWidth) ? Math.min(900, Math.max(300, panelPreferences.browserWidth)) : 500);
   const projectsToggle = useRef<HTMLButtonElement>(null);
   const explorerToggle = useRef<HTMLButtonElement>(null);
-  const verticalChats = settings.chatLayout === "vertical" && sidebar;
+  const [sidebarWidth, setSidebarWidth] = useState(Number.isFinite(panelPreferences.projectsWidth) ? Math.min(420, Math.max(200, panelPreferences.projectsWidth)) : 250);
+  const [explorerWidth, setExplorerWidth] = useState(Number.isFinite(panelPreferences.workspaceWidth) ? Math.min(420, Math.max(200, panelPreferences.workspaceWidth)) : 270);
+  const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
+  useEffect(() => {
+    const measure = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  const visibleExplorer = explorer && (!browserOpen || viewportWidth - 52 - (sidebar ? sidebarWidth : 0) - explorerWidth >= 580);
+  const visibleSidebar = sidebar && (!browserOpen || viewportWidth - 52 - (visibleExplorer ? explorerWidth : 0) - sidebarWidth >= 580);
+  const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
   useEffect(() => {
     const element = contextBar.current;
     if (!element) return;
@@ -137,11 +152,9 @@ export default function App() {
     const observer = new ResizeObserver(measure); observer.observe(element); measure();
     return () => observer.disconnect();
   }, [activeId, verticalChats]);
-  const [sidebarWidth, setSidebarWidth] = useState(Number.isFinite(panelPreferences.projectsWidth) ? Math.min(420, Math.max(200, panelPreferences.projectsWidth)) : 250);
-  const [explorerWidth, setExplorerWidth] = useState(Number.isFinite(panelPreferences.workspaceWidth) ? Math.min(420, Math.max(200, panelPreferences.workspaceWidth)) : 270);
   useEffect(() => {
-    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth })); } catch {}
-  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth]);
+    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browser: browserOpen, browserWidth })); } catch {}
+  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserOpen, browserWidth]);
   const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
   const hideExplorer = () => { setExplorer(false); explorerToggle.current?.focus(); };
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -217,10 +230,32 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
+  const openWeb = (url: string) => {
+    setBrowserOpen(true);
+    void api("browser:action", { action: "open", url, workspace: checkoutPath }).catch((error) => notify(error.message));
+  };
   const updateTab = (id: string, change: Partial<Tab>) => {
     const tab = tabsRef.current.find((value) => value.id === id);
     setTabs((old) => old.map((value) => value.id === id ? { ...value, ...change } : value));
     return tab?.controlId ? api("recovery:update", tab.controlId, change).catch((error) => notify("Draft recovery could not be saved: " + error.message)) : Promise.resolve();
+  };
+  const attachBrowser = async (id: string) => {
+    const chatId = activeIdRef.current;
+    const chat = tabsRef.current.find((tab) => tab.id === chatId);
+    if (!chat || chat.agent === "shell" || chat.mode !== "rich") throw new Error("Select a readable agent chat to attach this page.");
+    if ((chat.draftAttachments?.length || 0) >= 8) throw new Error("Attach up to eight images.");
+    const result = await api<{ attachment: ImageAttachment; page: BrowserPage }>("browser:attach", id, chatId);
+    const latest = tabsRef.current.find((tab) => tab.id === chatId);
+    if (!latest) throw new Error("The chat was closed while capturing the page.");
+    if ((latest.draftAttachments?.length || 0) >= 8) throw new Error("Attach up to eight images.");
+    const context = `Browser page: ${result.page.title}\nURL: ${result.page.url}\n\n${result.page.text.slice(0, 4000)}`;
+    setTabs((old) => old.map((tab) => tab.id === chatId && (tab.draftAttachments?.length || 0) < 8
+      ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), result.attachment], draft: [tab.draft, context].filter(Boolean).join("\n\n") } : tab));
+    await settleControl();
+    if (!tabsRef.current.find((tab) => tab.id === chatId)?.draftAttachments?.some((image) => image.id === result.attachment.id))
+      throw new Error("The chat changed or reached its eight-image limit while capturing.");
+    await persist();
+    notify("Page screenshot and context added to your chat draft");
   };
   const signInChat = async (id: string) => {
     if (signInLock.current || signIn) return;
@@ -691,8 +726,9 @@ export default function App() {
     const target = active.id;
     try {
       const imported = source === "clipboard" ? await api<ImageAttachment | null>("attachments:paste", target).then((image) => image ? [image] : []) : source === "choose" ? await api<ImageAttachment[]>("attachments:choose", target) : await api<ImageAttachment[]>("attachments:import", target, source);
-      const tab = tabsRef.current.find((value) => value.id === target);
-      if (tab) updateTab(target, { draftAttachments: [...(tab.draftAttachments || []), ...imported].slice(0, 8) });
+      setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), ...imported].slice(0, 8) } : tab));
+      await settleControl();
+      await persist();
     } catch (error: any) { notify(error.message); }
   };
   const send = async (text: string) => {
@@ -943,9 +979,12 @@ export default function App() {
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
-      if ((e.target as HTMLElement)?.closest(".native-terminal, .modal")) return;
+      if ((e.target as HTMLElement)?.closest(".modal")) return;
       if (!(e.ctrlKey || e.metaKey)) return;
-      if (e.key.toLowerCase() === "s") {
+      if (e.shiftKey && e.key.toLowerCase() === "b") {
+        e.preventDefault(); setBrowserOpen((value) => !value);
+      } else if ((e.target as HTMLElement)?.closest(".native-terminal")) return;
+      else if (e.key.toLowerCase() === "s") {
         e.preventDefault();
         saveFile();
       } else if (e.key.toLowerCase() === "k") {
@@ -1076,8 +1115,9 @@ export default function App() {
         </div>
         <span className="titlebar-caption">a little more room to think</span>
         <div className="titlebar-right">
-          <button ref={explorerToggle} className={`icon-button ${explorer && panel === "files" ? "active" : ""}`} aria-label={explorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={explorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={explorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); setExplorer(!(explorer && panel === "files")); }}>
-            {explorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
+          <button className={`icon-button ${browserOpen ? "active" : ""}`} aria-label={browserOpen ? "Hide browser" : "Show browser"} title="Browser (Ctrl Shift B)" aria-expanded={browserOpen} aria-controls="browser-panel" onClick={() => setBrowserOpen(!browserOpen)}><Globe size={17} /></button>
+          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { if (browserOpen && !visibleExplorer) setBrowserOpen(false); setPanel("files"); setExplorer(!(visibleExplorer && panel === "files")); }}>
+            {visibleExplorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
           </button>
           <button className="command-hint" onClick={() => setDialog("palette")}>
             <Search size={12} />
@@ -1106,19 +1146,20 @@ export default function App() {
           </div>
         </div>
       </header>
-      <div className="app-body">
+      <div className="app-body" style={{ "--projects-panel-width": `${visibleSidebar ? sidebarWidth : 0}px`, "--workspace-panel-width": `${visibleExplorer ? explorerWidth : 0}px` } as CSSProperties}>
         <nav className="rail" aria-label="Workspace panels">
           <div>
-            <button ref={projectsToggle} className={`icon-button ${sidebar ? "active" : ""}`} aria-label={sidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={sidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={sidebar} aria-controls="projects-sidebar" onClick={() => setSidebar(!sidebar)}><Files size={21} /></button>
+            <button ref={projectsToggle} className={`icon-button ${visibleSidebar ? "active" : ""}`} aria-label={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={visibleSidebar} aria-controls="projects-sidebar" onClick={() => { if (browserOpen && !visibleSidebar) setBrowserOpen(false); setSidebar(!visibleSidebar); }}><Files size={21} /></button>
             <button
-              className={`icon-button ${panel === "git" && explorer ? "active" : ""}`}
+              className={`icon-button ${panel === "git" && visibleExplorer ? "active" : ""}`}
               aria-label="Source control"
               title="Source control"
-              aria-expanded={panel === "git" && explorer}
+              aria-expanded={panel === "git" && visibleExplorer}
               aria-controls="workspace-panel"
               onClick={() => {
                 setPanel("git");
-                setExplorer(!(explorer && panel === "git"));
+                if (browserOpen && !visibleExplorer) setBrowserOpen(false);
+                setExplorer(!(visibleExplorer && panel === "git"));
               }}
             >
               <GitBranch size={21} />
@@ -1135,6 +1176,7 @@ export default function App() {
             <IconButton label="New terminal" onClick={() => addTab("shell")}>
               <TerminalSquare size={21} />
             </IconButton>
+            <IconButton label="Browser (Ctrl Shift B)" active={browserOpen} onClick={() => setBrowserOpen(!browserOpen)}><Globe size={21} /></IconButton>
           </div>
           <div>
             <IconButton
@@ -1154,7 +1196,7 @@ export default function App() {
             </span>
           </div>
         </nav>
-        {sidebar && (
+        {visibleSidebar && (
           <>
             <aside id="projects-sidebar" aria-label="Projects and chats" className="sidebar projects-panel" style={{ width: sidebarWidth }}>
               <ProjectSidebar projects={projects.filter((p) => !p.hidden)} activeRoot={root} ready={loaded} onCollapse={hideProjects}
@@ -1260,6 +1302,8 @@ export default function App() {
                         )
                       }
                       onFile={openFile}
+                      onWeb={openWeb}
+                      onError={notify}
                       onSignIn={() => void signInChat(active.id)}
                       onFollowFolder={openWorkspace}
                       onNative={(draft) => typeof draft === "string" ? openNativeCommand(draft) : switchView()}
@@ -1371,15 +1415,19 @@ export default function App() {
                     id={tab.id}
                     active={activeId === tab.id && (active?.mode === "native" || !!active?.terminalOpen) && !active?.terminalId}
                     settings={settings}
+                    onWeb={openWeb}
                     onError={(message, recoveryFailure) => { notify(message); if (recoveryFailure) void updateTab(tab.id, { recoveryError: message }); }}
                   />
                 ))}
               {tabs.flatMap((tab) => (tab.toolTerminals || []).map((terminal) => <NativeTerminal key={`${tab.id}:${terminal.id}`} id={tab.id} terminalId={terminal.id}
-                active={activeId === tab.id && active?.terminalId === terminal.id && !!active?.terminalOpen} settings={settings} onError={notify} onDismissDraft={() => {}} />))}
+                active={activeId === tab.id && active?.terminalId === terminal.id && !!active?.terminalOpen} settings={settings} onWeb={openWeb} onError={notify} onDismissDraft={() => {}} />))}
             </div>
           )}
         </main>
-        {explorer && (
+        <BrowserPane workspace={checkoutPath} open={browserOpen} blocked={!!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
+          width={browserWidth} onWidth={setBrowserWidth} onClose={() => setBrowserOpen(false)} onAttach={attachBrowser}
+          canAttach={!!active && active.agent !== "shell" && active.mode === "rich" && !active.recoveryError} onError={notify} />
+        {visibleExplorer && (
           <>
             <div
               className="resizer sidebar-resizer explorer-resizer"

@@ -137,6 +137,16 @@ Aurora, Orbital, Rain, **Star field**, and **Nebula** have visible motion and li
 
 Your theme, recent workspaces, tabs, selected views, transcripts, drafts, attachments, and CLI resume references are stored locally in Lumen's user-data directory. With **Restore sessions on launch** enabled, saved tabs return in their selected view, agent conversations reconnect, and interrupted work waits for your next action. Shell tabs reopen with their saved working directory; previous shell processes and in-memory variables cannot survive an application restart or reboot. Changing views preserves the live shell, and stopping a shell command sends Ctrl+C without replacing its PTY. Unsaved editor changes are not persisted. Readable transcripts stay local, while agent prompts are sent by the chosen CLI to its configured provider, as usual.
 
+## Embedded Chromium browser
+
+Click the **globe** in the left rail or title bar, or press **Ctrl Shift B**, to open a resizable browser beside your chat and editor. Enter `localhost:3000`, `localhost:5173`, or any HTTP/HTTPS website. Use tabs, Back/Forward, Reload, **Ctrl L** for the address, and **F12** or **DevTools** to inspect the page. Navigation stays inside Chromium, so live websites can load even when they disallow iframe embedding. Start your project's dev server in a Lumen terminal before opening its localhost address.
+
+Browser tabs and the selected tab are saved separately for each working folder, including worktrees. Hiding the browser preserves its pages; closing a tab releases its renderer. Website cookies and logins use a persistent Lumen browser profile shared by these tabs, separate from your system browser and coding-agent accounts. Login popups open in Chromium windows. Websites run in a sandbox with no Node.js or Lumen API access; normal HTTPS certificate checks apply. Camera, microphone, location, and notification permissions are currently disabled.
+
+Web and server links in chat, code blocks, and terminal output open in Lumen's browser by default. **Ctrl-click** (or Command-click on macOS) opens your main browser. Right-click a link to choose **Open in main browser**, **Open in Lumen browser**, or **Copy link address**. Local file links still open in the editor.
+
+**Attach to chat** adds a screenshot, URL, and page text to your current readable agent chat's draft. Review or edit it, then send it normally. Local agents can also navigate, inspect, interact with, and screenshot browser tabs through the authenticated browser API described in the [agent guide](electron/agent-control-guide.md).
+
 ## Local agent control
 
 Use **Settings → Agent control → Copy instructions for an agent** to let another AI start and manage visible coding tasks in Lumen. A dependency-free `lumen-agent.cjs` helper supports create, list, get/watch, continue, queue/steer, stop/resume, model configuration, rename, focus, answer, and close. Any installed provider or a shell can be selected, with a workspace or without one. Existing chats are available too. Agent-created chats have a badge, and management actions leave visible notices.

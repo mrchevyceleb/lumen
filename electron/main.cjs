@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const { pathToFileURL } = require("node:url");
@@ -15,6 +15,7 @@ const { AgentControl } = require("./agent-control.cjs");
 const { createAdministrator, restoreRestartProfile, waitForRestartParent } = require("./administrator.cjs");
 const { RecoveryStore } = require("./recovery.cjs");
 const { Attachments } = require("./attachments.cjs");
+const { BrowserService, browserURL } = require("./browser.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
   app.setPath("userData", process.env.LUMEN_TEST_DATA);
@@ -24,7 +25,7 @@ const startup = waitForRestartParent().then(() => {
   if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) { app.exit(0); return false; }
   return true;
 });
-let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments;
+let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments, browser;
 let restartForUpdate = false;
 let restartForAdministrator = false, administratorRestartPending = false;
 const administrator = createAdministrator(app);
@@ -46,7 +47,7 @@ const devURL = process.env.LUMEN_DEV === "1" ? "http://127.0.0.1:5173" : "";
 const fileURL = pathToFileURL(path.join(__dirname, "../dist/index.html")).href;
 function handle(name, callback) {
   ipcMain.handle(name, async (event, ...args) => {
-    if ((name.startsWith("agent-control:") || name.startsWith("administrator:") || name.startsWith("attachments:") || name.startsWith("recovery:")) && (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame))
+    if (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame)
       return { error: "Only Lumen's main app frame can manage this action." };
     if (
       event.senderFrame?.url !== fileURL &&
@@ -82,7 +83,10 @@ startup.then(async (start) => {
   handle("attachments:paste", (id) => attachments.paste(sessions.get(id).controlId));
   handle("attachments:choose", (id) => attachments.choose(window, sessions.get(id).controlId));
   handle("attachments:import", (id, files) => attachments.import(sessions.get(id).controlId, files));
-  agentControl = new AgentControl({ dataDir, window: () => window, notify: (status) => {
+  agentControl = new AgentControl({ dataDir, window: () => window, browser: (body) => {
+    if (!browser) throw new Error("Lumen's browser is starting.");
+    return browser.control(body);
+  }, notify: (status) => {
     if (window && !window.isDestroyed()) window.webContents.send("agent-control:status", status);
   } });
   handle("agent-control:status", () => agentControl.status());
@@ -271,6 +275,35 @@ startup.then(async (start) => {
     },
   });
   window.removeMenu();
+  browser = new BrowserService(window, dataDir, (folder) => typeof folder === "string" && (folder === "" || [...workspace.roots, ...workspace.recent].some((known) => {
+    const relative = path.relative(known, folder);
+    return !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
+  })));
+  handle("browser:activate", (root) => browser.activate(root));
+  handle("browser:link-menu", (value) => {
+    const url = browserURL(value);
+    if (url === "about:blank") throw new Error("Choose a web link.");
+    return new Promise((resolve) => {
+      let choice = null;
+      const menu = Menu.buildFromTemplate([
+        { label: "Open in Lumen browser", click: () => { choice = "embedded"; } },
+        { label: "Open in main browser", click: () => { choice = "external"; } },
+        { type: "separator" },
+        { label: "Copy link address", click: () => clipboard.writeText(url) },
+      ]);
+      menu.popup({ window, callback: () => resolve(choice) });
+    });
+  });
+  handle("browser:layout", (bounds) => browser.layout(bounds));
+  handle("browser:action", (body) => {
+    if (body?.action === "evaluate") throw new Error("Page scripts use the authenticated local agent API.");
+    return browser.control(body);
+  });
+  handle("browser:attach", async (id, sessionId) => {
+    const chat = sessions.get(sessionId);
+    const { image, page } = await browser.captureContext(id);
+    return { attachment: await attachments.save(chat.controlId, image, "Browser screenshot.png"), page };
+  });
   installZoom(window.webContents, dataDir);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("did-start-loading", () => agentControl.setReady(false));

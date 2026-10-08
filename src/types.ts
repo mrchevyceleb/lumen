@@ -1,6 +1,9 @@
 export type Agent = "shell" | "pi" | "codex" | "claude" | "grok";
 export type Mode = "rich" | "native";
 export interface ImageAttachment { id: string; name: string; mimeType: string; bytes: number; preview: string }
+export interface BrowserTab { id: string; title: string; url: string; error: string; loading: boolean; unloaded?: boolean; canGoBack: boolean; canGoForward: boolean }
+export interface BrowserState { workspace: string; activeId: string; tabs: BrowserTab[]; error?: string }
+export interface BrowserPage { url: string; title: string; text: string; console: { level: string; message: string }[] }
 export interface AdministratorStatus { supported: boolean; elevated: boolean | null; error: string }
 export interface AccountProfile { id: string; agent: "claude" | "codex"; name: string; signedIn: boolean; email: string; signingIn: boolean; inUse: boolean }
 export interface SignInProfile { id: string; agent: Exclude<Agent, "shell">; name: string }
@@ -243,6 +246,8 @@ declare global {
       filePath: (file: File) => string;
       invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
       onSession: (callback: (event: SessionEvent) => void) => () => void;
+      onBrowser: (callback: (state: BrowserState) => void) => () => void;
+      onBrowserCommand: (callback: (command: string) => void) => () => void;
       onAgentControl: (callback: (event: AgentControlRequest) => void) => () => void;
       onAgentControlStatus: (callback: (status: AgentControlStatus) => void) => () => void;
       onUpdate: (callback: (status: UpdateStatus) => void) => () => void;

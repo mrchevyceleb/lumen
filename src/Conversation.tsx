@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Markdown from "react-markdown";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ArrowDown,
@@ -26,6 +26,7 @@ import SessionControls, { lumenCommands, parseThreshold } from "./SessionControl
 import type { SessionControlsState } from "./types";
 import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames } from "./settings";
+import { ChatLink, LinkText, rehypeWebLinks, webLink } from "./ChatLinks";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
   agent,
@@ -61,6 +62,8 @@ export default function Conversation({
   onSend,
   onStop,
   onFile,
+  onWeb,
+  onError,
   onNative,
   onFollowFolder,
   attachment,
@@ -80,6 +83,8 @@ export default function Conversation({
   onSend: (text: string) => Promise<boolean>;
   onStop: () => void;
   onFile: (path: string) => void;
+  onWeb: (url: string) => void;
+  onError: (message: string) => void;
   onNative: (draft?: string) => void;
   onFollowFolder: (folder: string) => void;
   attachment?: string;
@@ -307,6 +312,8 @@ export default function Conversation({
                 tab={tab}
                 color={color}
                 onFile={onFile}
+                onWeb={onWeb}
+                onError={onError}
                 onSignIn={onSignIn}
               />
             ))}
@@ -490,12 +497,16 @@ function MessageView({
   tab,
   color,
   onFile,
+  onWeb,
+  onError,
   onSignIn,
 }: {
   message: Message;
   tab: Tab;
   color: string;
   onFile: (path: string) => void;
+  onWeb: (url: string) => void;
+  onError: (message: string) => void;
   onSignIn: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -503,7 +514,7 @@ function MessageView({
     return (
       <div className="user-message">
         {!!m.attachments?.length && <div className="message-images">{m.attachments.map((image) => <img key={image.id} src={image.preview} alt={image.name} />)}</div>}
-        <div>{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}{m.text}</div>
+        <div>{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}<LinkText text={m.text} onWeb={onWeb} onError={onError} /></div>
         <CopyButton text={m.text} />
       </div>
     );
@@ -528,7 +539,7 @@ function MessageView({
           <span>{m.title}</span>
         </button>
         {expanded && (
-          <pre className="tool-detail">{m.text || "No output."}</pre>
+          <pre className="tool-detail"><LinkText text={m.text || "No output."} onWeb={onWeb} onError={onError} /></pre>
         )}
       </div>
     );
@@ -541,8 +552,8 @@ function MessageView({
             <strong>{agentNames[tab.agent]} needs you to sign in again</strong>
             <p>Your chat is saved. Sign in here, then retry your message.</p>
             <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Sign in to {agentNames[tab.agent]}</button>
-            <details className="auth-error-details"><summary>Error details</summary><p>{m.text}</p></details>
-          </> : <><strong>Something needs attention</strong><p>{m.text}</p></>}
+            <details className="auth-error-details"><summary>Error details</summary><p><LinkText text={m.text} onWeb={onWeb} onError={onError} /></p></details>
+          </> : <><strong>Something needs attention</strong><p><LinkText text={m.text} onWeb={onWeb} onError={onError} /></p></>}
         </div>
         <CopyButton text={m.text} />
       </div>
@@ -551,7 +562,7 @@ function MessageView({
     return (
       <details className="notice-message">
         <summary>CLI details</summary>
-        <pre>{m.text}</pre>
+        <pre><LinkText text={m.text} onWeb={onWeb} onError={onError} /></pre>
       </details>
     );
   return (
@@ -563,26 +574,17 @@ function MessageView({
       </div>
       {tab.agent === "shell" ? (
         <pre className="shell-output">
-          {m.text || "Command completed without output."}
+          <LinkText text={m.text || "Command completed without output."} onWeb={onWeb} onError={onError} />
         </pre>
       ) : (
         <div className="prose">
           <Markdown
             remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeWebLinks]}
+            urlTransform={(url) => webLink(url) || defaultUrlTransform(url)}
             components={{
               a: ({ href, children }) => (
-                <a
-                  href={href}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    if (!href) return;
-                    if (/^https?:/.test(href))
-                      api("external:open", href).catch(() => {});
-                    else onFile(href.replace(/^\.\//, ""));
-                  }}
-                >
-                  {children}
-                </a>
+                <ChatLink href={href} onWeb={onWeb} onError={onError} onFile={onFile}>{children}</ChatLink>
               ),
               pre: ({ children }) => (
                 <div className="code-block">

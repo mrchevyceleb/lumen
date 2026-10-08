@@ -56,8 +56,8 @@ function validate(action, body) {
 }
 
 class AgentControl {
-  constructor({ dataDir, window, notify }) {
-    this.dataDir = dataDir; this.window = window; this.notify = notify;
+  constructor({ dataDir, window, notify, browser }) {
+    this.dataDir = dataDir; this.window = window; this.notify = notify; this.browser = browser;
     this.file = path.join(dataDir, "agent-control.json");
     this.helper = path.join(dataDir, "lumen-agent.cjs");
     this.guide = path.join(dataDir, "lumen-agent-guide.md");
@@ -153,7 +153,11 @@ class AgentControl {
         for await (const chunk of req) { bytes += chunk.length; if (bytes > 900000) throw new ControlError("Request is too large.", 413); chunks.push(chunk); }
         try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new ControlError("Invalid JSON."); }
       }
-      if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close"] });
+      if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close", "browser"] });
+      if (url.pathname === "/v1/browser" && ["GET", "POST"].includes(req.method)) {
+        if (!this.ready || !this.browser) throw new ControlError("Lumen's browser is starting. Try again shortly.", 503);
+        return send(200, await this.browser(req.method === "GET" ? { action: "list" } : body));
+      }
       if (url.pathname === "/v1/tasks" && ["GET", "POST"].includes(req.method)) {
         const action = req.method === "GET" ? "list" : "create";
         return send(action === "create" ? 201 : 200, await this.call(action, "", validate(action, body)));

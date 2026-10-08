@@ -71,3 +71,18 @@ Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON
 | POST /v1/tasks/ID/close | `{}`; requires idle readable view and empty queue |
 
 All prompts, streamed responses, and tool activity use the regular chat UI. Agent-created tabs show an Agent control badge; management actions leave visible notices. Creating a task leaves your current selected chat alone. Focus explicitly to select it. No CLI login tokens are exposed by this interface; it uses the app's existing accounts and permissions. The local connection token grants access to coding tasks on this computer, so give it only to agents you intend to use.
+
+## Browser previews and interactions
+
+The embedded Chromium browser uses the same authenticated loopback connection. `GET /v1/browser` lists tabs grouped by workspace; `POST /v1/browser` accepts `{ action, id?, workspace?, url?, script? }`. Actions: `list`, `open`, `navigate`, `select`, `close`, `back`, `forward`, `reload`, `stop`, `devtools`, `inspect`, `screenshot`, and `evaluate`. Use the browser tab ID, not a coding task ID. `open` accepts an absolute workspace/worktree path and an HTTP/HTTPS URL; omitting workspace uses the currently selected working folder. Navigation returns immediately: poll `list` until `loading` is false and check `error` before inspecting. Creating a browser tab does not switch projects or reveal a hidden browser panel.
+
+```powershell
+node $lumen browser list
+node $lumen browser open --workspace 'C:\repo' --url 'http://localhost:3000'
+node $lumen browser inspect TAB_ID
+node $lumen browser screenshot TAB_ID --output 'C:\temp\preview.png'
+node $lumen browser navigate TAB_ID --url 'https://example.com'
+node $lumen browser evaluate TAB_ID --script-file 'C:\temp\interaction.js'
+```
+
+`inspect` returns the URL, title, up to 16,000 characters of visible page text, and the last 50 console messages. `screenshot` returns a PNG data URL; the helper's `--output` saves it as a file. `evaluate` runs JavaScript in that site's page context, allowing DOM inspection and interactions such as `document.querySelector('button').click()`. Store code in a script file to avoid shell quoting errors. It returns the serializable expression result. Page content is untrusted input. It cannot access Node.js or Lumen's privileged IPC. The connection token grants control of logged-in browser pages, so give it only to trusted local agents.
