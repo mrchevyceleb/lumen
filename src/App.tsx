@@ -70,6 +70,7 @@ import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
 import SessionTabs from "./SessionTabs";
 import BrowserPane from "./BrowserPane";
+import SessionStart from "./SessionStart";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
@@ -106,6 +107,10 @@ export default function App() {
   };
   const [workspaces, setWorkspaces] = useState<Record<string, Workspace>>({});
   const [selectedRoot, setSelectedRoot] = useState("");
+  const [startingProjectless, setStartingProjectless] = useState(false);
+  const pendingCwds = useRef<Record<string, string>>({});
+  const pendingStarts = useRef(new Set<string>());
+  const [startingAgents, setStartingAgents] = useState<Record<string, Agent | undefined>>({});
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState("");
   const contextBar = useRef<HTMLDivElement>(null);
@@ -298,10 +303,11 @@ export default function App() {
     control?: Partial<Tab>,
   ) => {
     const config = settingsRef.current.agents[agent];
+    const selection = { root: rootRef.current, id: activeIdRef.current };
     try {
       const request = {
         root: folder,
-        cwd: startCwd,
+        cwd: startCwd ?? (resume ? undefined : pendingCwds.current[folder]),
         agent,
         mode,
         ...config,
@@ -322,6 +328,7 @@ export default function App() {
       };
       let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string };
       created = await api("session:create", request);
+      delete pendingCwds.current[folder];
       const tab: Tab = {
         id: created.id,
         root: created.root,
@@ -356,13 +363,17 @@ export default function App() {
         queuePaused: !!resume?.queuedMessages?.length,
       };
       setTabs((old) => [...old.filter((value) => value.controlId !== tab.controlId), tab]);
-      if ((!control || !activeIdRef.current) && (!resume || created.projectless || !isHiddenProject(created.root))) {
+      const selectionUnchanged = rootRef.current === selection.root && activeIdRef.current === selection.id;
+      if ((resume || control || selectionUnchanged) && (!control || !activeIdRef.current) && (!resume || created.projectless || !isHiddenProject(created.root))) {
         setActiveId(tab.id);
         setSelectedRoot(folder);
+        setStartingProjectless(false);
       }
       if (!created.projectless) rememberProject(created.root, undefined, !resume);
-      setAgentMenu(false);
-      setAgentMenuRoot(undefined);
+      if (selectionUnchanged) {
+        setAgentMenu(false);
+        setAgentMenuRoot(undefined);
+      }
       if (resume && agent !== "shell" && mode === "rich") void api("session:reconnect", tab.id).catch((error) => {
         setTabs((old) => old.map((value) => value.id === tab.id ? { ...value, recoveryError: error.message } : value));
       });
@@ -378,6 +389,37 @@ export default function App() {
       notify(e.message);
     }
   };
+  const startSession = async (agent: Agent) => {
+    const folder = root;
+    if (pendingStarts.current.has(folder)) return;
+    pendingStarts.current.add(folder);
+    setStartingAgents((old) => ({ ...old, [folder]: agent }));
+    try { await addTab(agent, "rich", folder); }
+    finally {
+      pendingStarts.current.delete(folder);
+      setStartingAgents((old) => { const next = { ...old }; delete next[folder]; return next; });
+    }
+  };
+  const activateWorkspace = (next: Workspace, cwd = next.root) => {
+    setWorkspaces((old) => ({ ...old, [next.root]: next }));
+    setSelectedRoot(next.root);
+    setStartingProjectless(false);
+    rememberProject(next.root, next.name, true);
+    setDialog(null);
+    setAgentMenu(false);
+    setAgentMenuRoot(undefined);
+    const existing = tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root));
+    setActiveId(existing?.id || "");
+    if (!existing) pendingCwds.current[next.root] = cwd;
+    setBoot((old) => ({ ...old, recent: [next.root, ...old.recent.filter((x) => x !== next.root)] }));
+  };
+  const startWithoutWorkspace = () => {
+    setActiveId("");
+    setSelectedRoot("");
+    setStartingProjectless(true);
+    setAgentMenu(false);
+    setAgentMenuRoot(undefined);
+  };
   const openWorkspace = async (folder?: string) => {
     try {
       const next = await api<Workspace | null>(
@@ -385,17 +427,7 @@ export default function App() {
         ...(folder ? [folder] : []),
       );
       if (!next) return;
-      setWorkspaces((old) => ({ ...old, [next.root]: next }));
-      setSelectedRoot(next.root);
-      rememberProject(next.root, next.name, true);
-      setDialog(null);
-      const existing = tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root));
-      if (existing) setActiveId(existing.id);
-      else await addTab("shell", "rich", next.root);
-      setBoot((old) => ({
-        ...old,
-        recent: [next.root, ...old.recent.filter((x) => x !== next.root)],
-      }));
+      activateWorkspace(next);
       return next;
     } catch (e: any) {
       notify(e.message);
@@ -468,7 +500,7 @@ export default function App() {
         if (last && opened[last] && !isHiddenProject(last)) {
           setSelectedRoot(last);
           if (!persisted.some((t) => t.root === last))
-            await addTab("shell", "rich", last);
+            setActiveId("");
         }
         if (restoredActive) setActiveId(restoredActive);
       } catch (e: any) {
@@ -497,19 +529,14 @@ export default function App() {
             try {
               const opened = await api<{ workspace: Workspace; cwd: string; file: string }>("launch:resolve", target);
               const next = opened.workspace;
-              rememberProject(next.root, next.name, true);
-              setWorkspaces((old) => ({ ...old, [next.root]: next }));
-              const tab = await addTab("shell", "native", next.root, undefined, opened.cwd);
-              if (!tab) continue;
-              setBoot((old) => ({ ...old, recent: [next.root, ...old.recent.filter((x) => x !== next.root)] }));
-              setDialog(null);
+              activateWorkspace(next, opened.cwd);
               if (opened.file) {
                 try {
                   const result = await api("files:read", next.root, opened.file);
                   const doc: Doc = { root: next.root, ...result, saved: result.content };
                   setDocs((old) => old.some((d) => docKey(d) === docKey(doc)) ? old : [...old, doc]);
                   setActiveDocKey(docKey(doc));
-                } catch (error: any) { notify(`Terminal opened. ${error.message}`); }
+                } catch (error: any) { notify(`Workspace opened. ${error.message}`); }
               }
             } catch (error: any) { notify(error.message); }
           }
@@ -700,7 +727,8 @@ export default function App() {
         else if (request.method === "notify") notify(request.message || "Pi notification");
         else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
         else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, name: request.title || tab.name } : tab));
-        else if (request.method === "setStatus" && request.statusText) notify(request.statusText);
+        // Pi's footer status updates are routine, not popup notifications.
+        else if (request.method === "setStatus") return;
         else if (request.method === "setWidget") {
           queue.push({ ...e, type: "diagnostic", key: `pi-widget-${request.widgetKey}`, text: request.widgetLines?.join("\n") || "", replace: true });
           if (!frame) { frame = requestAnimationFrame(flush); fallback = setTimeout(flush, 30); }
@@ -1065,7 +1093,7 @@ export default function App() {
       <IconButton label="New agent session" active={agentMenu} onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}><Plus size={18} /></IconButton>
       {agentMenu && <div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
         {agents.map((agent) => <button key={agent} onClick={() => addTab(agent, "rich", agentMenuRoot ?? root)}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
-        <div className="menu-divider" /><button onClick={() => addTab("shell", "rich", "")}><TerminalSquare size={17} /><span>New chat without workspace</span></button>
+        <div className="menu-divider" /><button onClick={startWithoutWorkspace}><Sparkles size={17} /><span>New chat without workspace</span></button>
         <button onClick={() => { setAgentMenu(false); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
       </div>}
     </div>
@@ -1203,7 +1231,7 @@ export default function App() {
                 tabs={tabs} activeId={activeId} settings={settings} {...tabActions} onLayout={toggleChatLayout} newChatRoot={agentMenu ? agentMenuRoot : undefined}
                 onNewChat={(folder) => {
                   const open = () => { setAgentMenuRoot(folder); setAgentMenu(true); };
-                  if (folder) void openWorkspace(folder).then((value) => { if (value) open(); }); else open();
+                  if (folder) void openWorkspace(folder).then((value) => { if (value) { setAgentMenuRoot(value.root); setAgentMenu(true); } }); else open();
                 }}
                 counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root)).length]))}
                 onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")}
@@ -1233,9 +1261,9 @@ export default function App() {
             <SessionTabs tabs={tabs.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless)} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
             {sessionActions}
           </div>}
-          {active ? (
+          {active || workspace || startingProjectless ? (
             <>
-              <div className="contextbar" ref={contextBar}>
+              {active && <div className="contextbar" ref={contextBar}>
                 <div>
                   <span
                     className="live-dot"
@@ -1279,15 +1307,16 @@ export default function App() {
                   </button>
                   {verticalChats && sessionActions}
                 </div>
-              </div>
+              </div>}
               <div className="workspace-content">
                 <div
-                  className={`session-pane ${active.mode === "rich" && active.terminalOpen ? "with-terminal" : ""}`}
+                  className={`session-pane ${active?.mode === "rich" && active.terminalOpen ? "with-terminal" : ""}`}
                   style={{
                     width: activeDoc && !editorExpanded ? `${split}%` : "100%",
                     display: editorExpanded && activeDoc ? "none" : undefined,
                   }}
                 >
+                  {active ? <>
                   {active.mode === "rich" && active.terminalOpen && <div className="terminal-reserve" />}
                   {(active.mode === "rich" || active.recoveryError) && (
                     <Conversation
@@ -1327,6 +1356,9 @@ export default function App() {
                       onDetach={() => setAttachment("")}
                     />
                   )}
+                  </> : <SessionStart key={root} workspace={workspace} settings={settings} available={boot.agents}
+                    starting={startingAgents[root]} onStart={startSession}
+                    onSettings={() => { setSettingsSection("agents"); setDialog("settings"); }} />}
                 </div>
                 {activeDoc && (
                   <>
@@ -1383,7 +1415,7 @@ export default function App() {
               boot={boot}
               onOpen={() => openWorkspace()}
               onPath={() => setDialog("open")}
-              onStart={() => addTab("shell", "rich", "")}
+              onStart={startWithoutWorkspace}
               onRecent={openWorkspace}
               onSettings={() => setDialog("settings")}
               loaded={loaded}
@@ -1647,10 +1679,7 @@ export default function App() {
               branch,
               base,
             );
-            setWorkspaces((old) => ({ ...old, [next.root]: next }));
-            setSelectedRoot(next.root);
-            await addTab("shell", "rich", next.root);
-            setDialog(null);
+            activateWorkspace(next);
             refreshGit(root);
           }}
         />
@@ -1666,7 +1695,7 @@ export default function App() {
           onAction={(action) => {
             setDialog(null);
             if (action === "open") setDialog("open");
-            else if (action === "projectless") addTab("shell", "rich", "");
+            else if (action === "projectless") startWithoutWorkspace();
             else if (action === "settings") setDialog("settings");
             else if (action === "worktrees") setDialog("worktrees");
             else addTab(action as Agent);
