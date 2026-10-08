@@ -1451,7 +1451,7 @@ class Sessions {
         e.isError ? "error" : "done",
       );
     if (e.type === "extension_ui_request")
-      this.event(s, { type: "pi_ui", request: e });
+      this.event(s, { type: "pi_ui", request: e.method === "notify" && typeof e.message === "string" ? { ...e, message: strip(e.message) } : e });
     if (e.type === "agent_settled") {
       s.piRunActive = false;
       if (!s.piCompacting) this.finish(s, 0);

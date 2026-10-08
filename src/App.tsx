@@ -692,7 +692,8 @@ export default function App() {
         else if (request.method === "notify") notify(request.message || "Pi notification");
         else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
         else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, name: request.title || tab.name } : tab));
-        else if (request.method === "setStatus" && request.statusText) notify(request.statusText);
+        // Pi's footer status updates are routine, not popup notifications.
+        else if (request.method === "setStatus") return;
         else if (request.method === "setWidget") {
           queue.push({ ...e, type: "diagnostic", key: `pi-widget-${request.widgetKey}`, text: request.widgetLines?.join("\n") || "", replace: true });
           if (!frame) { frame = requestAnimationFrame(flush); fallback = setTimeout(flush, 30); }
