@@ -78,15 +78,18 @@ export default function lumenControls(pi) {
       // Only adapt the known questionnaire when no parallel tool can own this custom UI.
       const tool = activeTools.size === 1 ? activeTools.values().next().value : undefined;
       const questions = tool?.questions;
+      if (ctx.mode === "rpc" && !questions) throw new Error("This command uses custom Pi terminal controls. Select Native CLI explicitly to run it there.");
       if (view === "native" || !socket || socket.destroyed || !questions) return custom(...args);
       tool.questions = undefined;
       return askQuestionnaire(ui, questions);
     };
     const notify = ui.notify.bind(ui);
-    ui.notify = (message, type) => { output({ type: "extension_ui_request", method: "notify", message, notificationType: type }); if (!message.startsWith("LUMEN_")) notify(message, type); };
+    ui.notify = (message, type) => { output({ type: "extension_ui_request", method: "notify", message, notificationType: type }); if (ctx.mode !== "rpc" && !message.startsWith("LUMEN_")) notify(message, type); };
     for (const method of ["setStatus", "setTitle", "setWidget", "setEditorText"]) {
       const original = ui[method].bind(ui);
-      ui[method] = (...args) => { original(...args); output({ type: "extension_ui_request", method: method === "setEditorText" ? "set_editor_text" : method,
+      ui[method] = (...args) => {
+        if (ctx.mode === "rpc" && method === "setWidget" && args[1] && !Array.isArray(args[1])) throw new Error("This command uses a custom Pi terminal widget. Select Native CLI explicitly, then rerun the command there.");
+        if (ctx.mode !== "rpc") original(...args); output({ type: "extension_ui_request", method: method === "setEditorText" ? "set_editor_text" : method,
         ...(method === "setStatus" ? { statusKey: args[0], statusText: args[1] } : method === "setTitle" ? { title: args[0] } : method === "setWidget" ? { widgetKey: args[0], widgetLines: Array.isArray(args[1]) ? args[1] : undefined, native: !!args[1] && !Array.isArray(args[1]) } : { text: args[0] }) }); };
     }
   };
@@ -98,7 +101,7 @@ export default function lumenControls(pi) {
       if (request.type === "view") { view = request.mode; if (view === "native") for (const dialog of [...dialogs.values()]) dialog.native(); respond(request); return; }
       if (request.type === "get_state") { respond(request, state()); return; }
       if (request.type === "get_session_stats") { respond(request, { contextUsage: context.getContextUsage() }); return; }
-      if (request.type === "get_commands") { respond(request, { commands: pi.getCommands().map((command) => ({ ...command, native: true })) }); return; }
+      if (request.type === "get_commands") { respond(request, { commands: pi.getCommands() }); return; }
       if (request.type === "get_available_models") { respond(request, { models: context.modelRegistry.getAvailable() }); return; }
       if (request.type === "get_available_thinking_levels") { respond(request, { levels: context.model?.reasoning ? ["off", "minimal", "low", "medium", "high", ...(context.model?.id?.includes("opus") || context.model?.id?.includes("gpt-") ? ["xhigh"] : [])] : ["off"] }); return; }
       if (request.type === "set_thinking_level") { pi.setThinkingLevel(request.level); respond(request, state()); return; }
@@ -110,6 +113,17 @@ export default function lumenControls(pi) {
       if (request.type === "abort") { for (const dialog of [...dialogs.values()]) dialog.finish({ cancelled: true }); context.abort(); respond(request); return; }
       if (request.type === "controls") { await controlsHandler(JSON.stringify({ ...request, ...request.data }), context); respond(request); return; }
       if (request.type === "validate_images") { if (!context.model?.input?.includes("image")) throw new Error("The selected Pi model does not accept images."); respond(request); return; }
+      if (request.type === "track_prompt") {
+        const command = request.message?.trimStart().split(/\s/)[0];
+        const extensionCommand = command?.startsWith("/") && pi.getCommands().some((entry) => entry.source === "extension" && entry.name === command.slice(1));
+        deliveries.set(request.clientId || request.deliveryId, { ...request, id: request.deliveryId, type: "prompt", rpc: true, extensionCommand });
+        respond(request); return;
+      }
+      if (request.type === "prompt_preflight") {
+        const delivery = [...deliveries.values()].find((entry) => entry.id === request.deliveryId);
+        if (delivery && (request.failed || (delivery.extensionCommand && !delivery.started && context.isIdle()))) { deliveries.delete(delivery.clientId || delivery.id); if (!request.failed) respond(delivery, { ...state(), commandCompleted: true }); }
+        respond(request); return;
+      }
       if (["prompt", "steer"].includes(request.type)) {
         const content = [{ type: "text", text: request.message || "" }, ...(request.images || [])];
         if (request.type === "prompt" && request.message?.startsWith("/")) {
@@ -143,9 +157,10 @@ export default function lumenControls(pi) {
     pi.on("session_start", (_event, ctx) => { activeTools.clear(); context = ctx; saveEmptySession(ctx); installUI(ctx); output({ type: "bridge_ready", ...state() }); });
     for (const event of ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "session_compact", "model_select", "ui_prompt_start", "ui_prompt_end"])
       pi.on(event, (message, ctx) => { context = ctx;
-        const delivery = message.message?.role === "user" && [...deliveries.values()].find((request) => message.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") === request.message);
+        const delivery = message.message?.role === "user" && [...deliveries.values()].find((request) => request.rpc ? !request.confirming : message.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") === request.message);
         if (delivery) {
-          output({ ...message, clientId: delivery.clientId });
+          delivery.started = true;
+          if (ctx.mode !== "rpc") output({ ...message, clientId: delivery.clientId });
           if (event === "message_end") {
             delivery.confirming = true;
             // Extension message_end runs BEFORE SessionManager.appendMessage.
@@ -166,7 +181,7 @@ export default function lumenControls(pi) {
               finally { deliveries.delete(delivery.clientId || delivery.id); }
             })();
           }
-        } else output(message);
+        } else if (ctx.mode !== "rpc") output(message);
         if (event === "agent_settled") {
           for (const [id, request] of deliveries) if (!request.confirming) { output({ type: "response", id: request.id, command: request.type, success: false, error: "Pi ended before confirming this message. Inspect its history before resending." }); deliveries.delete(id); }
         }

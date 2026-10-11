@@ -701,8 +701,9 @@ class Sessions {
   }
   async ensurePi(s) {
     if (this.accounts?.signingIn(s)) throw new Error("Finish Pi's sign-in, then retry your message.");
+    if (s.piClosing) await s.piClosing;
     if (s.piStarting) return s.piStarting;
-    if (s.piNativeBridge && s.pty) return;
+    if (s.piNativeBridge && (s.pty || s.piRpcProcess)) return;
     s.piStarting = (async () => {
       await this.prepareLaunch(s);
       if (!s.sessionRef) {
@@ -722,33 +723,58 @@ class Sessions {
       const timer = setTimeout(() => readyReject(new Error("Pi's terminal bridge did not initialize. Open its terminal to finish startup or project trust.")), 30000);
       s.piBridgeState = "starting";
       try {
-        s.piNativeBridge = await require("./local-bridge.cjs").localBridge((event) => {
+        const bridge = await require("./local-bridge.cjs").localBridge((event) => {
+          if (s.piNativeBridge !== bridge) return;
           if (event.type === "bridge_ready") { s.piBridgeState = "ready"; s.sessionRef = event.sessionFile || s.sessionRef; s.piSessionHeader = event.sessionHeader; s.sessionStarted = true; this.event(s, { type: "session", sessionRef: s.sessionRef, piSessionHeader: s.piSessionHeader }); readyResolve(event); }
           if (event.type === "bridge_closed") {
-            s.piBridgeState = "disconnected";
-            this.rejectPiCommands(s, "Pi's terminal bridge disconnected.");
+            this.failPiBridge(s, "Pi's terminal bridge disconnected. Retry to reconnect its saved session.");
             if (!s.stopping && s.pty) this.event(s, { type: "terminal-needed", title: "Pi terminal bridge disconnected" });
             readyReject(new Error("Pi's terminal bridge disconnected. Open its terminal to continue."));
             return;
           }
-          if (event.type === "agent_ui_cancel") { this.event(s, { type: "agent_ui_cancel", request: { id: event.id } }); return; }
+          if (event.type === "agent_ui_cancel") { s.piDialogs?.delete(event.id); this.event(s, { type: "agent_ui_cancel", request: { id: event.id } }); return; }
           if (event.type === "native_command") { s.messageQueue?.pause(); this.event(s, { type: "terminal-needed", title: "Pi command", nativeDraft: event.text }); this.finish(s, 0); return; }
           if (event.type === "ui_prompt_start" && event.kind === "custom") this.event(s, { type: "terminal-needed", title: "Pi interactive controls" });
-          if (event.type === "extension_ui_request" && event.method === "setWidget" && event.native) this.event(s, { type: "terminal-needed", title: "Pi custom widget" });
+          if (event.type === "extension_ui_request" && event.method === "setWidget" && event.native) {
+            if (s.piRpcProcess) { s.piCommandFailed = true; this.event(s, { type: "error", message: "This command uses a custom Pi terminal widget. Select Native CLI explicitly, then rerun the command there." }); }
+            else this.event(s, { type: "terminal-needed", title: "Pi custom widget" });
+          }
           if (event.type === "agent_start" && !s.busy) { s.busy = true; s.turn = uuid(); this.event(s, { type: "start", turn: s.turn }); }
           this.piEvent(s, event);
         });
-        const args = ["--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s), ...extraOptions(s), "--extension", this.piExtension()];
+        s.piNativeBridge = bridge;
+        const args = ["--session-dir", path.join(this.dataDir, "pi"), ...cliOptions(s), "--extension", this.piExtension()];
         if (s.sessionRef) args.push("--session", s.sessionRef);
-        this.spawnTerminal(s, profiledLaunch(s, args, resolveLauncher), {
+        const env = {
           LUMEN_PI_BRIDGE: s.piNativeBridge.endpoint, LUMEN_PI_BRIDGE_TOKEN: s.piNativeBridge.token,
           LUMEN_PI_VIEW: s.mode,
           LUMEN_RPC_CONTROLS: "1", LUMEN_AUTO_COMPACT_TOKENS: String(s.autoCompactTokens || ""), LUMEN_COMPACT_STATE_FILE: this.compactStateFile(s),
-        });
+        };
+        if (s.mode === "rich") {
+          s.piRpcProcess = this.child(s, ["--mode", "rpc", ...args], env);
+          const child = s.piRpcProcess;
+          let startupError = "";
+          child.stderr.on("data", (text) => { startupError = (startupError + strip(text)).slice(-2000); });
+          child.once("error", (error) => readyReject(error));
+          this.jsonStream(s, child, (event) => { if (s.process === child) this.piEvent(s, event); });
+          child.once("close", () => {
+            if (s.piRpcProcess !== child) return;
+            readyReject(new Error(startupError.trim() || `Pi exited before its bridge was ready (${child.exitCode ?? "unknown"}).`));
+            s.piRpcProcess = null; s.process = null;
+            s.piNativeBridge?.close(); s.piNativeBridge = null;
+            this.rejectPiCommands(s, "Pi session closed.");
+            this.finish(s, child.exitCode ?? 130);
+          });
+        } else this.spawnTerminal(s, profiledLaunch(s, [...args, ...extraOptions(s)], resolveLauncher), env);
         const state = await ready;
         this.piEvent(s, { type: "response", command: "get_state", success: true, data: state });
       } catch (error) {
-        if (!s.pty) { s.piNativeBridge?.close(); s.piNativeBridge = null; }
+        if (s.piRpcProcess) {
+          const child = s.piRpcProcess; s.piRpcProcess = null; s.process = null;
+          s.piNativeBridge?.close(); s.piNativeBridge = null;
+          await this.kill(child, true);
+        }
+        if (!s.pty && !s.piRpcProcess) { s.piNativeBridge?.close(); s.piNativeBridge = null; }
         s.piBridgeState = "failed";
         if (!s.stopping && s.pty) this.event(s, { type: "terminal-needed", title: "Pi startup needs attention" });
         throw error;
@@ -772,13 +798,25 @@ class Sessions {
   async piRpc(s, type, data = {}) {
     if (s.stopping || s.transitioning || !this.sessions.has(s.id)) throw new Error("Pi controls were canceled.");
     await this.ensurePi(s);
+    const id = uuid();
+    if (s.piRpcProcess && type === "prompt") await this.piRpc(s, "track_prompt", { ...data, deliveryId: id });
     return new Promise((resolve, reject) => {
-      const id = uuid();
       s.piRequests ||= new Map();
-      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi did not finish this control. Its live terminal remains available.")); }, 30000);
+      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi did not finish this control.")); }, type === "prompt" ? 24 * 60 * 60 * 1000 : 30000);
       s.piRequests.set(id, { resolve, reject, timer });
-      try { s.piNativeBridge.write({ id, type, ...data }); }
-      catch (error) { clearTimeout(timer); s.piRequests.delete(id); reject(error); }
+      const failed = (error) => {
+        if (type === "prompt") this.writePiBridge(s, { id: uuid(), type: "prompt_preflight", deliveryId: id, failed: true });
+        clearTimeout(timer); s.piRequests.delete(id); reject(error);
+      };
+      try {
+        if (s.piRpcProcess && ["prompt", "steer"].includes(type)) {
+          if (type === "prompt") { s.piPromptId = id; s.piSlashPrompt = data.message?.trimStart().startsWith("/"); }
+          s.piRpcProcess.stdin.write(JSON.stringify({ id: type === "prompt" ? `preflight:${id}` : id, type, ...data, message: s.piSlashPrompt && type === "prompt" ? data.message.trimStart() : data.message }) + "\n", (error) => {
+            if (error) failed(error);
+          });
+        } else this.writePiBridge(s, { id, type, ...data });
+      }
+      catch (error) { failed(error); }
     });
   }
   async piBridge(s, action, data = {}) {
@@ -1030,6 +1068,7 @@ class Sessions {
     s.piRunActive = false;
     s.piCompletionStateId = undefined;
     s.piPromptId = undefined;
+    s.piCommandFailed = false;
     this.event(s, { type: "start", turn: s.turn });
     try {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
@@ -1057,7 +1096,6 @@ class Sessions {
     if (s.pendingMode) { const mode = s.pendingMode; s.pendingMode = null; void this.setMode(s.id, mode).then((value) => this.event(s, { type: "view", ...value }), (error) => this.event(s, { type: "diagnostic", text: error.message })); }
   }
   async validateMessage(s, message) {
-    if (s.agent === "pi" && message.text?.trimStart().startsWith("/")) throw new Error("Open this Pi command in Native CLI and press Enter there. The draft is retained.");
     if (s.nativeOwned && s.pty) throw new Error("Exit the native CLI when ready to reconnect this conversation in Readable.");
     if (!message.attachments?.length) return;
     if (!this.attachments) throw new Error("Image attachments are unavailable.");
@@ -1362,6 +1400,22 @@ class Sessions {
     }
   }
   piEvent(s, e) {
+    if (e.type === "extension_error") {
+      s.piCommandFailed = true;
+      this.event(s, { type: "error", message: e.error || "Pi extension failed." });
+      return;
+    }
+    if (s.piRpcProcess && e.type === "extension_ui_request" && e.method === "notify" && (e.notificationType || e.notifyType) === "error") {
+      s.piCommandFailed = true;
+      this.event(s, { type: "error", message: strip(e.message || "Pi command failed.") });
+      return;
+    }
+    if (e.type === "response" && e.command === "prompt" && e.id?.startsWith("preflight:")) {
+      const id = e.id.slice(10);
+      if (!this.writePiBridge(s, { id: uuid(), type: "prompt_preflight", deliveryId: id, failed: !e.success })) return;
+      if (!e.success) this.piEvent(s, { ...e, id });
+      return;
+    }
     if (e.type === "extension_ui_request" && e.method === "notify" && /^MCP Servers:|^No MCP servers configured/.test(e.message || "")) {
       s.piMcpNotification = e.message; return;
     }
@@ -1372,7 +1426,7 @@ class Sessions {
           s.piCompacting = usage.compacting;
           this.event(s, { type: "phase", phase: usage.compacting ? "compacting" : undefined });
           if (usage.error) this.event(s, { type: "diagnostic", key: "auto-compact", text: "Auto-compact: " + usage.error + ". The CLI's normal context protection remains active." });
-          if (!usage.compacting && !s.piRunActive) this.finish(s, 0);
+          if (!usage.compacting && !s.piRunActive) this.finish(s, s.piCommandFailed ? 1 : 0);
         }
       } catch {}
       return;
@@ -1395,6 +1449,11 @@ class Sessions {
       const pending = s.piRequests.get(e.id);
       clearTimeout(pending.timer); s.piRequests.delete(e.id);
       e.success ? pending.resolve(e.data || {}) : pending.reject(new Error(e.error || "Pi control failed."));
+      // A saved user message acknowledges delivery, not completion of its model run.
+      if (e.command === "prompt" && e.success && e.data?.commandCompleted) {
+        s.piCompletionStateId = uuid();
+        this.writePiBridge(s, { id: s.piCompletionStateId, type: "get_state" });
+      }
       if (e.command !== "get_state") return;
     }
     if (e.type === "response" && e.command === "get_commands" && e.id === s.piCommands?.id) {
@@ -1408,16 +1467,10 @@ class Sessions {
       return;
     }
     if (e.type === "agent_start") s.piRunActive = true;
-    if (e.type === "response" && e.command === "prompt" && e.id === s.piPromptId && e.success && s.piSlashPrompt) {
-      // Extensions may finish without running the agent. Check the authoritative
-      // state after their acknowledgement, rather than timing out a completed command.
-      s.piCompletionStateId = uuid();
-      s.piNativeBridge?.write({ id: s.piCompletionStateId, type: "get_state" });
-    }
-    if (e.type === "response" && e.command === "get_state" && e.id === s.piCompletionStateId && e.success &&
+    if (e.type === "response" && e.command === "get_state" && s.piCompletionStateId && e.id === s.piCompletionStateId && e.success &&
         !s.piRunActive && !e.data?.isStreaming && !e.data?.isCompacting && !e.data?.pendingMessageCount) {
-      if (s.busy && !s.hadText) this.text(s, "Command completed.", "command-result", true);
-      this.finish(s, 0);
+      if (s.busy && !s.hadText && !s.piCommandFailed) this.text(s, "Command completed.", "command-result", true);
+      this.finish(s, s.piCommandFailed ? 1 : 0);
     }
     if (
       e.type === "response" &&
@@ -1436,11 +1489,11 @@ class Sessions {
     }
     if (e.type === "response" && e.success === false) {
       this.event(s, { type: "error", message: e.error });
-      if (e.command === "prompt") this.finish(s, 1);
+      if (e.command === "prompt" || (s.piCompletionStateId && e.id === s.piCompletionStateId)) this.finish(s, 1);
     }
     if (e.type === "message_start" && e.message?.role === "assistant")
       s.messageId = uuid();
-    if (e.type === "message_start" && e.message?.role === "user") this.event(s, { type: "user-message", messageId: e.clientId || uuid(), text: e.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
+    if (!s.piRpcProcess && e.type === "message_start" && e.message?.role === "user") this.event(s, { type: "user-message", messageId: e.clientId || uuid(), text: e.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
     if (e.type === "message_update") {
       const a = e.assistantMessageEvent;
       if (a?.type === "text_delta")
@@ -1469,22 +1522,55 @@ class Sessions {
         (e.result?.content || []).map((c) => c.text || "").join("\n"),
         e.isError ? "error" : "done",
       );
-    if (e.type === "extension_ui_request")
+    if (e.type === "extension_ui_request") {
+      if (["select", "confirm", "input", "editor"].includes(e.method)) { s.piDialogs ||= new Set(); s.piDialogs.add(e.id); }
       this.event(s, { type: "pi_ui", request: e.method === "notify" && typeof e.message === "string" ? { ...e, message: strip(e.message) } : e });
+    }
     if (e.type === "agent_settled") {
       s.piRunActive = false;
-      if (!s.piCompacting) this.finish(s, 0);
-      s.piNativeBridge?.write({ id: uuid(), type: "get_state" });
+      if (!s.piCompacting) this.finish(s, s.piCommandFailed ? 1 : 0);
+      this.writePiBridge(s, { id: uuid(), type: "get_state" });
+    }
+  }
+  failPiBridge(s, message) {
+    s.piBridgeState = "disconnected";
+    s.piCommandFailed = true;
+    this.rejectPiCommands(s, message);
+    for (const id of s.piDialogs || []) this.event(s, { type: "agent_ui_cancel", request: { id } });
+    s.piDialogs?.clear();
+    if (s.stopping) return;
+    const child = s.piRpcProcess;
+    if (child) {
+      const bridge = s.piNativeBridge;
+      s.piNativeBridge = null; s.piRpcProcess = null;
+      if (s.process === child) s.process = null;
+      bridge?.close();
+      const closing = this.kill(child, true);
+      s.piClosing = closing; s.piClosingChild = child;
+      const cleared = () => { if (s.piClosingChild === child) { s.piClosing = null; s.piClosingChild = null; } };
+      child.once("exit", cleared);
+      void closing.then(cleared, (error) => { if (child.exitCode !== null || child.signalCode !== null) cleared(); this.event(s, { type: "diagnostic", text: "Pi could not close its disconnected runtime: " + error.message }); });
+    }
+    if (s.busy) { this.event(s, { type: "error", message }); this.finish(s, 1); }
+  }
+  writePiBridge(s, request) {
+    try {
+      if (!s.piNativeBridge) throw new Error("The terminal bridge is disconnected.");
+      s.piNativeBridge.write(request);
+      return true;
+    } catch (error) {
+      this.failPiBridge(s, "Pi's terminal bridge failed. Retry to reconnect its saved session. " + error.message);
+      return false;
     }
   }
   piResponse(id, response) {
     const s = this.get(id);
     if (s.agent !== "pi" && s.runtime) return s.runtime.reply(response);
-    if (!s.piNativeBridge) throw new Error("Pi session has ended.");
-    s.piNativeBridge.write({ type: "extension_ui_response", ...response });
+    if (!this.writePiBridge(s, { type: "extension_ui_response", ...response })) throw new Error("Pi's dialog could not receive the answer. Retry the command after reconnecting.");
+    s.piDialogs?.delete(response.id);
   }
   async importNativeHistory(s) {
-    if (!["claude", "grok"].includes(s.agent) || !s.sessionRef) return;
+    if (!["claude", "grok", "pi"].includes(s.agent) || !s.sessionRef) return;
     const history = await require("./session-history.cjs").readHistory(s);
     if (history) {
       s.sessionStarted = true;
@@ -1533,7 +1619,7 @@ class Sessions {
     if (!["rich", "native"].includes(mode)) throw new Error("Invalid session view.");
     if (s.stopping || s.transitioning || s.setting) throw new Error("Wait for the current session action to finish.");
     if (s.mode === mode) return { mode, sessionRef: s.sessionRef, nativeOwned: !!s.nativeOwned };
-    if (["claude", "grok"].includes(s.agent) && s.busy) {
+    if (["claude", "grok", "pi"].includes(s.agent) && s.busy) {
       s.pendingMode = mode;
       return { mode: s.mode, sessionRef: s.sessionRef, pending: true };
     }
@@ -1542,7 +1628,25 @@ class Sessions {
     try {
       if (["shell", "pi", "codex"].includes(s.agent)) {
         if (s.agent === "shell") await this.startNative(id);
-        else if (s.agent === "pi") { await this.ensurePi(s); s.piNativeBridge.write({ id: uuid(), type: "view", mode }); }
+        else if (s.agent === "pi") {
+          this.rejectPiCommands(s, "Pi view changed.");
+          if (s.piRpcProcess) { const child = s.piRpcProcess; s.piRpcProcess = null; s.process = null; await this.kill(child, true); }
+          if (mode === "rich" && s.pty) {
+            // A native command or dialog can own the terminal while the agent is idle.
+            // Retain that owner until Pi exits itself, then reconnect its saved session.
+            s.nativeOwned = true;
+            await this.importNativeHistory(s);
+            clearInterval(s.nativeHistoryTimer);
+            s.nativeHistoryTimer = setInterval(() => void this.importNativeHistory(s).catch(() => {}), 1500);
+            s.nativeHistoryTimer.unref();
+            this.event(s, { type: "terminal-needed", title: "Pi CLI · exit when ready to reconnect Readable" });
+          } else if (!s.pty) {
+            s.piNativeBridge?.close(); s.piNativeBridge = null;
+            s.mode = mode;
+            await this.ensurePi(s);
+            if (mode === "rich") await this.importNativeHistory(s);
+          }
+        }
         else { await ensureRuntime(this, s); if (mode === "native") await this.startNative(id); }
       } else if (mode === "native") {
         await this.releaseRuntime(s);
@@ -1565,6 +1669,7 @@ class Sessions {
         this.event(s, { type: "terminal-needed", title: "Native CLI · exit when ready to reconnect Readable" });
       }
       s.mode = mode;
+      if (mode === "native") { clearInterval(s.nativeHistoryTimer); s.nativeHistoryTimer = null; }
       this.event(s, { type: "native-owner", nativeOwned: !!s.nativeOwned && !!s.pty });
       this.event(s, { type: "view", mode, sessionRef: s.sessionRef });
       return { mode, sessionRef: s.sessionRef, nativeOwned: !!s.nativeOwned && !!s.pty };
@@ -1579,7 +1684,8 @@ class Sessions {
       clearTimeout(s.stopTimer);
       try {
         s.runtime?.close("Force stopped. Conversation history is retained.");
-        if (s.process) { await this.kill(s.process, true); s.process = null; }
+        if (s.piClosingChild) await this.kill(s.piClosingChild, true);
+        if (s.process) { await this.kill(s.process, true); s.process = null; s.piRpcProcess = null; }
         if (s.pty) { const terminal = s.pty; s.pty = null; terminal.kill(); }
         s.nativeOwned = false; clearInterval(s.nativeHistoryTimer);
         this.event(s, { type: "native-owner", nativeOwned: false });
@@ -1595,7 +1701,7 @@ class Sessions {
     this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: false });
     s.stopTimer = setTimeout(() => { if (s.stopRequested) this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: true }); }, 10000);
     try {
-      if (s.agent === "pi" && s.piNativeBridge) { s.piNativeBridge.write({ id: uuid(), type: "abort" }); s.pty?.write("\x1b"); }
+      if (s.agent === "pi" && s.piNativeBridge) { this.writePiBridge(s, { id: uuid(), type: "abort" }); s.pty?.write("\x1b"); }
       else if (s.agent === "shell" || s.nativeOwned) s.pty?.write("\x03");
       else if (s.runtime) await s.runtime.cancel();
     } catch (error) { this.event(s, { type: "diagnostic", text: "Cancellation is still pending. " + error.message }); }
@@ -1641,12 +1747,14 @@ class Sessions {
     s.stopping = true;
     s.messageQueue?.close();
     await this.cancelDiscovery(s);
+    if (s.piClosing) await s.piClosing.catch((error) => this.event(s, { type: "diagnostic", text: error.message }));
     s.runtime?.close("Chat closed.");
     s.pty?.kill();
     s.piNativeBridge?.close();
     s.terminalState?.dispose();
     if (s.shell) await this.kill(s.shell, true);
     if (s.process) await this.kill(s.process, true);
+    if (s.piClosingChild) await this.kill(s.piClosingChild, true).catch((error) => this.event(s, { type: "diagnostic", text: "Pi's disconnected process could not be stopped: " + error.message }));
     for (const watch of s.accountWatches || []) watch.close();
     await this.accounts?.syncClaude(s);
     await this.accounts?.syncGrok(s);

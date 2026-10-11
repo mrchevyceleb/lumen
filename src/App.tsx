@@ -764,7 +764,6 @@ export default function App() {
     const message = attachment ? `${text}\n\nFile reference: ${attachment}` : text;
     const images = active.draftAttachments || [];
     try {
-      if (active.agent === "pi" && message.trimStart().startsWith("/") && !images.length) { await openNativeCommand(message); return false; }
       const entry = { id: crypto.randomUUID(), text: message, attachments: images };
       if (active.agent === "shell") await api("session:send", active.id, message, entry);
       else await api("session:submit", active.id, entry);
