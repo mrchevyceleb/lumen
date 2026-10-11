@@ -1,6 +1,6 @@
 {
   "name": "lumen-workspace",
-  "version": "0.1.9",
+  "version": "0.1.29",
   "description": "A readable terminal workspace for your code and AI agents",
   "author": "Matt Johnston",
   "license": "MIT",
