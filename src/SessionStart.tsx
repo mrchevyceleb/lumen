@@ -4,7 +4,7 @@ import { agentNames, defaults } from "./settings";
 import type { Agent, Settings, Workspace } from "./types";
 import "./SessionStart.css";
 
-const choices: Agent[] = ["pi", "codex", "claude", "grok", "shell"];
+const choices: Agent[] = ["shell", "pi", "codex", "claude", "grok", "google"];
 
 export default function SessionStart({ workspace, settings, available, starting, onStart, onSettings }: {
   workspace?: Workspace;

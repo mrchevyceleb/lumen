@@ -3243,3 +3243,15 @@ kbd {
 .agent-control-instructions { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); padding: 14px; border-radius: 8px; font-size: 12px; line-height: 1.65; max-height: 270px; overflow: auto; }
 .agent-control-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--accent); background: transparent; padding: 4px 6px; border-radius: 5px; white-space: nowrap; }
 .agent-control-badge:hover { background: var(--surface); }
+
+.project-heading { position: relative; }
+.project-add-anchor { display: flex; }
+.project-add-menu { position: absolute; top: 100%; right: 0; left: 0; width: auto; z-index: 30; margin: 0; letter-spacing: 0; box-shadow: 0 8px 24px #0004; }
+.project-add-menu button { display: flex; align-items: center; gap: 10px; width: 100%; }
+.project-add-menu button span { flex: 1; text-align: left; }
+.project-add-menu small { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; margin-left: 0; opacity: 1; }
+.pi-custom-control { outline: none; min-width: 0; }
+.pi-custom-control pre { max-height: 50vh; overflow: auto; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--code); font: 13px/1.6 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pi-custom-control:focus-visible pre { border-color: var(--accent); }
+.pi-control-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
+.pi-custom-control small { color: var(--muted); }

@@ -5,6 +5,7 @@ export const agentNames: Record<Agent, string> = {
   codex: "Codex",
   claude: "Claude Code",
   grok: "Grok",
+  google: "Google Antigravity",
 };
 export const themes = [
   {
@@ -100,6 +101,7 @@ export const defaults: Settings = {
     codex: { command: "codex", model: "", extraArgs: [], color: "#b8ebd6" },
     claude: { command: "claude", model: "", extraArgs: [], color: "#e4a48b" },
     grok: { command: "grok", model: "", extraArgs: [], color: "#94bbf1" },
+    google: { command: "agy", model: "", extraArgs: [], color: "#8ab4f8" },
   },
 };
 export function loadSettings(value: Partial<Settings> | null): Settings {

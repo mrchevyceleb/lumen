@@ -102,7 +102,7 @@ startup.then(async (start) => {
   handle("accounts:remove", (id) => accounts.remove(id));
   handle("accounts:login", (id, command) => accounts.login(id, command));
   const signInAgent = async (agent, accountId, command) => {
-    if (!["claude", "codex", "grok", "pi"].includes(agent)) throw new Error("Choose an agent to sign in.");
+    if (!["claude", "codex", "grok", "pi", "google"].includes(agent)) throw new Error("Choose an agent to sign in.");
     const chats = [...sessions.sessions.values()].filter((s) => s.agent === agent && (s.accountId || "") === accountId);
     if (chats.some((s) => s.busy || s.stopping || s.transitioning || s.setting || s.nativeStart || s.mode === "native"))
       throw new Error("Finish this account's running turns and switch its native terminals to readable view before signing in.");
@@ -142,14 +142,19 @@ startup.then(async (start) => {
     window.close();
     return restartForUpdate;
   });
+  let googleInstall;
+  handle("agents:install-google", async () => {
+    googleInstall ||= require("./google.cjs").install(dataDir, resolveLauncher).finally(() => { googleInstall = null; });
+    return googleInstall;
+  });
   handle("bootstrap", async () => ({
     recent: workspace.recent,
     platform: process.platform,
     administrator: await administrator.status(),
     agents: Object.fromEntries(
-      ["pi", "codex", "claude", "grok"].map((agent) => {
+      ["pi", "codex", "claude", "grok", "google"].map((agent) => {
         try {
-          const launcher = resolveLauncher(agent);
+          const launcher = resolveLauncher(agent === "google" ? "agy" : agent);
           return [agent, { available: true, file: launcher.file }];
         } catch (error) {
           return [agent, { available: false, error: error.message }];

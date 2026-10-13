@@ -1,4 +1,4 @@
-export type Agent = "shell" | "pi" | "codex" | "claude" | "grok";
+export type Agent = "shell" | "pi" | "codex" | "claude" | "grok" | "google";
 export type Mode = "rich" | "native";
 export interface ImageAttachment { id: string; name: string; mimeType: string; bytes: number; preview: string }
 export interface BrowserTab { id: string; title: string; url: string; error: string; loading: boolean; unloaded?: boolean; canGoBack: boolean; canGoForward: boolean }
@@ -217,6 +217,7 @@ export interface SessionEvent {
 export interface PiRequest {
   id: string;
   method: string;
+  lines?: string[];
   title?: string;
   message?: string;
   options?: string[];
