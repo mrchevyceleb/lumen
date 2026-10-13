@@ -17,6 +17,7 @@ import {
 import { Modal } from "./Components";
 import { agentNames, defaults, themes } from "./settings";
 import type { Settings, Agent, AgentConfig } from "./types";
+import GoogleSetup from "./GoogleSetup";
 import UpdatesPanel from "./UpdatesPanel";
 import AccountsPanel from "./AccountsPanel";
 import AgentControlPanel from "./AgentControlPanel";
@@ -46,7 +47,9 @@ export default function SettingsPanel({
   onAccountChat,
   administrator,
   onAdministratorStatus,
+  onAgentsRefresh,
 }: {
+  onAgentsRefresh: () => Promise<void>;
   settings: Settings;
   update: (next: Settings) => void;
   onClose: () => void;
@@ -315,7 +318,7 @@ export default function SettingsPanel({
               <p className="muted">
                 Uses your installed CLIs and their existing sign-ins.
               </p>
-              {(["pi", "codex", "claude", "grok"] as Agent[]).map((agent) => (
+              {(["pi", "codex", "claude", "grok", "google"] as Agent[]).map((agent) => (
                 <div className="agent-config" key={agent}>
                   <div className="agent-config-heading">
                     <span
@@ -337,6 +340,7 @@ export default function SettingsPanel({
                       onChange={(e) => agentSet(agent, "color", e.target.value)}
                     />
                   </div>
+                  {agent === "google" && <GoogleSetup available={!!available.google?.available} onInstalled={onAgentsRefresh} onError={onError} />}
                   <label className="field">
                     <span>Executable or command</span>
                     <input

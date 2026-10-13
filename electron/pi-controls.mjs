@@ -3,11 +3,59 @@ import fs from "node:fs";
 import net from "node:net";
 import crypto from "node:crypto";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 export default function lumenControls(pi) {
   let context, socket, view = process.env.LUMEN_PI_VIEW === "native" ? "native" : "rich";
   const dialogs = new Map();
   const deliveries = new Map();
   const activeTools = new Map();
+  const widgets = new Map();
+  const headlessTui = (render) => ({
+    terminal: { columns: 96, rows: 32 }, requestRender: render, requestForceRender: render,
+    setFocus: (component) => { if (component) component.focused = true; },
+    showOverlay: () => { throw new Error("This extension opens nested terminal overlays. Use Native CLI for this control."); },
+  });
+  const customControl = async (ui, factory) => {
+    let keybindings;
+    try {
+      const module = await import(pathToFileURL(path.resolve(path.dirname(process.argv[1]), "../core/keybindings.js")).href);
+      keybindings = module.KeybindingsManager.create();
+    } catch {
+      keybindings = { matches: () => false, getKeys: () => [], getEffectiveConfig: () => ({}) };
+    }
+    return new Promise((resolve, reject) => {
+      const id = crypto.randomUUID();
+      let component, closed = false, scheduled = false;
+      const finish = (value) => {
+        if (closed) return;
+        closed = true; dialogs.delete(id); component?.dispose?.();
+        output({ type: "agent_ui_cancel", id }); resolve(value);
+      };
+      const fail = (error) => {
+        if (closed) return; closed = true; dialogs.delete(id); component?.dispose?.(); output({ type: "agent_ui_cancel", id }); reject(error);
+      };
+      const render = () => {
+        if (closed || scheduled) return;
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          if (closed || !component) return;
+          try { output({ type: "extension_ui_request", id, method: "custom", title: "Pi controls", lines: component.render(96).slice(0, 300) }); }
+          catch (error) { fail(error); }
+        });
+      };
+      dialogs.set(id, {
+        finish: () => finish(undefined), native: () => finish(undefined),
+        input: (data) => { if (typeof data !== "string" || data.length > 10000) return; try { if (component?.handleInput) component.handleInput(data); else if (data === "\x1b") finish(undefined); render(); } catch (error) { finish(undefined); ui.notify(error.message, "error"); } },
+      });
+      Promise.resolve().then(() => factory(headlessTui(render), ui.theme, keybindings, finish)).then((value) => {
+        component = value;
+        if (closed) { component?.dispose?.(); return; }
+        if (!component?.render) throw new Error("Pi's custom control did not return a component.");
+        component.focused = true; render();
+      }).catch(fail);
+    });
+  };
   const questionnaireQuestions = (input) => {
     const questions = input?.questions;
     if (!Array.isArray(questions) || !questions.length || questions.some((q) =>
@@ -78,7 +126,7 @@ export default function lumenControls(pi) {
       // Only adapt the known questionnaire when no parallel tool can own this custom UI.
       const tool = activeTools.size === 1 ? activeTools.values().next().value : undefined;
       const questions = tool?.questions;
-      if (ctx.mode === "rpc" && !questions) throw new Error("This command uses custom Pi terminal controls. Select Native CLI explicitly to run it there.");
+      if (ctx.mode === "rpc" && !questions) return customControl(ui, args[0]);
       if (view === "native" || !socket || socket.destroyed || !questions) return custom(...args);
       tool.questions = undefined;
       return askQuestionnaire(ui, questions);
@@ -88,7 +136,13 @@ export default function lumenControls(pi) {
     for (const method of ["setStatus", "setTitle", "setWidget", "setEditorText"]) {
       const original = ui[method].bind(ui);
       ui[method] = (...args) => {
-        if (ctx.mode === "rpc" && method === "setWidget" && args[1] && !Array.isArray(args[1])) throw new Error("This command uses a custom Pi terminal widget. Select Native CLI explicitly, then rerun the command there.");
+        if (ctx.mode === "rpc" && method === "setWidget" && typeof args[1] === "function") {
+          widgets.get(args[0])?.dispose?.();
+          let component;
+          const render = () => { if (component) output({ type: "extension_ui_request", method: "setWidget", widgetKey: args[0], widgetLines: component.render(96).slice(0, 100) }); };
+          component = args[1](headlessTui(render), ui.theme); widgets.set(args[0], component); render(); return;
+        }
+        if (ctx.mode === "rpc" && method === "setWidget") { widgets.get(args[0])?.dispose?.(); widgets.delete(args[0]); }
         if (ctx.mode !== "rpc") original(...args); output({ type: "extension_ui_request", method: method === "setEditorText" ? "set_editor_text" : method,
         ...(method === "setStatus" ? { statusKey: args[0], statusText: args[1] } : method === "setTitle" ? { title: args[0] } : method === "setWidget" ? { widgetKey: args[0], widgetLines: Array.isArray(args[1]) ? args[1] : undefined, native: !!args[1] && !Array.isArray(args[1]) } : { text: args[0] }) }); };
     }
@@ -97,7 +151,7 @@ export default function lumenControls(pi) {
   const dispatch = async (request) => {
     try {
       if (!context) throw new Error("Pi is still initializing.");
-      if (request.type === "extension_ui_response") { dialogs.get(request.id)?.finish(request); return; }
+      if (request.type === "extension_ui_response") { const dialog = dialogs.get(request.id); if (request.input !== undefined && dialog?.input) dialog.input(request.input); else dialog?.finish(request); return; }
       if (request.type === "view") { view = request.mode; if (view === "native") for (const dialog of [...dialogs.values()]) dialog.native(); respond(request); return; }
       if (request.type === "get_state") { respond(request, state()); return; }
       if (request.type === "get_session_stats") { respond(request, { contextUsage: context.getContextUsage() }); return; }
@@ -153,6 +207,7 @@ export default function lumenControls(pi) {
     socket.on("connect", () => { output({ token: process.env.LUMEN_PI_BRIDGE_TOKEN }); if (context) output({ type: "bridge_ready", ...state() }); });
     socket.on("error", () => {});
     socket.on("close", () => { for (const dialog of [...dialogs.values()]) dialog.native(); });
+    pi.on("session_shutdown", () => { for (const component of widgets.values()) component?.dispose?.(); widgets.clear(); for (const dialog of [...dialogs.values()]) dialog.finish({ cancelled: true }); });
     socket.on("data", (chunk) => { buffer += chunk; let index; while ((index = buffer.indexOf("\n")) !== -1) { const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); try { void dispatch(JSON.parse(line)); } catch {} } });
     pi.on("session_start", (_event, ctx) => { activeTools.clear(); context = ctx; saveEmptySession(ctx); installUI(ctx); output({ type: "bridge_ready", ...state() }); });
     for (const event of ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "session_compact", "model_select", "ui_prompt_start", "ui_prompt_end"])

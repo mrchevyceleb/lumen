@@ -70,10 +70,11 @@ import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
 import SessionTabs from "./SessionTabs";
 import BrowserPane from "./BrowserPane";
+import PiCustomControl from "./PiCustomControl";
 import SessionStart from "./SessionStart";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
 const EditorPane = lazy(() => import("./EditorPane"));
-const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok"];
+const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok", "google"];
 const docKey = (doc: { root: string; path: string }) =>
   `${doc.root}|${doc.path}`;
 type Bootstrap = {
@@ -722,8 +723,8 @@ export default function App() {
       }
       if (["pi_ui", "agent_ui"].includes(e.type) && e.request) {
         const request = e.request;
-        if (["select", "confirm", "input", "editor", "questions", "form", "native"].includes(request.method))
-          setUiRequests((old) => [...old, { session: e.id, request }]);
+        if (["select", "confirm", "input", "editor", "questions", "form", "native", "custom"].includes(request.method))
+          setUiRequests((old) => [...old.filter((value) => value.session !== e.id || value.request.id !== request.id), { session: e.id, request }]);
         else if (request.method === "notify") notify(request.message || "Pi notification");
         else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
         else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, name: request.title || tab.name } : tab));
@@ -1010,6 +1011,13 @@ export default function App() {
       if (!(e.ctrlKey || e.metaKey)) return;
       if (e.shiftKey && e.key.toLowerCase() === "b") {
         e.preventDefault(); setBrowserOpen((value) => !value);
+      } else if (e.altKey && e.key.toLowerCase() === "t") {
+        e.preventDefault(); void addTab("shell", "rich", "");
+      } else if (e.shiftKey && e.key.toLowerCase() === "t") {
+        e.preventDefault(); void addTab("shell");
+      } else if (e.key === "Tab") {
+        const visible = tabsRef.current.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless);
+        if (visible.length > 1) { e.preventDefault(); const index = visible.findIndex((tab) => tab.id === activeIdRef.current); const next = visible[(index + (e.shiftKey ? -1 : 1) + visible.length) % visible.length]; setActiveId(next.id); }
       } else if ((e.target as HTMLElement)?.closest(".native-terminal")) return;
       else if (e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -1029,9 +1037,6 @@ export default function App() {
       } else if (e.shiftKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
         setDialog("worktrees");
-      } else if (e.shiftKey && e.key.toLowerCase() === "t") {
-        e.preventDefault();
-        addTab("shell");
       }
     };
     window.addEventListener("keydown", key);
@@ -1092,7 +1097,7 @@ export default function App() {
       <IconButton label="New agent session" active={agentMenu} onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}><Plus size={18} /></IconButton>
       {agentMenu && <div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
         {agents.map((agent) => <button key={agent} onClick={() => addTab(agent, "rich", agentMenuRoot ?? root)}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
-        <div className="menu-divider" /><button onClick={startWithoutWorkspace}><Sparkles size={17} /><span>New chat without workspace</span></button>
+        <div className="menu-divider" /><button onClick={() => void addTab("shell", "rich", "")}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={startWithoutWorkspace}><Sparkles size={17} /><span>New chat without workspace</span></button>
         <button onClick={() => { setAgentMenu(false); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
       </div>}
     </div>
@@ -1233,7 +1238,7 @@ export default function App() {
                   if (folder) void openWorkspace(folder).then((value) => { if (value) { setAgentMenuRoot(value.root); setAgentMenu(true); } }); else open();
                 }}
                 counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root)).length]))}
-                onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")}
+                onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")} onTerminal={() => { void addTab("shell", "rich", ""); }} onScratch={startWithoutWorkspace}
                 onChange={(next) => setProjects((old) => [...next, ...old.filter((p) => p.hidden)])} onRemove={removeProject} />
             </aside>
             <div
@@ -1648,6 +1653,7 @@ export default function App() {
           update={setSettings}
           onClose={() => setDialog(null)}
           available={boot.agents}
+          onAgentsRefresh={async () => { const value = await api<Bootstrap>("bootstrap"); setBoot((old) => ({ ...old, ...value })); }}
           onError={notify}
           initialSection={settingsSection}
           administrator={boot.administrator}
@@ -1763,6 +1769,7 @@ export default function App() {
                 id: piRequest.request.id,
                 ...response,
               });
+              if (response.input !== undefined) return;
               setUiRequests((old) => old.filter((value) => value.session !== piRequest.session || value.request.id !== piRequest.request.id));
               if (response.native) { await api("session:stop", piRequest.session); await api("session:mode", piRequest.session, "native"); }
             } catch (e: any) {
@@ -1885,7 +1892,7 @@ function Welcome({
           </button>
         </div>
         <div className="agent-line">
-          {(["pi", "codex", "claude", "grok"] as Agent[]).map((agent) => (
+          {(["pi", "codex", "claude", "grok", "google"] as Agent[]).map((agent) => (
             <span
               key={agent}
               title={
@@ -2547,7 +2554,7 @@ function PiDialog({
       <div className="dialog-form">
         {v.message && <pre className="agent-request-detail">{v.message}</pre>}
         {v.url && <button className="secondary" onClick={() => api("external:open", v.url).catch(() => {})}>Open authorization page ↗</button>}
-        {v.questions ? <>
+        {v.method === "custom" ? <PiCustomControl lines={v.lines || []} onInput={(input) => send({ input })} /> : v.questions ? <>
           {v.questions.map((q) => <fieldset className="agent-question" key={q.id}>
             <legend>{q.header ? `${q.header} · ` : ""}{q.question}</legend>
             {q.options?.map((option) => <label className="agent-question-option" key={option.label}>

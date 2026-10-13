@@ -50,6 +50,8 @@ export function AgentMark({
         <span className="codex-mark">✳</span>
       ) : agent === "claude" ? (
         <span className="claude-mark">✺</span>
+      ) : agent === "google" ? (
+        <Sparkles size={size * 0.8} />
       ) : (
         <span className="grok-mark">/</span>
       )}
@@ -109,6 +111,7 @@ export default function Conversation({
   const submitLock = useRef(false);
   const scroll = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const historyPosition = useRef(-1), historyDraft = useRef("");
   const [inventory, setInventory] = useState<CommandInventory>({ commands: [], origin: "" });
   const [commandLoading, setCommandLoading] = useState(false);
   const [commandError, setCommandError] = useState("");
@@ -123,7 +126,8 @@ export default function Conversation({
   const menuOpen = tab.agent !== "shell" && !tab.busy && !controlPanel && !sessionPanel && focused && !dismissedCommands && !!commandToken &&
     (commandToken[1] === "/" || tab.agent === "codex") && caret > 0 && caret <= commandToken[2].length + 1;
   const query = commandToken?.[2].toLowerCase() || "";
-  const commands = [...lumenCommands, ...inventory.commands.filter((c) => !lumenCommands.some((local) => local.name === c.name))].filter((c) => `${c.name} ${c.description}`.toLowerCase().includes(query)).sort((a, b) =>
+  const localCommands = tab.agent === "google" ? [] : lumenCommands;
+  const commands = [...localCommands, ...inventory.commands.filter((c) => !localCommands.some((local) => local.name === c.name))].filter((c) => `${c.name} ${c.description}`.toLowerCase().includes(query)).sort((a, b) =>
     Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)) || a.name.localeCompare(b.name));
   const selection = Math.min(selectedCommand, Math.max(0, commands.length - 1));
   const loadCommands = async (refresh = false) => {
@@ -179,7 +183,7 @@ export default function Conversation({
     inputRef.current?.focus();
   }, [tab.id]);
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
-  const isLocalCommand = tab.agent !== "shell" && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
+  const isLocalCommand = !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
   const submit = async () => {
     if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && commandLoading)) return;
     submitLock.current = true;
@@ -414,12 +418,20 @@ export default function Conversation({
             value={input}
             disabled={(tab.busy && tab.agent === "shell") || submitting || tab.nativeOwned || !!tab.recoveryError}
             onPaste={(event) => { if (tab.agent !== "shell" && Array.from(event.clipboardData.items).some((item) => item.type.startsWith("image/"))) { event.preventDefault(); onPasteImage(); } }}
-            onChange={(e) => { setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); }}
+            onChange={(e) => { historyPosition.current = -1; setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             onKeyDown={(e) => {
               if (e.nativeEvent.isComposing) return;
+              if (tab.agent === "shell" && !e.ctrlKey && !e.metaKey && !e.altKey && (!input.includes("\n") || historyPosition.current >= 0) && ["ArrowUp", "ArrowDown"].includes(e.key)) {
+                const history = tab.messages.filter((message) => message.role === "user").map((message) => message.text).reverse();
+                if (e.key === "ArrowUp" && history.length) {
+                  e.preventDefault(); if (historyPosition.current < 0) historyDraft.current = input;
+                  historyPosition.current = Math.min(historyPosition.current + 1, history.length - 1); setInput(history[historyPosition.current]);
+                } else if (e.key === "ArrowDown" && historyPosition.current >= 0) { e.preventDefault(); historyPosition.current--; setInput(historyPosition.current < 0 ? historyDraft.current : history[historyPosition.current]); }
+                return;
+              }
               if (menuOpen && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setDismissedCommands(true); return; }
               if (menuOpen && ["ArrowDown", "ArrowUp"].includes(e.key)) {
                 e.preventDefault();
@@ -436,7 +448,7 @@ export default function Conversation({
                 (settings.enterSend || e.ctrlKey || e.metaKey)
               ) {
                 e.preventDefault();
-                submit();
+                historyPosition.current = -1; submit();
               }
             }}
           />
@@ -473,7 +485,7 @@ export default function Conversation({
             onConfig={onConfig} onPending={setControlPending} onNative={(draft) => onNative(draft ? `${draft}${input.trim() ? `\n\n${input}` : ""}` : input.trim() || undefined)}
             onPlanDraft={() => { setInput(input.startsWith("/plan") ? input : `/plan${input.trim() ? ` ${input}` : " "}`); setDismissedCommands(true);
               requestAnimationFrame(() => inputRef.current?.focus()); }} />}
-          {tab.agent !== "shell" && <>
+          {!["shell", "google"].includes(tab.agent) && <>
             <IconButton label="MCPs & context" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={14} /></IconButton>
             <button className="model-control compact-control" aria-label={compactLabel} title={compactLabel}
               disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>
@@ -481,13 +493,13 @@ export default function Conversation({
             </button>
           </>}
           </div>
-          {sessionError && <div className="session-control-error" role="alert"><AlertCircle size={14} />{sessionError}</div>}
+          {sessionError && <div className="session-control-error" role="alert"><AlertCircle size={14} /><span>{sessionError}</span>{authError(sessionError) && <button className="secondary" disabled={tab.busy} onClick={onSignIn}>Sign in</button>}</div>}
         </div>
         </div>
         {statusCaption && <div className="composer-caption" role="status">{statusCaption}</div>}
       </div>
       {sessionPanel && <SessionControls tab={tab} onConfig={onConfig} focusContext={sessionPanel === "context"} onSignIn={onSignIn}
-        onNative={() => { setSessionPanel(null); onNative("/mcp"); }}
+        onNative={() => { setSessionPanel(null); if (tab.agent === "pi") void onSend("/mcp"); else onNative("/mcp"); }}
         onClose={() => { setSessionPanel(null); requestAnimationFrame(() => inputRef.current?.focus()); }} />}
     </div>
   );

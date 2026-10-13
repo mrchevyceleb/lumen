@@ -110,7 +110,7 @@ export default function SessionControls({ tab, onConfig, onClose, focusContext =
           </div>
         </div>)}</div>
         {info?.warning && <p className="session-fine-print">{info.warning}</p>}
-        <div className="context-policy-footer"><button disabled={pending || tab.busy} onClick={onNative}>Open native MCP controls ↗</button><button disabled={pending || tab.busy} onClick={() => void change({ resetMcps: true })}>Use CLI MCP defaults</button></div>
+        <div className="context-policy-footer"><button disabled={pending || tab.busy} onClick={onNative}>{tab.agent === "pi" ? "Open Pi MCP manager" : "Open native MCP controls ↗"}</button><button disabled={pending || tab.busy} onClick={() => void change({ resetMcps: true })}>Use CLI MCP defaults</button></div>
       </section>
     </div>
   </Modal>;

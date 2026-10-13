@@ -52,6 +52,10 @@ function findExecutable(command, environment = process.env) {
     const candidate = path.join(os.homedir(), ".grok", "bin", "grok.exe");
     if (fsSync.existsSync(candidate)) return candidate;
   }
+  if (command === "agy") {
+    const candidate = path.join(environment.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "agy", "bin", "agy.exe");
+    if (fsSync.existsSync(candidate)) return candidate;
+  }
   throw new Error(
     `${command} was not found. Install it or set its executable in Settings → Agents.`,
   );
@@ -474,7 +478,7 @@ class Sessions {
     savedTab = {},
   }) {
     if (
-      !["shell", "pi", "codex", "claude", "grok"].includes(agent) ||
+      !["shell", "pi", "codex", "claude", "grok", "google"].includes(agent) ||
       !["rich", "native"].includes(mode)
     )
       throw new Error("Invalid session type.");
@@ -485,7 +489,7 @@ class Sessions {
       throw new Error("Extra arguments must be a JSON array of strings.");
     if ([model, effort, workMode].some((value) => typeof value !== "string" || value.length > 300 || /[\x00-\x1f]/.test(value)))
       throw new Error("Invalid session controls.");
-    if (workMode && (!["claude", "grok", "codex"].includes(agent) || !["plan", "default"].includes(workMode))) throw new Error("Invalid planning mode.");
+    if (workMode && (!["claude", "grok", "codex", "google"].includes(agent) || !["plan", "default"].includes(workMode))) throw new Error("Invalid planning mode.");
     if (sessionRef && agent !== "pi" && !/^[0-9a-f-]{36}$/i.test(sessionRef))
       throw new Error("Invalid CLI session identifier.");
     if (
@@ -531,11 +535,11 @@ class Sessions {
     const s = {
       id,
       root,
-      cwd: cwd || root,
+      cwd: cwd || (projectless && agent === "shell" ? os.homedir() : root),
       projectless,
       agent,
       mode,
-      command: command || agent,
+      command: command || (agent === "google" ? "agy" : agent),
       shellCommand: agent === "shell" ? (command === "shell" ? "" : command || shellCommand) : shellCommand,
       loadShellProfile: loadShellProfile !== false,
       model,
@@ -561,6 +565,7 @@ class Sessions {
   async sessionControls(id) {
     const s = this.get(id);
     if (s.agent === "shell") throw new Error("Choose an agent to use MCP and context controls.");
+    if (s.agent === "google") throw new Error("Antigravity manages MCPs and automatic compaction in its CLI. Use Settings → Agents for its configuration and native controls.");
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") throw new Error("Finish this turn in readable view to inspect its session controls.");
     s.setting = true;
     try { return await this.readControls(s); } finally { s.setting = false; }
@@ -639,7 +644,7 @@ class Sessions {
   }
   async piMcp(s, name) {
     if (name !== undefined) throw new Error("This Pi MCP manager uses native widgets. Open /mcp in the terminal to change its connections.");
-    return { servers: [], warning: "Pi's MCP manager uses native widgets. Open /mcp in the terminal to inspect or change connections." };
+    return { servers: [], warning: "Open Pi’s MCP manager below to inspect or change connections in Readable." };
   }
   async ensurePiPolicy(s) {
     await this.ensurePi(s);
@@ -658,6 +663,7 @@ class Sessions {
     const s = this.get(id);
     if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before refreshing commands.");
     if (s.agent === "shell") return { commands: [], origin: "Shell" };
+    if (s.agent === "google") return { commands: [], origin: "Antigravity CLI", warning: "Installed Antigravity skills and slash commands expand when sent. Use the model picker for Google models." };
     if (s.discoveryPromise) return s.discoveryPromise;
     if (!refresh && s.commands && Date.now() - s.commandsAt < 60000) return s.commands;
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode === "native") {
@@ -734,7 +740,7 @@ class Sessions {
           }
           if (event.type === "agent_ui_cancel") { s.piDialogs?.delete(event.id); this.event(s, { type: "agent_ui_cancel", request: { id: event.id } }); return; }
           if (event.type === "native_command") { s.messageQueue?.pause(); this.event(s, { type: "terminal-needed", title: "Pi command", nativeDraft: event.text }); this.finish(s, 0); return; }
-          if (event.type === "ui_prompt_start" && event.kind === "custom") this.event(s, { type: "terminal-needed", title: "Pi interactive controls" });
+          // Readable custom controls are handled by the bridge, without opening a terminal panel.
           if (event.type === "extension_ui_request" && event.method === "setWidget" && event.native) {
             if (s.piRpcProcess) { s.piCommandFailed = true; this.event(s, { type: "error", message: "This command uses a custom Pi terminal widget. Select Native CLI explicitly, then rerun the command there." }); }
             else this.event(s, { type: "terminal-needed", title: "Pi custom widget" });
@@ -851,6 +857,9 @@ class Sessions {
         info = catalog("pi", available.models, { currentModel: state.model ? `${state.model.provider}/${state.model.id}` : "",
           currentEffort: state.thinkingLevel || "", currentEfforts: efforts(levels.levels), favorites: bridge.favorites,
           shortcuts: piShortcuts() });
+      } else if (s.agent === "google") {
+        await this.prepareLaunch(s);
+        info = await require("./google.cjs").modelCatalog(s, profiledLaunch(s, ["models"], resolveLauncher));
       } else if (s.agent === "codex") {
         const runtime = await ensureRuntime(this, s);
         info = catalog("codex", (await runtime.request("model/list")).data, { currentModel: s.model, currentEffort: s.effort, currentMode: s.workMode });
@@ -894,7 +903,7 @@ class Sessions {
           s.effort = change.effort;
         }
         if (change.workMode !== undefined) {
-          if (!["claude", "grok", "codex"].includes(s.agent) || !["plan", "default"].includes(change.workMode)) throw new Error("Use this agent's native planning workflow.");
+          if (!["claude", "grok", "codex", "google"].includes(s.agent) || !["plan", "default"].includes(change.workMode)) throw new Error("Use this agent's native planning workflow.");
           s.workMode = change.workMode;
         }
       }
@@ -942,6 +951,11 @@ class Sessions {
     await this.prepareLaunch(s);
     if (s.agent === "pi") { await this.ensurePi(s); return; }
     let launch, sessionEnv = {};
+    if (s.agent === "google") {
+      if (!s.sessionRef) throw new Error("Send a message in Readable first so Google can open the same saved conversation in Native CLI. Use the account picker to sign in.");
+      launch = profiledLaunch(s, ["--conversation", s.sessionRef, ...cliOptions(s), ...extraOptions(s)], resolveLauncher);
+      s.nativeOwned = true; this.spawnTerminal(s, launch); return;
+    }
     if (s.agent === "shell") {
       const shell = s.shellExecutable || s.shellCommand || (process.platform === "win32" ? findExecutable("powershell") : process.env.SHELL || "/bin/bash");
       launch = { file: shell, args: [...s.extraArgs] };
@@ -1101,12 +1115,14 @@ class Sessions {
     if (!this.attachments) throw new Error("Image attachments are unavailable.");
     if (s.agent === "pi") { await this.piRpc(s, "validate_images"); await this.attachments.resolve(s.controlId, message.attachments); }
     else if (s.agent === "shell") throw new Error("Use an agent chat for image attachments.");
+    else if (s.agent === "google") throw new Error("Antigravity streaming accepts text. Attach a file reference or use Native CLI for images.");
     else await (await ensureRuntime(this, s)).validateImages(message.attachments);
   }
   submit(id, message) { return this.get(id).messageQueue.submit(message); }
   queueAction(id, messageId, action) { return this.get(id).messageQueue.action(messageId, action); }
   async steer(s, message) {
     if (!s.busy || s.mode !== "rich" || s.stopping || s.transitioning || s.setting || s.phase === "compacting") throw new Error("This turn cannot accept steering right now.");
+    if (s.agent === "google") throw new Error("Google accepts follow-ups through the queue after this turn finishes.");
     if (message.text.trimStart().startsWith("/") || (s.agent === "codex" && message.text.trimStart().startsWith("$"))) throw new Error("Steer with a normal message. Run CLI commands after this turn finishes.");
     if (s.agent === "pi") { const images = (await this.attachments.resolve(s.controlId, message.attachments || [])).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType })); await this.piRpc(s, "steer", { message: message.text, clientId: message.id, images }); }
     else { if (!s.runtime || s.runtime.closed) throw new Error("The CLI is still starting or closing."); await s.runtime.steer(message); }
@@ -1229,7 +1245,6 @@ class Sessions {
     } else {
       s.pty.write(String.raw`printf '\033]633;LumenBegin;${s.marker}\007'; eval "$(printf %s '${Buffer.from(prompt).toString("base64")}' | base64 -d)"; lumen_code=$?; printf '\033]633;LumenEnd;${s.marker};%s;%s\007' "$lumen_code" "$(pwd | base64 | tr -d '\n')"` + "\r");
     }
-    this.event(s, { type: "terminal-needed", title: "Command terminal" });
   }
   shellOutput(s, data) {
     const capture = s.shellCapture;
@@ -1252,6 +1267,12 @@ class Sessions {
     }
   }
   async agentTurn(s, prompt, message = {}) {
+    if (s.agent === "google") {
+      await this.prepareLaunch(s);
+      const google = require("./google.cjs");
+      await google.modelCatalog(s, profiledLaunch(s, ["models"], resolveLauncher));
+      return google.turn(this, s, prompt, message);
+    }
     if (s.agent === "pi") {
       await this.ensurePiPolicy(s);
       const images = (await this.attachments?.resolve(s.controlId, message.attachments || []) || []).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
@@ -1417,7 +1438,9 @@ class Sessions {
       return;
     }
     if (e.type === "extension_ui_request" && e.method === "notify" && /^MCP Servers:|^No MCP servers configured/.test(e.message || "")) {
-      s.piMcpNotification = e.message; return;
+      s.piMcpNotification = e.message;
+      const lines = strip(e.message).split("\n");
+      this.text(s, [lines[0], "", ...lines.slice(1).map((line) => `- ${line}`)].join("\n"), "mcp-list", true); return;
     }
     if (e.type === "extension_ui_request" && e.method === "notify" && e.message?.startsWith("LUMEN_CONTEXT:")) {
       try {
@@ -1523,8 +1546,8 @@ class Sessions {
         e.isError ? "error" : "done",
       );
     if (e.type === "extension_ui_request") {
-      if (["select", "confirm", "input", "editor"].includes(e.method)) { s.piDialogs ||= new Set(); s.piDialogs.add(e.id); }
-      this.event(s, { type: "pi_ui", request: e.method === "notify" && typeof e.message === "string" ? { ...e, message: strip(e.message) } : e });
+      if (["select", "confirm", "input", "editor", "custom"].includes(e.method)) { s.piDialogs ||= new Set(); s.piDialogs.add(e.id); }
+      this.event(s, { type: "pi_ui", request: { ...e, ...(typeof e.message === "string" ? { message: strip(e.message) } : {}), ...(e.lines ? { lines: e.lines.map(strip) } : {}), ...(e.widgetLines ? { widgetLines: e.widgetLines.map(strip) } : {}) } });
     }
     if (e.type === "agent_settled") {
       s.piRunActive = false;
@@ -1567,7 +1590,7 @@ class Sessions {
     const s = this.get(id);
     if (s.agent !== "pi" && s.runtime) return s.runtime.reply(response);
     if (!this.writePiBridge(s, { type: "extension_ui_response", ...response })) throw new Error("Pi's dialog could not receive the answer. Retry the command after reconnecting.");
-    s.piDialogs?.delete(response.id);
+    if (response.input === undefined) s.piDialogs?.delete(response.id);
   }
   async importNativeHistory(s) {
     if (!["claude", "grok", "pi"].includes(s.agent) || !s.sessionRef) return;
@@ -1599,7 +1622,7 @@ class Sessions {
       if (history?.messages.length) this.event(s, { type: "history", messages: history.messages });
       s.messageQueue.reconcile(history?.messages || [], saved?.acceptedMessageIds || []);
     }
-    await ensureRuntime(this, s);
+    if (s.agent !== "google") await ensureRuntime(this, s);
     this.event(s, { type: "reconnected" });
   }
   async releaseRuntime(s) {
@@ -1619,14 +1642,17 @@ class Sessions {
     if (!["rich", "native"].includes(mode)) throw new Error("Invalid session view.");
     if (s.stopping || s.transitioning || s.setting) throw new Error("Wait for the current session action to finish.");
     if (s.mode === mode) return { mode, sessionRef: s.sessionRef, nativeOwned: !!s.nativeOwned };
-    if (["claude", "grok", "pi"].includes(s.agent) && s.busy) {
+    if (["claude", "grok", "pi", "google"].includes(s.agent) && s.busy) {
       s.pendingMode = mode;
       return { mode: s.mode, sessionRef: s.sessionRef, pending: true };
     }
     s.messageQueue?.pause();
     s.transitioning = true;
     try {
-      if (["shell", "pi", "codex"].includes(s.agent)) {
+      if (s.agent === "google") {
+        if (mode === "native") { await this.releaseRuntime(s); await this.startNative(id); }
+        else if (s.pty) this.event(s, { type: "terminal-needed", title: "Google CLI · exit when ready to reconnect Readable" });
+      } else if (["shell", "pi", "codex"].includes(s.agent)) {
         if (s.agent === "shell") await this.startNative(id);
         else if (s.agent === "pi") {
           this.rejectPiCommands(s, "Pi view changed.");

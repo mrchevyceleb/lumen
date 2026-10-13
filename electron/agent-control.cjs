@@ -26,7 +26,7 @@ function validate(action, body) {
   }
   if (action === "create") {
     body.agent ||= "codex"; body.id ||= crypto.randomUUID();
-    if (!["shell", "pi", "codex", "claude", "grok"].includes(body.agent)) throw new ControlError("Choose shell, pi, codex, claude, or grok.");
+    if (!["shell", "pi", "codex", "claude", "grok", "google"].includes(body.agent)) throw new ControlError("Choose shell, pi, codex, claude, grok, or google.");
     for (const key of ["root", "cwd"]) if (body[key] && !path.isAbsolute(body[key])) throw new ControlError(`${key} must be an absolute folder.`);
     if (body.cwd && !body.root) throw new ControlError("Choose a workspace root when specifying cwd.");
     // Sessions.create resolves real paths and rejects cwd outside the registered root.

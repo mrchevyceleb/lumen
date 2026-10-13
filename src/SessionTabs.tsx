@@ -16,7 +16,7 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
     {tabs.map((tab) => <div className={`session-tab ${activeId === tab.id ? "selected" : ""}`} key={tab.id}
       style={{ "--tab-color": settings.coloredTabs ? tab.color || settings.agents[tab.agent].color : settings.border } as CSSProperties}>
       <button className="tab-select" aria-label={`${tab.name}${tab.accountId ? ` · ${tab.accountName}` : ""}`} aria-describedby={`chat-status-${tab.id}`} aria-current={activeId === tab.id ? "page" : undefined} onClick={() => onSelect(tab)} onDoubleClick={() => onCustomize(tab)}
-        title={`${tab.projectless ? "No workspace · Scratch folder" : tab.cwd || tab.root}\n${tab.mode === "native" ? "Native CLI" : "Readable session"} · Double-click to customize`}>
+        title={`${tab.projectless ? `No workspace · ${tab.cwd || "Scratch folder"}` : tab.cwd || tab.root}\n${tab.mode === "native" ? "Native CLI" : "Readable session"} · Double-click to customize`}>
         <AgentMark agent={tab.agent} color={settings.coloredAgents ? settings.agents[tab.agent].color : settings.muted} size={vertical ? 14 : 16} />
         <span>{tab.name}{tab.accountId ? ` · ${tab.accountName}` : ""}</span>
         {tab.managedBy && <Sparkles size={11} aria-label="Agent controlled task" />}

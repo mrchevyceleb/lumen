@@ -38,9 +38,9 @@ const writeJson = async (file, value, expected) => {
   await fsp.rename(temporary, file);
   return true;
 };
-const agentNames = { claude: "Claude Code", codex: "Codex", grok: "Grok", pi: "Pi" };
+const agentNames = { claude: "Claude Code", codex: "Codex", grok: "Grok", pi: "Pi", google: "Google Antigravity" };
 const sourceHome = (agent) => {
-  const home = { claude: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), codex: process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), grok: process.env.GROK_HOME || path.join(os.homedir(), ".grok"), pi: process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent") }[agent];
+  const home = { claude: process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), codex: process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), grok: process.env.GROK_HOME || path.join(os.homedir(), ".grok"), pi: process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), google: path.join(os.homedir(), ".gemini", "antigravity-cli") }[agent];
   if (!home) throw new Error("Choose an agent to sign in.");
   return home.startsWith("~/") || home.startsWith("~\\") ? path.join(os.homedir(), home.slice(2)) : home;
 };
@@ -201,11 +201,11 @@ class Accounts {
     const id = p.id;
     if (this.logins.has(id) && !this.logins.get(id).ended) return { id, agent: p.agent, name: p.name };
     if ([...this.logins.values()].some((l) => l.agent === p.agent && !l.ended)) throw new Error("Finish the other sign-in for this provider first.");
-    const launcher = this.resolveLauncher(command || p.agent);
+    const launcher = this.resolveLauncher(command || (p.agent === "google" ? "agy" : p.agent));
     // Invalidate the persisted generation before credentials can change, even
     // when a login is interrupted or Lumen exits before it finishes.
     if (accountId) { p.revision = crypto.randomUUID(); await this.save(); }
-    const args = { claude: ["--dangerously-skip-permissions", "auth", "login"], codex: [...codexAccountOptions({ accountId }), "login"], grok: ["login"], pi: ["--no-session"] }[p.agent];
+    const args = { claude: ["--dangerously-skip-permissions", "auth", "login"], codex: [...codexAccountOptions({ accountId }), "login"], grok: ["login"], pi: ["--no-session"], google: [] }[p.agent];
     const terminal = require("node-pty").spawn(launcher.file, [...launcher.args, ...args], { name: "xterm-256color", cols: 80, rows: 20, cwd: home,
       env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), });
     const login = { terminal, agent: p.agent, buffer: "", offset: 0, authenticated: false }; this.logins.set(id, login);
@@ -231,7 +231,12 @@ class Accounts {
       login.ended = true; login.exitCode = exitCode;
       login.watch?.close(); clearTimeout(login.timer);
       if (exitCode === 0 && accountId) { p.revision = crypto.randomUUID(); await this.save().catch(() => {}); }
-      this.notify({ type: "exit", id, code: p.agent === "pi" ? login.authenticated ? 0 : 1 : exitCode }); this.notify({ type: "changed" });
+      if (p.agent === "google") {
+        login.ended = false; login.exitCode = 1;
+        try { await require("node:util").promisify(require("node:child_process").execFile)(launcher.file, [...launcher.args, "models"], { cwd: home, env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), windowsHide: true, timeout: 20000 }); login.authenticated = true; } catch { login.authenticated = false; }
+        login.exitCode = login.authenticated ? 0 : 1; login.ended = true;
+      }
+      this.notify({ type: "exit", id, code: ["pi", "google"].includes(p.agent) ? login.authenticated ? 0 : 1 : exitCode }); this.notify({ type: "changed" });
     });
     return { id, agent: p.agent, name: p.name };
   }

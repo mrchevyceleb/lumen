@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, Plus, Pin, MoreHorizontal, GripVertical, ChevronRight, ChevronDown, ListTree, PanelTop, PanelLeftClose } from "lucide-react";
+import { FolderOpen, Plus, Pin, MoreHorizontal, GripVertical, ChevronRight, ChevronDown, ListTree, PanelTop, PanelLeftClose, TerminalSquare, Sparkles } from "lucide-react";
 import SessionTabs, { type SessionTabActions } from "./SessionTabs";
 import type { Settings, Tab } from "./types";
 
@@ -13,25 +13,27 @@ export function restoreProjects(): Project[] {
   } catch { return []; }
 }
 
-export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onChange, onRemove, tabs, activeId, settings, onSelect, onCustomize, onClose, onLayout, onNewChat, newChatRoot, onCollapse }: SessionTabActions & {
+export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onTerminal, onScratch, onChange, onRemove, tabs, activeId, settings, onSelect, onCustomize, onClose, onLayout, onNewChat, newChatRoot, onCollapse }: SessionTabActions & {
   projects: Project[]; activeRoot: string; counts: Record<string, number>; ready: boolean;
   tabs: Tab[]; activeId: string; settings: Settings; onLayout: () => void; onNewChat: (root: string) => void; newChatRoot?: string;
-  onOpen: (project: Project) => void; onAdd: () => void; onChange: (projects: Project[]) => void; onRemove: (project: Project) => void; onCollapse: () => void;
+  onOpen: (project: Project) => void; onAdd: () => void; onTerminal: () => void; onScratch: () => void; onChange: (projects: Project[]) => void; onRemove: (project: Project) => void; onCollapse: () => void;
 }) {
   const vertical = settings.chatLayout === "vertical";
   const [scratchCollapsed, setScratchCollapsed] = useState(false);
   const scratch = tabs.filter((tab) => tab.projectless);
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState("");
+  const [adding, setAdding] = useState(false);
   const [renaming, setRenaming] = useState("");
   const [name, setName] = useState("");
   const [over, setOver] = useState("");
   const container = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node)) setMenu(""); };
+    const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node)) { setMenu(""); setAdding(false); } };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, []);
+  useEffect(() => { if (projects.length <= 4) setQuery(""); }, [projects.length]);
   const rename = (project: Project) => {
     const next = name.trim().slice(0, 100);
     if (next) onChange(projects.map((p) => p.root === project.root ? { ...p, name: next } : p));
@@ -43,7 +45,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
     requestAnimationFrame(() => {
       const next = container.current?.querySelector<HTMLButtonElement>('.project-open[aria-current="true"]')
         || container.current?.querySelector<HTMLButtonElement>(".project-open")
-        || container.current?.querySelector<HTMLButtonElement>('[aria-label="Add project"]');
+        || container.current?.querySelector<HTMLButtonElement>('[aria-label="Add project or session"]');
       next?.focus();
     });
   };
@@ -62,7 +64,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
     setMenu("");
   };
   return <div className={`project-sidebar ${vertical ? "with-chats" : ""}`} ref={container}>
-    <div className="project-heading"><span>PROJECTS <small>{projects.length}</small></span><div><button aria-label={vertical ? "Use horizontal tabs" : "Use vertical chats"} title={vertical ? "Use horizontal tabs" : "Use vertical chats"} onClick={onLayout}>{vertical ? <PanelTop size={14} /> : <ListTree size={14} />}</button><button aria-label="Add project" onClick={onAdd} disabled={!ready}><Plus size={15} /></button><button aria-label="Collapse projects sidebar" title="Collapse projects sidebar" onClick={onCollapse}><PanelLeftClose size={14} /></button></div></div>
+    <div className="project-heading"><span>PROJECTS <small>{projects.length}</small></span><div><button aria-label={vertical ? "Use horizontal tabs" : "Use vertical chats"} title={vertical ? "Use horizontal tabs" : "Use vertical chats"} onClick={onLayout}>{vertical ? <PanelTop size={14} /> : <ListTree size={14} />}</button><div className="project-add-anchor" onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setAdding(false); event.currentTarget.querySelector<HTMLButtonElement>("button")?.focus(); } }}><button aria-label="Add project or session" title="Open a folder, terminal, or chat" aria-expanded={adding} onClick={() => setAdding(!adding)} disabled={!ready}><Plus size={15} /></button>{adding && <div className="project-menu project-add-menu"><button autoFocus onClick={() => { setAdding(false); onTerminal(); }}><TerminalSquare size={15} /><span>New terminal<small>No workspace · Ctrl Alt T</small></span></button><button onClick={() => { setAdding(false); onScratch(); }}><Sparkles size={15} /><span>New agent chat<small>No workspace</small></span></button><button onClick={() => { setAdding(false); onAdd(); }}><FolderOpen size={15} /><span>Open project folder<small>Ctrl O</small></span></button></div>}</div><button aria-label="Collapse projects sidebar" title="Collapse projects sidebar" onClick={onCollapse}><PanelLeftClose size={14} /></button></div></div>
     {projects.length > 4 && <input aria-label="Search projects" placeholder="Find a project…" value={query} onChange={(e) => setQuery(e.target.value)} />}
     <div className="project-scroll">
       {[true, false].map((pinned) => <div key={String(pinned)}>
@@ -80,7 +82,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
           <SessionTabs tabs={tabs.filter((tab) => !tab.projectless && sameProject(tab.root, project.root))} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onClose={onClose} />
         </div>}</div>)}
       </div>)}
-      {vertical && !!scratch.length && <div className="scratch-chats"><div className="scratch-heading"><button aria-label={`${scratchCollapsed ? "Expand" : "Collapse"} chats without a workspace`} aria-expanded={!scratchCollapsed} onClick={() => setScratchCollapsed(!scratchCollapsed)}>{scratchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}<FolderOpen size={15} /><span>No workspace</span><small>{scratch.length}</small></button><button aria-label="New chat without workspace" aria-expanded={newChatRoot === ""} aria-controls={newChatRoot === "" ? "new-chat-menu" : undefined} onClick={() => onNewChat("")}><Plus size={13} /></button></div>
+      {vertical && <div className="scratch-chats"><div className="scratch-heading"><button aria-label={`${scratchCollapsed ? "Expand" : "Collapse"} chats without a workspace`} aria-expanded={!scratchCollapsed} onClick={() => scratch.length ? setScratchCollapsed(!scratchCollapsed) : onScratch()}>{scratchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}<FolderOpen size={15} /><span>No workspace</span><small>{scratch.length}</small></button><button aria-label="New chat without workspace" disabled={!ready} aria-expanded={newChatRoot === ""} aria-controls={newChatRoot === "" ? "new-chat-menu" : undefined} onClick={() => onNewChat("")}><Plus size={13} /></button></div>
         <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onClose={onClose} /></div>
       </div>}
       {!projects.length && (!vertical || !scratch.length) && <p className="project-empty">Add repositories here. Your chats stay open as you switch.</p>}
