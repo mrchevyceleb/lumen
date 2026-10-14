@@ -10,10 +10,10 @@ async function modelCatalog(s, launch) {
   try { ({ stdout } = await execute(launch.file, launch.args, { cwd: s.cwd, env: s.profileEnvironment, windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 })); }
   catch (error) { throw new Error((error.stderr || error.stdout || error.message).trim()); }
   const models = stdout.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/\r?\n/).flatMap((line) => {
-    const match = line.trim().match(/^([a-z0-9][a-z0-9_.:/-]+)\s{2,}(.+)$/);
+    const match = line.trim().match(/^([a-z0-9][a-z0-9_.:/-]+)(?:\t+| {2,})(.+)$/);
     return match ? [{ id: match[1], name: match[2].trim(), description: "Google Antigravity", efforts: levels }] : [];
   });
-  if (!models.length) throw new Error("Google returned no models. Sign in to Antigravity from this chat's account picker, then refresh.");
+  if (!models.length) throw new Error("Google's CLI returned no readable models. Refresh the model list or update the Google CLI in Settings → Agents.");
   return { models, currentModel: s.model, currentEffort: s.effort, currentEfforts: levels, currentMode: s.workMode };
 }
 
