@@ -532,6 +532,7 @@ class Sessions {
       cwd = fsSync.realpathSync(cwd);
       if (!fsSync.statSync(cwd).isDirectory()) throw new Error("Working folder is unavailable.");
     }
+    if (agent === "google") effort = require("./google.cjs").variant(model).effort;
     const s = {
       id,
       root,
@@ -860,6 +861,8 @@ class Sessions {
       } else if (s.agent === "google") {
         await this.prepareLaunch(s);
         info = await require("./google.cjs").modelCatalog(s, profiledLaunch(s, ["models"], resolveLauncher));
+        s.effort = info.currentEffort;
+        this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       } else if (s.agent === "codex") {
         const runtime = await ensureRuntime(this, s);
         info = catalog("codex", (await runtime.request("model/list")).data, { currentModel: s.model, currentEffort: s.effort, currentMode: s.workMode });
@@ -885,12 +888,14 @@ class Sessions {
         else if (change.cycle === "effort") await this.piRpc(s, "cycle_thinking_level");
         else throw new Error("Invalid cycle action.");
       } else {
+        if (s.agent === "google" && change.effort && !info.models.find((m) => m.id === (change.model ?? s.model))?.efforts.some((e) => e.id === change.effort))
+          throw new Error("This effort level is not supported by the selected model.");
         if (change.model !== undefined) {
           const model = info.models.find((m) => m.id === change.model);
           if (!model) throw new Error("This model is no longer available. Refresh the picker.");
           if (s.agent === "pi") await this.piBridge(s, "select", { model: model.id });
           s.model = model.id;
-          if (s.agent !== "pi" && !model.efforts.some((e) => e.id === s.effort)) s.effort = model.defaultEffort || "";
+          if (s.agent === "google" || s.agent !== "pi" && !model.efforts.some((e) => e.id === s.effort)) s.effort = model.defaultEffort || "";
         }
         if (change.effort !== undefined) {
           const levels = s.agent === "pi" ? efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) :
@@ -900,7 +905,10 @@ class Sessions {
             if (!change.effort) throw new Error("Choose a thinking level for Pi.");
             await this.piRpc(s, "set_thinking_level", { level: change.effort });
           }
-          s.effort = change.effort;
+          if (s.agent === "google") {
+            if (change.effort) s.model = levels.find((e) => e.id === change.effort).modelId;
+            s.effort = info.models.find((m) => m.id === s.model)?.defaultEffort || "";
+          } else s.effort = change.effort;
         }
         if (change.workMode !== undefined) {
           if (!["claude", "grok", "codex", "google"].includes(s.agent) || !["plan", "default"].includes(change.workMode)) throw new Error("Use this agent's native planning workflow.");

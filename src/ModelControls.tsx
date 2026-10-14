@@ -90,7 +90,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
   const modelChoices = favorites ? (info?.favorites || []).flatMap((id) => info?.models.filter((m) => m.id === id) || []) : info?.models || [];
   const choices = panel === "model" ? modelChoices.filter((m) =>
     `${m.name} ${m.id} ${m.description}`.toLowerCase().includes(query.toLowerCase())) :
-    [...(tab.agent === "pi" || !levels.length ? [] : [{ id: "", name: "CLI default", description: "Use the CLI's effort setting for this model." }]), ...levels];
+    [...(["pi", "google"].includes(tab.agent) || !levels.length ? [] : [{ id: "", name: "CLI default", description: "Use the CLI's effort setting for this model." }]), ...levels];
   const selection = Math.min(selected, Math.max(0, choices.length - 1));
   useEffect(() => {
     root.current?.querySelectorAll<HTMLElement>(".model-option")[selection]?.scrollIntoView({ block: "nearest" });
