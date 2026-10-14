@@ -3,7 +3,12 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const execute = promisify(execFile);
 const validId = (id) => /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id || "");
-const levels = ["low", "medium", "high", "xhigh", "max"].map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1), description: "Antigravity reasoning effort" }));
+const effortOrder = ["low", "medium", "high", "xhigh", "max"];
+const variant = (id) => {
+  const match = /^(.*)-(low|medium|high|xhigh|max)$/.exec(id || "");
+  return { base: match ? match[1] : id, effort: match ? match[2] : "" };
+};
+const modelOptions = (s) => s.model ? ["--model", s.model] : [];
 
 async function modelCatalog(s, launch) {
   let stdout;
@@ -11,17 +16,24 @@ async function modelCatalog(s, launch) {
   catch (error) { throw new Error((error.stderr || error.stdout || error.message).trim()); }
   const models = stdout.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/\r?\n/).flatMap((line) => {
     const match = line.trim().match(/^([a-z0-9][a-z0-9_.:/-]+)(?:\t+| {2,})(.+)$/);
-    return match ? [{ id: match[1], name: match[2].trim(), description: "Google Antigravity", efforts: levels }] : [];
+    return match ? [{ id: match[1], name: match[2].trim(), description: "Google Antigravity", efforts: [], defaultEffort: variant(match[1]).effort }] : [];
   });
   if (!models.length) throw new Error("Google's CLI returned no readable models. Refresh the model list or update the Google CLI in Settings → Agents.");
-  return { models, currentModel: s.model, currentEffort: s.effort, currentEfforts: levels, currentMode: s.workMode };
+  for (const model of models) {
+    const selected = variant(model.id);
+    if (selected.effort) model.efforts = models.filter((m) => variant(m.id).base === selected.base && m.defaultEffort)
+      .sort((a, b) => effortOrder.indexOf(a.defaultEffort) - effortOrder.indexOf(b.defaultEffort))
+      .map((m) => ({ id: m.defaultEffort, name: m.defaultEffort === "xhigh" ? "Extra high" : m.defaultEffort[0].toUpperCase() + m.defaultEffort.slice(1), description: m.name, modelId: m.id }));
+  }
+  const selected = models.find((m) => m.id === s.model);
+  return { models, currentModel: s.model, currentEffort: selected?.defaultEffort || "", currentEfforts: selected?.efforts || [], currentMode: s.workMode };
 }
 
 function turn(owner, s, prompt, message = {}) {
   // Send text on stdin: long prompts never cross Windows' command-line limit.
   const args = ["--input-format", "stream-json", "--output-format", "stream-json",
     ...(s.sessionRef ? ["--conversation", s.sessionRef] : []),
-    ...(s.model ? ["--model", s.model] : []), ...(s.effort ? ["--effort", s.effort] : []),
+    ...modelOptions(s),
     ...(s.workMode === "plan" ? ["--mode", "plan"] : ["--dangerously-skip-permissions"])];
   const child = owner.child(s, args);
   return new Promise((resolve, reject) => {
@@ -81,7 +93,7 @@ function turn(owner, s, prompt, message = {}) {
   });
 }
 
-module.exports = { turn, modelCatalog, levels };
+module.exports = { turn, modelCatalog, variant, modelOptions };
 module.exports.install = async (dataDir, resolveLauncher) => {
   if (process.platform !== "win32") throw new Error("Use Google's installation guide for this operating system.");
   const fs = require("node:fs/promises"), path = require("node:path");
