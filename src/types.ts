@@ -252,7 +252,7 @@ declare global {
       onAgentControl: (callback: (event: AgentControlRequest) => void) => () => void;
       onAgentControlStatus: (callback: (status: AgentControlStatus) => void) => () => void;
       onUpdate: (callback: (status: UpdateStatus) => void) => () => void;
-      onAccounts: (callback: (event: { type: string; id?: string; data?: string; code?: number; offset?: number }) => void) => () => void;
+      onAccounts: (callback: (event: { type: string; id?: string; data?: string; text?: string; code?: number; offset?: number }) => void) => () => void;
       onOpenPaths: (callback: () => void) => () => void;
       onClosing: (callback: () => Promise<void>) => () => void;
     };

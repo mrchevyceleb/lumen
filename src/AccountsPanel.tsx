@@ -34,17 +34,22 @@ export function AccountPicker({ tab, onSelect, onManage, onSignIn }: { tab: Tab;
   </label>;
 }
 
-export default function AccountsPanel({ settings, onStart }: { settings: Settings; onStart: (profile: AccountProfile) => void }) {
+export default function AccountsPanel({ settings, onStart, onAgentsRefresh }: { settings: Settings; onStart: (profile: AccountProfile) => void; onAgentsRefresh: () => Promise<void> }) {
   const { accounts, error: loadError, refresh } = useAccounts();
   const [agent, setAgent] = useState<"claude" | "codex">("claude");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const [signInProvider, setSignInProvider] = useState<SignInProfile["agent"] | null>(null);
+  const [signInStatus, setSignInStatus] = useState("");
+  const signInFeedback = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { if (signInProvider && (error || working)) signInFeedback.current?.scrollIntoView({ block: "nearest" }); }, [signInProvider, error, working]);
+  useEffect(() => window.lumen.onAccounts((event) => { if (event.type === "login-status") setSignInStatus(event.text || ""); }), []);
   const lock = useRef(false);
   const [login, setLogin] = useState<SignInProfile | null>(null);
   const [removing, setRemoving] = useState<string>("");
-  const run = async (action: () => Promise<void>) => {
-    if (lock.current) return; lock.current = true; setWorking(true); setError("");
+  const run = async (action: () => Promise<void>, provider: SignInProfile["agent"] | null = null) => {
+    if (lock.current) return; lock.current = true; setWorking(true); setError(""); setSignInProvider(provider); setSignInStatus("Opening sign-in…");
     try { await action(); await refresh(); } catch (e: any) { setError(e.message); } finally { lock.current = false; setWorking(false); }
   };
   const signIn = async (p: AccountProfile) => { await api("accounts:login", p.id, settings.agents[p.agent].command); setLogin(p); };
@@ -52,7 +57,7 @@ export default function AccountsPanel({ settings, onStart }: { settings: Setting
   return <>
     <h3>One place for all your accounts</h3>
     <p className="muted">Save a login once, then choose it in any Claude or Codex chat. Accounts can run side by side.</p>
-    {(error || loadError) && <p className="inline-error" role="alert">{error || loadError}</p>}
+    {((error && !signInProvider) || loadError) && <p className="inline-error" role="alert">{error || loadError}</p>}
     <form className="account-add" onSubmit={(e) => { e.preventDefault(); void run(async () => { const p = await api<AccountProfile>("accounts:add", { agent, name }); setName(""); await signIn(p); }); }}>
       <label className="field"><span>Provider</span><select aria-label="Account provider" value={agent} onChange={(e) => setAgent(e.target.value as "claude" | "codex")} disabled={working}>
         <option value="claude">Claude Code</option><option value="codex">OpenAI · Codex</option>
@@ -64,7 +69,8 @@ export default function AccountsPanel({ settings, onStart }: { settings: Setting
     {(["claude", "codex"] as const).map((provider) => <section className="account-group" key={provider}>
       <div className="account-group-heading"><h4>{provider === "claude" ? "Claude Code" : "OpenAI · Codex"}</h4>
         <button className="secondary" disabled={working || !accounts.defaults[provider]} onClick={() => void run(async () => { await api("accounts:system", provider); })}>{!accounts.defaults[provider] && <Check size={12} />}Use CLI default</button></div>
-      <button className="secondary" disabled={working} onClick={() => void run(async () => { setLogin(await api<SignInProfile>("accounts:login-default", provider, settings.agents[provider].command)); })}><LogIn size={13} />Sign in to {agentNames[provider]} · CLI default</button>
+      <button className="secondary" disabled={working} onClick={() => void run(async () => { setLogin(await api<SignInProfile>("accounts:login-default", provider, settings.agents[provider].command)); }, provider)}><LogIn size={13} />Sign in to {agentNames[provider]} · CLI default</button>
+      {signInProvider === provider && working && <p ref={signInFeedback} role="status">{signInStatus}</p>}{signInProvider === provider && error && <p ref={signInFeedback} className="inline-error" role="alert">{error}</p>}
       {!accounts.profiles.some((p) => p.agent === provider) && <p className="muted account-empty">Using your normal CLI login. Add a named account above to keep another login ready.</p>}
       {accounts.profiles.filter((p) => p.agent === provider).map((p) => <div className="account-card" key={p.id}>
         <div className="account-card-heading"><Users size={17} /><input key={p.name} aria-label={`Rename ${p.name}`} defaultValue={p.name} maxLength={80} disabled={working}
@@ -80,7 +86,7 @@ export default function AccountsPanel({ settings, onStart }: { settings: Setting
         {removing === p.id && <div className="account-remove"><p>Remove this saved login? Local chat files stay on disk.</p><button className="secondary" onClick={() => setRemoving("")}>Keep account</button><button className="secondary" disabled={working} onClick={() => void run(async () => { await api("accounts:remove", p.id); setRemoving(""); })}>Remove login</button></div>}
       </div>)}
     </section>)}
-    {(["grok", "pi", "google"] as const).map((provider) => <section className="account-group" key={provider}><h4>{agentNames[provider]}</h4><p className="muted">Uses your normal {agentNames[provider]} CLI login.</p><button className="secondary" disabled={working} onClick={() => void run(async () => { setLogin(await api<SignInProfile>("accounts:login-default", provider, settings.agents[provider].command)); })}><LogIn size={13} />Sign in to {agentNames[provider]}</button></section>)}
+    {(["grok", "pi", "google"] as const).map((provider) => <section className="account-group" key={provider}><h4>{agentNames[provider]}</h4><p className="muted">Uses your normal {agentNames[provider]} CLI login.</p><button className="secondary" disabled={working} onClick={() => void run(async () => { setLogin(await api<SignInProfile>("accounts:login-default", provider, settings.agents[provider].command)); if (provider === "google") void onAgentsRefresh().catch(() => {}); }, provider)}><LogIn size={13} />Sign in to {agentNames[provider]}</button>{signInProvider === provider && working && <p ref={signInFeedback} role="status">{signInStatus}</p>}{signInProvider === provider && error && <p ref={signInFeedback} className="inline-error" role="alert">{error}</p>}</section>)}
     <p className="settings-note">Choose another account from the chat's account picker to start a fresh chat. Existing chats keep their account after restart. Sign-in uses the CLI's normal browser flow; logins are stored locally on this computer.</p>
   </>;
 }
@@ -90,7 +96,19 @@ export function AccountLogin({ profile, settings, onDone }: { profile: SignInPro
   const [finished, setFinished] = useState(false);
   const [error, setError] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
+  const [authorizationCode, setAuthorizationCode] = useState("");
+  const [checking, setChecking] = useState(false);
+  const checkGoogle = async (retry = false) => {
+    setChecking(true); setError("");
+    try {
+      for (let attempt = 0; ; attempt++) { try { await api("accounts:verify", profile.id); break; } catch (error) { if (!retry || attempt >= 3) throw error; await new Promise((resolve) => setTimeout(resolve, 750)); } }
+      setAuthenticated(true);
+    }
+    catch { setError("Google has not finished signing in yet. Paste its authorization code, or finish the browser flow and check again."); }
+    finally { setChecking(false); }
+  };
   useEffect(() => {
+    host.current?.closest(".account-login")?.scrollIntoView({ block: "start" });
     const terminal = new Terminal({ fontFamily: '"Cascadia Code", Consolas, monospace', fontSize: settings.terminalFontSize, cursorBlink: true, theme: { background: settings.code, foreground: settings.text, cursor: settings.accent } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current!);
     let ready = false, disposed = false, offset = 0; const queued: { data: string; offset: number }[] = [];
@@ -113,8 +131,13 @@ export function AccountLogin({ profile, settings, onDone }: { profile: SignInPro
   }, [profile.id]);
   const success = !error && (authenticated || finished);
   return <div className="account-login">
-    {profile.agent === "google" && <p className="muted">Finish Google sign-in in your browser, then exit the CLI with Ctrl D. Lumen verifies your login before showing Done.</p>}<h3>{profile.name}</h3><p className="muted">{profile.agent === "pi" ? "Open the provider picker below, choose the provider for your model, then complete its OAuth or API-key sign-in." : `Complete ${agentNames[profile.agent]}'s sign-in in your browser. If it asks for a code, paste it below.`} {profile.id.startsWith("cli-default-") ? `This updates your normal ${agentNames[profile.agent]} CLI login, too.` : "Choose the account you want to save here."}</p>
+    {profile.agent === "google" && <p className="muted">Finish Google sign-in in your browser. If Google gives you a code, paste it below. Lumen verifies your login before showing Done.</p>}<h3>{profile.name}</h3><p className="muted">{profile.agent === "pi" ? "Open the provider picker below, choose the provider for your model, then complete its OAuth or API-key sign-in." : `Complete ${agentNames[profile.agent]}'s sign-in in your browser. If it asks for a code, paste it below.`} {profile.id.startsWith("cli-default-") ? `This updates your normal ${agentNames[profile.agent]} CLI login, too.` : "Choose the account you want to save here."}</p>
     {profile.agent === "pi" && !finished && !authenticated && <button className="secondary" onClick={() => void api("accounts:write", profile.id, "/login\r").catch((e) => setError(e.message))}>Choose provider</button>}
+    {profile.agent === "google" && !authenticated && !finished && <form className="account-actions" onSubmit={async (event) => {
+      event.preventDefault(); if (checking) return; setChecking(true); setError("");
+      try { await api("accounts:write", profile.id, authorizationCode.replace(/\s/g, "") + "\r"); setAuthorizationCode(""); } catch (error: any) { setError(error.message); setChecking(false); return; }
+      await checkGoogle(true);
+    }}><label className="field"><span>Google authorization code</span><input type="password" autoComplete="off" maxLength={2048} placeholder="Paste the code from Google" value={authorizationCode} disabled={checking} onChange={(event) => setAuthorizationCode(event.target.value)} /></label><button className="primary" disabled={checking || !authorizationCode.trim()}>Submit code</button><button className="secondary" type="button" disabled={checking} onClick={() => void checkGoogle()}>{checking ? "Checking Google sign-in…" : "Check sign-in"}</button></form>}
     <div ref={host} className="account-login-terminal" />{error && <p className="inline-error" role="alert">{error}</p>}
     <div className="account-actions"><button className={success ? "primary" : "secondary"} onClick={() => onDone(success)}>{success ? "Done" : finished ? "Close and try again" : "Cancel sign-in"}</button>{success && <span className="muted">Signed in. Return to your chat and retry your message.</span>}</div></div>;
 }

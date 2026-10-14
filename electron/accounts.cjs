@@ -47,9 +47,9 @@ const sourceHome = (agent) => {
 const signature = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 class Accounts {
-  constructor(dataDir, resolveLauncher, notify, inUse = () => false) {
+  constructor(dataDir, resolveLauncher, notify, inUse = () => false, installGoogle = null) {
     this.root = path.join(dataDir, "accounts"); this.file = path.join(dataDir, "accounts.json");
-    this.resolveLauncher = resolveLauncher; this.notify = notify; this.inUse = inUse;
+    this.resolveLauncher = resolveLauncher; this.notify = notify; this.inUse = inUse; this.installGoogle = installGoogle;
     this.profiles = []; this.defaults = { claude: "", codex: "" }; this.logins = new Map(); this.loginStarts = new Map(); this.loginReservations = new Map(); this.authLocks = new Map(); this.saving = Promise.resolve();
   }
   async init() {
@@ -201,14 +201,20 @@ class Accounts {
     const id = p.id;
     if (this.logins.has(id) && !this.logins.get(id).ended) return { id, agent: p.agent, name: p.name };
     if ([...this.logins.values()].some((l) => l.agent === p.agent && !l.ended)) throw new Error("Finish the other sign-in for this provider first.");
-    const launcher = this.resolveLauncher(command || (p.agent === "google" ? "agy" : p.agent));
+    const cliCommand = command || (p.agent === "google" ? "agy" : p.agent);
+    let launcher;
+    try { launcher = this.resolveLauncher(cliCommand); } catch (error) {
+      if (p.agent !== "google" || cliCommand !== "agy" || !this.installGoogle) throw error;
+      this.notify({ type: "login-status", id, text: "Installing Google Antigravity CLI…" });
+      await this.installGoogle(); launcher = this.resolveLauncher(cliCommand);
+    }
     // Invalidate the persisted generation before credentials can change, even
     // when a login is interrupted or Lumen exits before it finishes.
     if (accountId) { p.revision = crypto.randomUUID(); await this.save(); }
     const args = { claude: ["--dangerously-skip-permissions", "auth", "login"], codex: [...codexAccountOptions({ accountId }), "login"], grok: ["login"], pi: ["--no-session"], google: [] }[p.agent];
     const terminal = require("node-pty").spawn(launcher.file, [...launcher.args, ...args], { name: "xterm-256color", cols: 80, rows: 20, cwd: home,
       env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), });
-    const login = { terminal, agent: p.agent, buffer: "", offset: 0, authenticated: false }; this.logins.set(id, login);
+    const login = { terminal, launcher, home, accountId, agent: p.agent, buffer: "", offset: 0, authenticated: false }; this.logins.set(id, login);
     const checkPiLogin = () => {
       const output = login.buffer.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
       if (!login.ended && !login.authenticated && login.authWritten && /(?:Logged in to|Saved API key for)[\s\S]*(?:Credentials saved|Selected)/i.test(output)) {
@@ -226,19 +232,35 @@ class Accounts {
         }
       }, 100);
     });
-    terminal.onData((data) => { login.buffer = (login.buffer + data).slice(-100000); login.offset += data.length; this.notify({ type: "terminal", id, data, offset: login.offset }); if (p.agent === "pi") checkPiLogin(); });
+    terminal.onData((data) => {
+      login.buffer = (login.buffer + data).slice(-100000); login.offset += data.length; this.notify({ type: "terminal", id, data, offset: login.offset }); if (p.agent === "pi") checkPiLogin();
+      if (p.agent === "google" && !login.oauthSelected && /Select login method:[\s\S]*>\s*1\.\s*Google OAuth/.test(login.buffer.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ""))) {
+        login.oauthSelected = true; terminal.write("\r");
+      }
+    });
     terminal.onExit(async ({ exitCode }) => {
       login.ended = true; login.exitCode = exitCode;
       login.watch?.close(); clearTimeout(login.timer);
       if (exitCode === 0 && accountId) { p.revision = crypto.randomUUID(); await this.save().catch(() => {}); }
       if (p.agent === "google") {
         login.ended = false; login.exitCode = 1;
-        try { await require("node:util").promisify(require("node:child_process").execFile)(launcher.file, [...launcher.args, "models"], { cwd: home, env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), windowsHide: true, timeout: 20000 }); login.authenticated = true; } catch { login.authenticated = false; }
+        try { await this.verify(id); } catch { login.authenticated = false; }
         login.exitCode = login.authenticated ? 0 : 1; login.ended = true;
       }
       this.notify({ type: "exit", id, code: ["pi", "google"].includes(p.agent) ? login.authenticated ? 0 : 1 : exitCode }); this.notify({ type: "changed" });
     });
     return { id, agent: p.agent, name: p.name };
+  }
+  async verify(id) {
+    const login = this.logins.get(id);
+    if (!login || login.agent !== "google") throw new Error("Open Google’s sign-in screen first.");
+    if (login.verification) return login.verification;
+    login.verification = (async () => {
+      await require("node:util").promisify(require("node:child_process").execFile)(login.launcher.file, [...login.launcher.args, "models"], { cwd: login.home, env: accountEnvironment({ agent: login.agent, accountId: login.accountId, accountHome: login.home }), windowsHide: true, timeout: 20000 });
+      if (this.logins.get(id) !== login) throw new Error("This sign-in was closed.");
+      login.authenticated = true; this.notify({ type: "authenticated", id }); return true;
+    })().finally(() => { login.verification = null; });
+    return login.verification;
   }
   write(id, data) { if (typeof data !== "string" || data.length > 100000) throw new Error("Invalid sign-in input."); this.logins.get(id)?.terminal.write(data); }
   resize(id, cols, rows) { if (Number.isInteger(cols) && cols > 0 && cols < 1000 && Number.isInteger(rows) && rows > 0 && rows < 1000) this.logins.get(id)?.terminal.resize(cols, rows); }

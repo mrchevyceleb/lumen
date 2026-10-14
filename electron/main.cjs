@@ -67,9 +67,11 @@ startup.then(async (start) => {
   const dataDir = app.getPath("userData");
   workspace = new WorkspaceService(dataDir);
   await workspace.init();
+  let googleInstall;
+  const installGoogle = () => googleInstall ||= require("./google.cjs").install(dataDir, resolveLauncher).finally(() => { googleInstall = null; });
   accounts = new Accounts(dataDir, resolveLauncher, (event) => {
     if (window && !window.isDestroyed()) window.webContents.send("accounts:event", event);
-  }, (id) => [...(sessions?.sessions.values() || [])].some((s) => s.accountId === id));
+  }, (id) => [...(sessions?.sessions.values() || [])].some((s) => s.accountId === id), installGoogle);
   await accounts.init();
   recovery = new RecoveryStore(dataDir);
   attachments = new Attachments(dataDir);
@@ -126,6 +128,7 @@ startup.then(async (start) => {
     const s = sessions.get(id);
     return signInAgent(s.agent, s.accountId || "", s.command);
   });
+  handle("accounts:verify", (id) => accounts.verify(id));
   handle("accounts:write", (id, data) => accounts.write(id, data));
   handle("accounts:resize", (id, cols, rows) => accounts.resize(id, cols, rows));
   handle("accounts:buffer", (id) => accounts.buffer(id));
@@ -142,11 +145,7 @@ startup.then(async (start) => {
     window.close();
     return restartForUpdate;
   });
-  let googleInstall;
-  handle("agents:install-google", async () => {
-    googleInstall ||= require("./google.cjs").install(dataDir, resolveLauncher).finally(() => { googleInstall = null; });
-    return googleInstall;
-  });
+  handle("agents:install-google", installGoogle);
   handle("bootstrap", async () => ({
     recent: workspace.recent,
     platform: process.platform,

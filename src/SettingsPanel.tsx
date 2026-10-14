@@ -100,7 +100,7 @@ export default function SettingsPanel({
         <div className="settings-content">
           {section === "updates" && <UpdatesPanel />}
           {section === "control" && <AgentControlPanel />}
-          {section === "accounts" && <AccountsPanel settings={s} onStart={onAccountChat} />}
+          {section === "accounts" && <AccountsPanel settings={s} onStart={onAccountChat} onAgentsRefresh={onAgentsRefresh} />}
           {section === "appearance" && (
             <>
               <h3>A fresh coat of color</h3>
