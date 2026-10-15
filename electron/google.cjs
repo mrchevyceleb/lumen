@@ -1,5 +1,6 @@
 // Google Antigravity's documented NDJSON interface, not the retired Gemini OAuth client.
 const { execFile } = require("node:child_process");
+const path = require("node:path");
 const { promisify } = require("node:util");
 const execute = promisify(execFile);
 const validId = (id) => /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id || "");
@@ -42,12 +43,19 @@ async function modelCatalog(s, launch, kill = async (child) => { child.kill(); }
   return { models, currentModel: s.model, currentEffort: selected?.defaultEffort || "", currentEfforts: selected?.efforts || [], currentMode: s.workMode };
 }
 
-function turn(owner, s, prompt, message = {}) {
+async function turn(owner, s, prompt, message = {}) {
+  // Stream input only accepts text; view_file loads the saved images visually.
+  const images = message.attachments?.length ? await owner.attachments.resolve(s.controlId, message.attachments) : [];
+  if (images.length) {
+    prompt = [prompt, "Image attachments: open these files with view_file before responding.",
+      ...images.map((image) => JSON.stringify(image.path))].filter(Boolean).join("\n\n");
+  }
   // Send text on stdin: long prompts never cross Windows' command-line limit.
   const args = ["--input-format", "stream-json", "--output-format", "stream-json",
     ...(s.sessionRef ? ["--conversation", s.sessionRef] : []),
+    ...[...new Set(images.map((image) => path.dirname(image.path)))].flatMap((directory) => ["--add-dir", directory]),
     ...modelOptions(s),
-    ...(s.workMode === "plan" ? ["--mode", "plan"] : ["--dangerously-skip-permissions"])];
+    "--dangerously-skip-permissions", ...(s.workMode === "plan" ? ["--mode", "plan"] : [])];
   const child = owner.child(s, args);
   return new Promise((resolve, reject) => {
     let buffer = "", result, accepted = false, stderr = "", protocolError = "";

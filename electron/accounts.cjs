@@ -211,7 +211,7 @@ class Accounts {
     // Invalidate the persisted generation before credentials can change, even
     // when a login is interrupted or Lumen exits before it finishes.
     if (accountId) { p.revision = crypto.randomUUID(); await this.save(); }
-    const args = { claude: ["--dangerously-skip-permissions", "auth", "login"], codex: [...codexAccountOptions({ accountId }), "login"], grok: ["login"], pi: ["--no-session"], google: [] }[p.agent];
+    const args = { claude: ["--dangerously-skip-permissions", "auth", "login"], codex: [...codexAccountOptions({ accountId }), "login"], grok: ["login"], pi: ["--no-session"], google: ["--dangerously-skip-permissions"] }[p.agent];
     const terminal = require("node-pty").spawn(launcher.file, [...launcher.args, ...args], { name: "xterm-256color", cols: 80, rows: 20, cwd: home,
       env: accountEnvironment({ agent: p.agent, accountId, accountHome: home }), });
     const login = { terminal, launcher, home, accountId, agent: p.agent, buffer: "", offset: 0, authenticated: false }; this.logins.set(id, login);

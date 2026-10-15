@@ -35,7 +35,7 @@ function piShortcuts() {
 function cliOptions(s) {
   const args = s.agent === "google" ? require("./google.cjs").modelOptions(s) : s.model ? ["--model", s.model] : [];
   if (s.agent === "claude") args.push("--dangerously-skip-permissions", "--settings", claudeSettings(s));
-  if (s.agent === "google") args.push(...(s.workMode === "plan" ? ["--mode", "plan"] : ["--dangerously-skip-permissions"]));
+  if (s.agent === "google") args.push("--dangerously-skip-permissions", ...(s.workMode === "plan" ? ["--mode", "plan"] : []));
   if (s.agent === "grok") args.push("--sandbox", "off");
   if (s.agent === "codex") args.push("-c", 'sandbox_mode="danger-full-access"', "-c", 'approval_policy="never"', "-c", 'shell_environment_policy.inherit="all"', "-c", 'shell_environment_policy.ignore_default_excludes=true');
   if (s.agent === "codex") args.push(...codexAccountOptions(s));

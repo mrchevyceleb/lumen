@@ -1151,7 +1151,7 @@ class Sessions {
     if (!this.attachments) throw new Error("Image attachments are unavailable.");
     if (s.agent === "pi") { await this.piRpc(s, "validate_images"); await this.attachments.resolve(s.controlId, message.attachments); }
     else if (s.agent === "shell") throw new Error("Use an agent chat for image attachments.");
-    else if (s.agent === "google") throw new Error("Antigravity streaming accepts text. Attach a file reference or use Native CLI for images.");
+    else if (s.agent === "google") await this.attachments.resolve(s.controlId, message.attachments);
     else await (await ensureRuntime(this, s)).validateImages(message.attachments);
   }
   submit(id, message) { return this.get(id).messageQueue.submit(message); }
