@@ -435,7 +435,7 @@ export default function App() {
       notify(e.message);
     }
   };
-  const removeProject = (project: Project) => {
+  const archiveProject = (project: Project) => {
     const remaining = projectsRef.current.filter((p) => !p.hidden && !sameProject(p.root, project.root));
     setProjects((old) => old.map((p) => sameProject(p.root, project.root) ? { ...p, hidden: true } : p));
     if (sameProject(rootRef.current, project.root)) {
@@ -445,7 +445,7 @@ export default function App() {
       setSelectedRoot(existing && !existing.projectless ? existing.root : "");
       if (!existing && next) void openWorkspace(next.root);
     }
-    notify(`${project.name} removed from the sidebar. Chats stay available and running sessions continue. Open the folder again to return.`);
+    notify(`${project.name} archived. Restore it from Archived projects in the sidebar. Chats and running sessions are kept.`);
   };
   useEffect(() => {
     let alive = true;
@@ -1236,7 +1236,7 @@ export default function App() {
         {visibleSidebar && (
           <>
             <aside id="projects-sidebar" aria-label="Projects and chats" className="sidebar projects-panel" style={{ width: sidebarWidth }}>
-              <ProjectSidebar projects={projects.filter((p) => !p.hidden)} activeRoot={root} ready={loaded} onCollapse={hideProjects}
+              <ProjectSidebar projects={projects} activeRoot={root} ready={loaded} onCollapse={hideProjects}
                 tabs={tabs} activeId={activeId} settings={settings} {...tabActions} onLayout={toggleChatLayout} newChatRoot={agentMenu ? agentMenuRoot : undefined}
                 onNewChat={(folder) => {
                   const open = () => { setAgentMenuRoot(folder); setAgentMenu(true); };
@@ -1244,7 +1244,7 @@ export default function App() {
                 }}
                 counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root)).length]))}
                 onOpen={(project) => { void openWorkspace(project.root); }} onAdd={() => setDialog("open")} onTerminal={() => { void addTab("shell", "rich", ""); }} onScratch={startWithoutWorkspace}
-                onChange={(next) => setProjects((old) => [...next, ...old.filter((p) => p.hidden)])} onRemove={removeProject} />
+                onChange={setProjects} onArchive={archiveProject} />
             </aside>
             <div
               className="resizer sidebar-resizer"
