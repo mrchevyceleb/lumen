@@ -29,7 +29,7 @@ export default function QueuedMessages({ tab, onConfig }: { tab: Tab; onConfig: 
     <div className="queue-list">{messages.map((m) => <div className="queue-message" key={m.id}>
       <p title={m.text}>{m.text}{!!m.attachments?.length && <span> · {m.attachments.length} image(s)</span>}{m.deliveryUncertain && <strong> · Delivery uncertain; inspect history before resending</strong>}</p><div>
         {m.state !== "queued" ? <span>{m.state === "steering" ? "Sending to active run…" : "Sending…"}</span> : <>
-          <button disabled={busy || m.deliveryUncertain || tab.phase === "compacting" || (tab.agent === "google" && tab.busy)} title={tab.busy ? "Add a correction to the running turn. The CLI may place it beside tool output and may not give it a separate answer. Leave questions queued for the next turn." : "Send this message now."} onClick={() => void action(m.id, "steer")}>{tab.busy ? "Steer correction" : "Send now"}</button>
+          {tab.agent === "google" && tab.busy ? <span>{m.deliveryUncertain ? "Check delivery before resending" : tab.queuePaused ? "Queue paused" : "Gemini sends after this turn"}</span> : <button disabled={busy || m.deliveryUncertain || tab.phase === "compacting"} title={tab.busy ? "Add a correction to the running turn. The CLI may place it beside tool output and may not give it a separate answer. Leave questions queued for the next turn." : "Send this message now."} onClick={() => void action(m.id, "steer")}>{tab.busy ? "Steer correction" : "Send now"}</button>}
           <button disabled={busy} onClick={() => void action(m.id, "edit")}>Edit</button>
           <button disabled={busy} aria-label="Remove queued message" onClick={() => void action(m.id, "remove")}><X size={12} /></button>
         </>}

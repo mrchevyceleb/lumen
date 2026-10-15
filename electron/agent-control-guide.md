@@ -51,7 +51,7 @@ $task = Invoke-RestMethod ($connection.url + '/v1/tasks') -Method Post -Headers 
 Invoke-RestMethod ($connection.url + '/v1/tasks/' + $task.id) -Headers $headers
 ```
 
-Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON objects with `Content-Type: application/json`. Successful responses are JSON. Errors return `{ "error": "..." }` with a non-2xx HTTP status. Lumen returns 503 while restoring chats, 409 for a busy/incompatible task, 404 for closed/missing tasks, 504 for an uncertain operation timeout. Model/provider errors stay visible in the transcript. Queue and steer use native adapters for each CLI, including their normal failure/paused-queue behavior.
+Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON objects with `Content-Type: application/json`. Successful responses are JSON. Errors return `{ "error": "..." }` with a non-2xx HTTP status. Lumen returns 503 while restoring chats, 409 for a busy/incompatible task, 404 for closed/missing tasks, 504 for an uncertain operation timeout. Model/provider errors stay visible in the transcript. Queue and steer use native adapters for each CLI, including their normal failure/paused-queue behavior. Gemini supports queued follow-ups but not live steering: a busy-task `steer` request is rejected without changing its queue or delivery state. Once idle, `steer` sends the selected queued message next.
 
 | Method / route | Body / result |
 | --- | --- |

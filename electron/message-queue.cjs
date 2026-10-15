@@ -50,6 +50,7 @@ class MessageQueue {
     if (action === "remove") { if (entry.deliveryUncertain) this.owner.event(this.s, { type: "message-delivery-state", messageId: entry.id, deliveryState: "uncertain" }); this.items = this.items.filter((m) => m !== entry); this.emit(); return this.state(); }
     if (action !== "steer") throw new Error("Unknown queue action.");
     if (!this.s.busy) { this.items = [entry, ...this.items.filter((m) => m !== entry)]; this.paused = false; this.emit(); void this.drain(); return this.state(); }
+    if (this.s.agent === "google") throw new Error("Gemini does not support steering. This message stays queued for after the current turn.");
     this.pending = true; entry.state = "steering"; this.emit();
     try {
       await this.owner.steer(this.s, entry);
