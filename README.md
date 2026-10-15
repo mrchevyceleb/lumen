@@ -101,6 +101,8 @@ PowerShell profiles load by default, including aliases, wrapper functions, and e
 
 Paste a clipboard image, choose PNG/JPEG/WebP files with the attachment button, or drop them onto the composer. Preview and remove attachments before sending. Images travel with drafts, queued messages, and steering; Lumen sends real image content and checks model support before submission. Images are stored in Lumen’s local app data, with a 20 MB total limit per message.
 
+Paste a recording copied from Windows Snipping Tool or Explorer, or attach/drop an MP4, WebM, MOV, MKV, AVI, or M4V file. Lumen keeps a local copy (up to 500 MB per video) and inserts its file reference into your draft so the agent can access it with its tools. Video references travel with the message text, including queued messages; they are not sent as image content. Ordinary pasted web links remain text.
+
 **Restore sessions on launch** is enabled by default. The main process journals transcripts and input state and writes atomic snapshots with a backup. After an abrupt exit, update, or administrator restart, Lumen restores tabs, the selected view, conversation IDs, account binding, cwd, settings, drafts, images, and queues. Agents reconnect and wait for your next action; interrupted turns offer **Continue**. Queues stay paused. Uncertain delivery is checked against available provider history and is never automatically resent.
 
 Missing accounts, folders, or provider session files leave a retained chat with a recovery error and retry action. Lumen never replaces a failed resume with a fresh conversation. Reboots restore agent history, not destroyed shell processes or shell variables. Recovery starts when Lumen opens; Windows startup registration is separate.

@@ -63,6 +63,7 @@ export interface Entry {
   path: string;
   directory: boolean;
 }
+export interface AttachmentImport { images: ImageAttachment[]; references: string[] }
 export interface Message {
   id: string;
   role: "user" | "assistant" | "tool" | "error" | "notice";

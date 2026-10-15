@@ -56,6 +56,7 @@ import {
   type SignInProfile,
   type AdministratorStatus,
   type ImageAttachment,
+  type AttachmentImport,
   type BrowserPage,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
@@ -750,12 +751,16 @@ export default function App() {
       clearTimeout(fallback);
     };
   }, []);
-  const addImages = async (source: "clipboard" | "choose" | string[]) => {
+  const addAttachments = async (source: "clipboard" | "choose" | string[]) => {
     if (!active || active.agent === "shell") return;
     const target = active.id;
     try {
-      const imported = source === "clipboard" ? await api<ImageAttachment | null>("attachments:paste", target).then((image) => image ? [image] : []) : source === "choose" ? await api<ImageAttachment[]>("attachments:choose", target) : await api<ImageAttachment[]>("attachments:import", target, source);
-      setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), ...imported].slice(0, 8) } : tab));
+      const imported = source === "clipboard" ? await api<AttachmentImport>("attachments:paste", target) : source === "choose" ? await api<AttachmentImport>("attachments:choose", target) : await api<AttachmentImport>("attachments:import", target, source);
+      if (!imported.images.length && !imported.references.length) return;
+      setTabs((old) => old.map((tab) => tab.id === target ? { ...tab,
+        draftAttachments: [...(tab.draftAttachments || []), ...imported.images].slice(0, 8),
+        draft: [tab.draft, ...imported.references.map((file) => `Video file: ${file}`)].filter(Boolean).join("\n\n"),
+      } : tab));
       await settleControl();
       await persist();
     } catch (error: any) { notify(error.message); }
@@ -1341,9 +1346,9 @@ export default function App() {
                       onFollowFolder={openWorkspace}
                       onNative={(draft) => typeof draft === "string" ? openNativeCommand(draft) : switchView()}
                       attachment={attachment}
-                      onAttach={() => void addImages("choose")}
-                      onPasteImage={() => void addImages("clipboard")}
-                      onDropImages={(files) => void addImages(files)}
+                      onAttach={() => void addAttachments("choose")}
+                      onPasteAttachments={() => void addAttachments("clipboard")}
+                      onDropAttachments={(files) => void addAttachments(files)}
                       onTerminal={() => {
                         if (["claude", "grok"].includes(active.agent) && !active.nativeOwned && !active.terminalId) { void switchView(); return; }
                         setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, terminalOpen: true, terminalReady: !tab.terminalId || tab.terminalReady } : tab));

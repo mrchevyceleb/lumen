@@ -73,8 +73,8 @@ export default function Conversation({
   onDetach,
   onConfig,
   onSignIn,
-  onPasteImage,
-  onDropImages,
+  onPasteAttachments,
+  onDropAttachments,
   onTerminal,
   onForceStop,
   onContinue,
@@ -94,8 +94,8 @@ export default function Conversation({
   onDetach: () => void;
   onConfig: (change: Partial<Tab>) => void;
   onSignIn: () => void;
-  onPasteImage: () => void;
-  onDropImages: (files: string[]) => void;
+  onPasteAttachments: () => void;
+  onDropAttachments: (files: string[]) => void;
   onTerminal: () => void;
   onForceStop: () => void;
   onContinue: () => void;
@@ -241,7 +241,7 @@ export default function Conversation({
   const compactLabel = tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()} tokens` : "Auto-compact · CLI default";
   return (
     <div className={`conversation ${settings.compact ? "compact" : ""}`} onDragOver={(event) => { if (tab.agent !== "shell" && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
-      onDrop={(event) => { if (tab.agent === "shell") return; event.preventDefault(); const files = Array.from(event.dataTransfer.files).map((file) => window.lumen.filePath(file)).filter(Boolean); if (files.length) onDropImages(files); }}>
+      onDrop={(event) => { if (tab.agent === "shell") return; event.preventDefault(); const files = Array.from(event.dataTransfer.files).map((file) => window.lumen.filePath(file)).filter(Boolean); if (files.length) onDropAttachments(files); }}>
       {tab.recoveryError && <div className="recovery-banner" role="alert"><span>{tab.recoveryError}</span><button onClick={onReconnect}>Retry connection</button></div>}
       {tab.nativeOwned && <div className="recovery-banner"><span>Native CLI is still open. Exit it when ready; Readable will reconnect to this conversation.</span><button onClick={onTerminal}>Show terminal</button></div>}
       {tab.interrupted && !tab.busy && !tab.recoveryError && <div className="recovery-banner"><span>{tab.agent === "shell" ? "This shell was interrupted. Open its terminal or enter a new command." : "This turn was interrupted. Your conversation is restored."}</span><button onClick={tab.agent === "shell" ? onTerminal : onContinue}>{tab.agent === "shell" ? "Open terminal" : "Continue"}</button></div>}
@@ -417,7 +417,12 @@ export default function Conversation({
             }
             value={input}
             disabled={(tab.busy && tab.agent === "shell") || submitting || tab.nativeOwned || !!tab.recoveryError}
-            onPaste={(event) => { if (tab.agent !== "shell" && Array.from(event.clipboardData.items).some((item) => item.type.startsWith("image/"))) { event.preventDefault(); onPasteImage(); } }}
+            onPaste={(event) => {
+              if (tab.agent === "shell") return;
+              if (event.clipboardData.files.length || Array.from(event.clipboardData.items).some((item) => item.kind === "file") || !event.clipboardData.getData("text/plain")) {
+                event.preventDefault(); onPasteAttachments();
+              }
+            }}
             onChange={(e) => { historyPosition.current = -1; setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => setFocused(true)}
@@ -469,7 +474,7 @@ export default function Conversation({
           </div>
           <div className="composer-toolbar">
               {tab.agent !== "shell" && <IconButton
-                label="Attach images"
+                label="Attach images or videos"
                 onClick={onAttach}
               >
                 <Paperclip size={16} />
