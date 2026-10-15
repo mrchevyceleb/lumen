@@ -28,9 +28,11 @@ export interface ModelOption {
   efforts: EffortOption[]; defaultEffort?: string;
 }
 export interface ModelCatalog {
+  sourceKey?: string;
   models: ModelOption[]; currentModel: string; currentEffort: string; currentMode?: string;
   currentEfforts?: EffortOption[]; favorites?: string[];
   shortcuts?: Record<string, string[]>;
+  warning?: string;
 }
 export interface GitFile {
   path: string;
@@ -142,6 +144,7 @@ export interface Doc {
 export interface AgentConfig {
   command: string;
   model: string;
+  modelName?: string;
   effort?: string;
   extraArgs: string[];
   color: string;
@@ -176,6 +179,7 @@ export interface Settings {
   agents: Record<Agent, AgentConfig>;
 }
 export interface SessionEvent {
+  catalog?: ModelCatalog;
   id: string;
   type: string;
   phase?: "waiting" | "finishing" | "compacting";

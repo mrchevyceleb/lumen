@@ -11,6 +11,8 @@ const { installZoom } = require("./zoom.cjs");
 const { openPaths, resolveOpenPath } = require("./launch.cjs");
 const { createUpdates } = require("./updates.cjs");
 const { Accounts } = require("./accounts.cjs");
+const { DefaultModels } = require("./default-models.cjs");
+const { ModelCache } = require("./model-cache.cjs");
 const { AgentControl } = require("./agent-control.cjs");
 const { createAdministrator, restoreRestartProfile, waitForRestartParent } = require("./administrator.cjs");
 const { RecoveryStore } = require("./recovery.cjs");
@@ -25,7 +27,7 @@ const startup = waitForRestartParent().then(() => {
   if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) { app.exit(0); return false; }
   return true;
 });
-let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments, browser;
+let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments, browser, defaultModels, modelCache;
 let restartForUpdate = false;
 let restartForAdministrator = false, administratorRestartPending = false;
 const administrator = createAdministrator(app);
@@ -75,10 +77,13 @@ startup.then(async (start) => {
   await accounts.init();
   recovery = new RecoveryStore(dataDir);
   attachments = new Attachments(dataDir);
+  modelCache = new ModelCache(dataDir, accounts);
   sessions = new Sessions(workspace, dataDir, (event) => {
     if (window && !window.isDestroyed())
       window.webContents.send("session:event", event);
-  }, accounts, recovery, attachments);
+  }, accounts, recovery, attachments, modelCache);
+  defaultModels = new DefaultModels(sessions, accounts, resolveLauncher, modelCache);
+  handle("agents:models", (config, refresh) => defaultModels.list(config, refresh));
   handle("recovery:load", () => recovery.load());
   handle("recovery:save", (value) => recovery.saveWorkspace(value));
   handle("recovery:update", (controlId, changes) => recovery.update(controlId, changes));
@@ -109,8 +114,11 @@ startup.then(async (start) => {
     if (chats.some((s) => s.busy || s.stopping || s.transitioning || s.setting || s.nativeStart || s.mode === "native"))
       throw new Error("Finish this account's running turns and switch its native terminals to readable view before signing in.");
     const release = accounts.reserveLogin(agent, accountId);
+    modelCache.invalidate(agent);
+    for (const s of chats) { clearTimeout(s.catalogWarmTimer); s.catalog = null; s.catalogAt = 0; s.catalogCached = false; }
     for (const s of chats) { s.authInvalid = true; s.authChanged = true; s.claudeAuthInvalid = true; s.claudeAuthChanged = true; s.setting = true; }
     try {
+      await defaultModels.invalidate(agent);
       for (const s of chats) {
         await sessions.cancelDiscovery(s);
         const child = s.process;
@@ -360,9 +368,11 @@ app.on("window-all-closed", async () => {
   await agentControl?.stop().catch(() => {});
   accounts?.dispose();
   try {
+    await defaultModels?.close();
     await sessions?.closeAll();
   } catch {}
   try { recovery?.flush(); } catch {}
+  modelCache?.flush();
   updates?.dispose();
   if (restartForUpdate && updates?.install()) return;
   app.quit();

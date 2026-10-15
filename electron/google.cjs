@@ -10,10 +10,23 @@ const variant = (id) => {
 };
 const modelOptions = (s) => s.model ? ["--model", s.model] : [];
 
-async function modelCatalog(s, launch) {
-  let stdout;
-  try { ({ stdout } = await execute(launch.file, launch.args, { cwd: s.cwd, env: s.profileEnvironment, windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 })); }
-  catch (error) { throw new Error((error.stderr || error.stdout || error.message).trim()); }
+async function modelCatalog(s, launch, kill = async (child) => { child.kill(); }) {
+  let stdout, timer;
+  const pending = execute(launch.file, launch.args, { cwd: s.cwd, env: s.profileEnvironment, windowsHide: true, maxBuffer: 1024 * 1024 });
+  s.discoveryChild = pending.child;
+  pending.finally(() => { if (s.discoveryChild === pending.child) s.discoveryChild = null; }).catch(() => {});
+  const timedOut = () => new Error("Google's model list timed out. You can still send messages with your selected model or CLI default. Retry the model list when Google responds.");
+  try {
+    ({ stdout } = await Promise.race([pending, new Promise((_, reject) => {
+      timer = setTimeout(() => { void kill(pending.child).catch(() => {}); reject(timedOut()); }, 15000);
+    })]));
+  } catch (error) {
+    if (error.killed || error.code === "ETIMEDOUT") throw timedOut();
+    const detail = (error.stderr || error.stdout || "").replace(/^Fetching available models\.\.\.\s*/gim, "").trim();
+    throw new Error(detail || error.message);
+  } finally {
+    clearTimeout(timer);
+  }
   const models = stdout.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/\r?\n/).flatMap((line) => {
     const match = line.trim().match(/^([a-z0-9][a-z0-9_.:/-]+)(?:\t+| {2,})(.+)$/);
     return match ? [{ id: match[1], name: match[2].trim(), description: "Google Antigravity", efforts: [], defaultEffort: variant(match[1]).effort }] : [];

@@ -40,7 +40,8 @@ async function discoverCommands(s, launcher, kill) {
       const handle = (e) => {
         if (s.agent === "pi" && e.type === "response" && e.id === requestId) {
           if (!e.success) throw new Error(e.error || "Pi could not list commands.");
-          finish(null, { commands: normalize(e.data?.commands, "pi"), origin: "Pi RPC" });
+          finish(null, s.modelsOnly ? { commands: [], origin: "Pi RPC", catalog: catalog("pi", e.data?.models, { currentModel: "", currentEffort: "" }) } :
+            { commands: normalize(e.data?.commands, "pi"), origin: "Pi RPC" });
         }
         if (s.agent === "claude" && e.type === "control_response" && e.response?.request_id === requestId) {
           if (e.response.subtype === "error") throw new Error(e.response.error || "Claude could not list commands.");
@@ -53,7 +54,7 @@ async function discoverCommands(s, launcher, kill) {
         if (s.agent === "codex") {
           if (e.id === 1) {
             send({ method: "initialized" });
-            send({ id: 2, method: "skills/list", params: { cwds: [s.root], forceReload: true } });
+            if (!s.modelsOnly) send({ id: 2, method: "skills/list", params: { cwds: [s.root], forceReload: true } });
             send({ id: 3, method: "config/read", params: { cwd: s.root, includeLayers: false } });
             send({ id: codexPage, method: "model/list", params: { limit: 100 } });
           }
@@ -69,7 +70,7 @@ async function discoverCommands(s, launcher, kill) {
             if (e.result?.nextCursor && codexPage < 60) send({ id: ++codexPage, method: "model/list", params: { limit: 100, cursor: e.result.nextCursor } });
             else codexModels.ready = true;
           }
-          if (codexCommands && codexConfig && codexModels.ready) finish(null, { commands: codexCommands, origin: "Codex CLI", warning: codexWarning,
+          if ((codexCommands || s.modelsOnly) && codexConfig && codexModels.ready) finish(null, { commands: codexCommands || [], origin: "Codex CLI", warning: codexWarning,
             catalog: catalog("codex", codexModels, { currentModel: s.model || codexConfig.model || "",
               currentEffort: s.effort || codexConfig.model_reasoning_effort || "" }) });
         }
@@ -86,7 +87,7 @@ async function discoverCommands(s, launcher, kill) {
           if (e.id === 3) { grokReady = true; grokInfo = e.result; }
           // Grok announces a preliminary list before the working folder finishes
           // loading. Use the latest inventory once session/new is complete.
-          if (grokReady && grokCommands) finish(null, { commands: normalize(grokCommands, "grok"), origin: "Grok ACP",
+          if (grokReady && (grokCommands || s.modelsOnly)) finish(null, { commands: normalize(grokCommands || [], "grok"), origin: "Grok ACP",
             catalog: catalog("grok", grokInfo.models?.availableModels, { currentModel: s.model || grokInfo.models?.currentModelId || "",
               currentEffort: s.effort || grokInfo.configOptions?.find((o) => o.id === "reasoning_effort")?.currentValue || "",
               currentMode: s.workMode || "" }) });
@@ -107,7 +108,7 @@ async function discoverCommands(s, launcher, kill) {
         }
         if (buffer.length > 8 * 1024 * 1024) finish(new Error("The CLI returned an oversized command list."));
       });
-      if (s.agent === "pi") send({ id: requestId, type: "get_commands" });
+      if (s.agent === "pi") send({ id: requestId, type: s.modelsOnly ? "get_available_models" : "get_commands" });
       if (s.agent === "claude") send({ type: "control_request", request_id: requestId, request: { subtype: "initialize" } });
       if (s.agent === "codex") send({ id: 1, method: "initialize", params: { clientInfo: { name: "lumen", version: "0.1.4" } } });
       if (s.agent === "grok") send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "lumen", version: "0.1.4" } } });
