@@ -13,6 +13,7 @@ const { accountEnvironment } = require("./accounts.cjs");
 const { MessageQueue } = require("./message-queue.cjs");
 const { prepareProfile, profiledLaunch } = require("./profile-launcher.cjs");
 const { TerminalState } = require("./terminal-state.cjs");
+const sharedPrompts = require("./shared-prompts.cjs");
 const OMIT = new Set([
   ".git",
   "node_modules",
@@ -665,11 +666,14 @@ class Sessions {
     const s = this.get(id);
     if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before refreshing commands.");
     if (s.agent === "shell") return { commands: [], origin: "Shell" };
-    if (s.agent === "google") return { commands: [], origin: "Antigravity CLI", warning: "Installed Antigravity skills and slash commands expand when sent. Use the model picker for Google models." };
+    const shared = await sharedPrompts.commands();
+    const withShared = (result) => ({ ...result, commands: sharedPrompts.merge(shared, result.commands) });
+    if (s.agent === "google") return withShared({ commands: [], origin: "Shared prompts and Antigravity CLI" });
     if (s.discoveryPromise) return s.discoveryPromise;
-    if (!refresh && s.commands && Date.now() - s.commandsAt < 60000) return s.commands;
+    if (!refresh && s.commands && Date.now() - s.commandsAt < 60000) return withShared(s.commands);
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode === "native") {
-      if (s.commands) return s.commands;
+      if (s.commands) return withShared(s.commands);
+      if (shared.length) return withShared({ commands: [], origin: "Shared prompts" });
       throw new Error("Finish this turn or return to readable view to discover commands.");
     }
     s.discoveryPromise = (async () => {
@@ -688,9 +692,13 @@ class Sessions {
       if (!this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Command discovery was canceled.");
       s.commands = result;
       s.commandsAt = Date.now();
-      return result;
+      return withShared(result);
     })();
     try { return await s.discoveryPromise; }
+    catch (error) {
+      if (shared.length) return withShared({ commands: [], origin: "Shared prompts", warning: `Native command discovery failed: ${error.message}` });
+      throw error;
+    }
     finally { s.discoveryPromise = null; }
   }
   async cancelDiscovery(s) {
@@ -1122,7 +1130,7 @@ class Sessions {
     this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], delivery: "send", deliveryState: "sending" });
     try {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
-      else await this.agentTurn(s, prompt, queuedMessage);
+      else await this.agentTurn(s, await sharedPrompts.expand(prompt), queuedMessage);
       if (queuedMessage) this.event(s, { type: "message-delivered", messageId: queuedMessage.id });
     } catch (error) {
       if (queuedMessage) this.event(s, { type: "user-message-retracted", messageId: queuedMessage.id });
