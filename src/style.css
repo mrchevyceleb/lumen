@@ -3227,6 +3227,16 @@ kbd {
 .picker-note { color: var(--muted); font-size: 11px; line-height: 1.6; margin: 15px 2px 0; }
 .model-picker-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding-top: 16px; margin-top: 18px; color: var(--muted); font-size: 11px; }
 .model-picker-footer button { background: transparent; color: var(--accent); }
+.model-picker-body { padding: 20px 28px 24px; overflow: auto; min-height: 0; }
+.default-model-trigger { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 12px; }
+.default-model-trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.default-model-trigger > svg { flex-shrink: 0; color: var(--muted); }
+.default-model-options { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.default-model-options .model-search-row { padding-bottom: 8px; }
+.default-model-options .model-options { max-height: 260px; }
+.default-model-options .model-option { padding: 10px; }
+.default-model-options .model-option strong { font-size: 12px; }
+.default-model-options .picker-note { margin-top: 10px; }
 .plan-choices { display: flex; flex-direction: column; gap: 10px; }
 .plan-choices > button { display: flex; align-items: center; gap: 13px; color: var(--text); border: 1px solid var(--border); background: var(--surface); padding: 18px; border-radius: 12px; text-align: left; }
 .plan-choices > button:hover { border-color: var(--accent); }

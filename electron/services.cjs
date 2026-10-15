@@ -447,7 +447,7 @@ class WorkspaceService {
 }
 
 class Sessions {
-  constructor(workspaces, dataDir, emit, accounts = null, recovery = null, attachments = null) {
+  constructor(workspaces, dataDir, emit, accounts = null, recovery = null, attachments = null, modelCache = null) {
     this.workspaces = workspaces;
     this.dataDir = dataDir;
     this.emit = emit;
@@ -455,6 +455,7 @@ class Sessions {
     this.accounts = accounts;
     this.recovery = recovery;
     this.attachments = attachments;
+    this.modelCache = modelCache;
   }
   create({
     root = "",
@@ -694,7 +695,7 @@ class Sessions {
   }
   async cancelDiscovery(s) {
     this.rejectPiCommands(s, "Command discovery was canceled.");
-    if (s.discoveryChild) await this.kill(s.discoveryChild);
+    if (s.discoveryChild) await this.kill(s.discoveryChild, true);
     if (s.discoveryPromise) await s.discoveryPromise.catch(() => {});
   }
   rejectPiCommands(s, message) {
@@ -842,6 +843,25 @@ class Sessions {
     const s = this.get(id);
     if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before refreshing models.");
     if (s.agent === "shell") throw new Error("Choose an agent to use model controls.");
+    if (!refresh && s.catalogCached && s.catalog) return s.catalog;
+    if (!refresh && !s.catalog) {
+      const cached = this.modelCache?.read(s);
+      if (cached) {
+        const fresh = s.agent === "google" && Date.now() - cached.at < 60000;
+        s.catalog = { ...cached.value, warning: fresh ? undefined : "Using saved models. Checking the CLI for updates…" };
+        s.catalogCached = !fresh; s.catalogAt = cached.at;
+        // Let the renderer paint the saved list before spawning a potentially slow CLI.
+        if (!fresh) s.catalogWarmTimer = setTimeout(() => {
+          if (!this.sessions.has(id) || s.stopping) return;
+          void this.models(id, true).catch((error) => {
+            if (!this.sessions.has(id) || s.stopping) return;
+            s.catalog = { ...s.catalog, warning: "Using saved models. " + error.message };
+            this.emit({ id, type: "models", catalog: s.catalog });
+          });
+        }, 100);
+        return s.catalog;
+      }
+    }
     if (s.catalogPromise) return s.catalogPromise;
     if (!refresh && s.catalog && Date.now() - s.catalogAt < 60000) return s.catalog;
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") {
@@ -860,7 +880,11 @@ class Sessions {
           shortcuts: piShortcuts() });
       } else if (s.agent === "google") {
         await this.prepareLaunch(s);
-        info = await require("./google.cjs").modelCatalog(s, profiledLaunch(s, ["models"], resolveLauncher));
+        try { info = await require("./google.cjs").modelCatalog(s, profiledLaunch(s, ["models"], resolveLauncher), (child) => this.kill(child, true)); }
+        catch (error) {
+          if (!s.catalog) throw error;
+          info = { ...s.catalog, warning: "Using the last available model list. " + error.message };
+        }
         s.effort = info.currentEffort;
         this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       } else if (s.agent === "codex") {
@@ -868,7 +892,9 @@ class Sessions {
         info = catalog("codex", (await runtime.request("model/list")).data, { currentModel: s.model, currentEffort: s.effort, currentMode: s.workMode });
       } else info = (await this.commands(id, refresh)).catalog;
       if (!info || !this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Model discovery was canceled.");
-      s.catalog = info; s.catalogAt = Date.now();
+      s.catalog = info; s.catalogAt = Date.now(); s.catalogCached = !!info.warning;
+      if (!info.warning) this.modelCache?.remember(s, info);
+      this.emit({ id, type: "models", catalog: info });
       return info;
     })();
     try { return await s.catalogPromise; } finally { s.catalogPromise = null; }
@@ -877,7 +903,7 @@ class Sessions {
     const s = this.get(id);
     const previousModel = s.model;
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") throw new Error("Finish this turn before changing its controls.");
-    const info = await this.models(id);
+    const info = await this.models(id, !!s.catalogCached && s.agent !== "google");
     if (s.busy || s.stopping || s.transitioning || s.setting || !this.sessions.has(id)) throw new Error("This chat is busy or closing.");
     s.setting = true;
     try {
@@ -945,7 +971,9 @@ class Sessions {
     this.recovery?.event(s, event);
     this.emit({ id: s.id, ...event });
   }
-  prepareLaunch(s) { return prepareProfile(s, this.dataDir, findExecutable, resolveLauncher); }
+  prepareLaunch(s) {
+    return s.launchPreparation ||= prepareProfile(s, this.dataDir, findExecutable, resolveLauncher).finally(() => { s.launchPreparation = null; });
+  }
   async startNative(id) {
     const s = this.get(id);
     if (s.nativeStart) return s.nativeStart;
@@ -1068,7 +1096,7 @@ class Sessions {
   }
   async send(id, prompt, queuedMessage) {
     const s = this.get(id);
-    if (s.stopping || s.stopRequested || s.transitioning || s.setting || s.catalogPromise)
+    if (s.stopping || s.stopRequested || s.transitioning || s.setting || (s.catalogPromise && s.agent !== "google"))
       throw new Error(
         "This session is stopping. Wait a moment before continuing.",
       );
@@ -1277,9 +1305,7 @@ class Sessions {
   async agentTurn(s, prompt, message = {}) {
     if (s.agent === "google") {
       await this.prepareLaunch(s);
-      const google = require("./google.cjs");
-      await google.modelCatalog(s, profiledLaunch(s, ["models"], resolveLauncher));
-      return google.turn(this, s, prompt, message);
+      return require("./google.cjs").turn(this, s, prompt, message);
     }
     if (s.agent === "pi") {
       await this.ensurePiPolicy(s);
@@ -1776,6 +1802,7 @@ class Sessions {
     const s = this.sessions.get(id);
     if (!s) return;
     clearTimeout(s.progressTimer);
+    clearTimeout(s.catalogWarmTimer);
     clearTimeout(s.stopTimer);
     clearInterval(s.nativeHistoryTimer);
     s.stopping = true;

@@ -28,9 +28,10 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
   useEffect(() => {
     alive.current = true;
     api<Record<string, string[]>>("session:shortcuts", tab.id).then((value) => { if (alive.current) setShortcuts(value); }).catch(() => {});
-    return () => { alive.current = false; };
+    const unsubscribe = window.lumen.onSession((event) => { if (event.id === tab.id && event.type === "models" && event.catalog) setInfo(event.catalog); });
+    return () => { alive.current = false; unsubscribe(); };
   }, [tab.id]);
-  useEffect(() => { onPending(loading || applying); }, [loading, applying]);
+  useEffect(() => { onPending(applying || (loading && tab.agent !== "google")); }, [loading, applying, tab.agent]);
   const load = async (refresh = false) => {
     if (inFlight.current) return;
     inFlight.current = true; setLoading(true); setError("");
@@ -108,9 +109,12 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
       <ListChecks size={13} /><span>{workMode === "plan" ? "Plan" : "Mode"}</span><ChevronDown size={12} />
     </button>
     {!panel && (loading || applying || error) && <span className={error ? "control-error" : "control-status"} role="status">{error || "Updating controls…"}</span>}
+    {!panel && error && <button className="text-button" disabled={loading} onClick={() => void load(true)}>Retry models</button>}
+    {!panel && !loading && !error && info?.warning && <span className="control-status" role="status">{info.warning}</span>}
     {panel && <Modal title={panel === "model" ? "Choose a model" : panel === "effort" ? "Thinking & effort" : "Plan before building"}
       subtitle={`${agentNames[tab.agent]} · ${panel === "plan" ? "Choose the CLI's planning workflow." : "Apply to this conversation. Your draft and history stay here."}`}
       onClose={() => { if (!applying) setPanel(null); }}>
+      <div className="model-picker-body">
       {panel !== "plan" ? <>
         <div className="model-search-row">
           {panel === "model" && <label className="model-search"><Search size={16} /><input autoFocus placeholder="Search models or providers…" aria-label="Search models" value={query}
@@ -135,6 +139,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
             </button>)}
         </div>
         {tab.agent === "pi" && <p className="picker-note">Favorites come from Pi's scoped model list. Your model and thinking shortcuts work in readable view.</p>}
+        {info?.warning && <p className="picker-note" role="status">{info.warning}</p>}
         <p className="picker-note">{applying ? "Applying to your chat…" : "Native CLI options · changes apply to the next turn"}</p>
       </> : <div className="plan-choices">
         {["claude", "grok", "codex", "google"].includes(tab.agent) ? <>
@@ -147,6 +152,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
       </div>}
       {error && <p className="inline-error" role="alert">{error}</p>}
       <div className="model-picker-footer"><span>{panel === "model" ? "↑↓ navigate · Enter select" : "Tab navigate · Enter select"}</span><button disabled={applying} onClick={() => { setPanel(null); onNative(); }}>Open native view ↗</button></div>
+      </div>
     </Modal>}
   </div>;
 }

@@ -20,6 +20,7 @@ import type { Settings, Agent, AgentConfig } from "./types";
 import GoogleSetup from "./GoogleSetup";
 import UpdatesPanel from "./UpdatesPanel";
 import AccountsPanel from "./AccountsPanel";
+import DefaultModelPicker from "./DefaultModelPicker";
 import AgentControlPanel from "./AgentControlPanel";
 import AdministratorPanel from "./AdministratorPanel";
 import type { AdministratorStatus } from "./types";
@@ -351,16 +352,9 @@ export default function SettingsPanel({
                       placeholder={agent}
                     />
                   </label>
-                  <label className="field">
-                    <span>
-                      Model <small>optional · CLI default when blank</small>
-                    </span>
-                    <input
-                      value={s.agents[agent].model}
-                      onChange={(e) => agentSet(agent, "model", e.target.value)}
-                      placeholder="Use my CLI default"
-                    />
-                  </label>
+                  <DefaultModelPicker agent={agent} config={s.agents[agent]} loadShellProfile={s.loadShellProfile}
+                    onChange={(model) => update({ ...s, agents: { ...s.agents, [agent]: { ...s.agents[agent],
+                      model: model?.id || "", modelName: model?.name || "", effort: model?.defaultEffort || "" } } })} />
                   <ArgsField
                     value={s.agents[agent].extraArgs}
                     onChange={(value) => agentSet(agent, "extraArgs", value)}
