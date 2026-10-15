@@ -1108,7 +1108,6 @@ class Sessions {
       throw new Error("Type directly into the terminal.");
     if (s.nativeOwned && s.pty) throw new Error("The native CLI still owns this conversation. Exit it when ready; Readable will reconnect to the same saved session.");
     await this.validateMessage(s, queuedMessage || { text: prompt });
-    this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], delivery: "send", deliveryState: "sending" });
     s.busy = true;
     s.phase = undefined;
     s.activeTools = new Set();
@@ -1120,6 +1119,7 @@ class Sessions {
     s.piPromptId = undefined;
     s.piCommandFailed = false;
     this.event(s, { type: "start", turn: s.turn });
+    this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], delivery: "send", deliveryState: "sending" });
     try {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
       else await this.agentTurn(s, prompt, queuedMessage);

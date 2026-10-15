@@ -526,7 +526,7 @@ function MessageView({
     return (
       <div className="user-message">
         {!!m.attachments?.length && <div className="message-images">{m.attachments.map((image) => <img key={image.id} src={image.preview} alt={image.name} />)}</div>}
-        <div>{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Steered into active run</span>}<LinkText text={m.text} onWeb={onWeb} onError={onError} /></div>
+        <div>{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Added during run · separate answer not guaranteed</span>}<LinkText text={m.text} onWeb={onWeb} onError={onError} /></div>
         <CopyButton text={m.text} />
       </div>
     );

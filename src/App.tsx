@@ -674,7 +674,7 @@ export default function App() {
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
             else if (e.type === "context") { t.contextTokens = e.contextTokens; t.contextWindow = e.contextWindow; t.contextStale = false; }
             else if (e.type === "queue") { t.queuedMessages = e.queuedMessages; t.queuePaused = e.queuePaused; }
-            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, role: "user", text: e.text || "", attachments: e.attachments, delivery: e.delivery, deliveryState: e.deliveryState });
+            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, turn: t.turn, role: "user", text: e.text || "", attachments: e.attachments, delivery: e.delivery, deliveryState: e.deliveryState });
             else if (["message-delivered", "message-delivery-state"].includes(e.type)) t.messages = t.messages.map((message) => message.id === e.messageId ? { ...message, deliveryState: e.type === "message-delivered" ? "confirmed" : e.deliveryState } : message);
             else if (e.type === "user-message-retracted") t.messages = t.messages.filter((m) => m.id !== e.messageId);
             else if (e.type === "cwd") { t.cwd = e.cwd; t.cwdVersion = (t.cwdVersion || 0) + 1; }
