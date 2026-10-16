@@ -11,6 +11,22 @@ function grokUserText(value, text, hasImages) {
   if (!cleaned && (hasImages || cleaned !== text)) return "";
   return cleaned || null;
 }
+function isNarrationThinking(block, narrationIndexes, blockIndex) {
+  if (block?.type !== "thinking" || typeof block.thinking !== "string" || !block.thinking.trim()) return false;
+  if (Array.isArray(narrationIndexes) && Number.isInteger(blockIndex) && narrationIndexes.includes(blockIndex)) return true;
+  if (typeof block.signature !== "string" || !block.signature) return false;
+  try {
+    return Buffer.from(block.signature, "base64").includes(Buffer.from("\x42\x09narration"));
+  } catch {
+    return false;
+  }
+}
+function formatToolDetail(rawContent) {
+  if (typeof rawContent === "string") return rawContent;
+  if (Array.isArray(rawContent))
+    return rawContent.map((part) => (typeof part === "string" ? part : part?.type === "text" && typeof part.text === "string" ? part.text : JSON.stringify(part))).filter(Boolean).join("\n");
+  return rawContent != null ? JSON.stringify(rawContent) : "";
+}
 async function sessionFile(session) {
   if (!session.sessionRef) return null;
   if (session.agent === "pi") return session.sessionRef;
@@ -40,24 +56,111 @@ async function readHistory(session) {
       } catch { /* The native CLI may still be appending its last line. */ }
     }
   }
-  const messages = [];
+  const messages = [], toolsByCallId = new Map();
   for (let index = 0; index < rows.length; index++) {
-    const row = rows[index], value = ["claude", "pi"].includes(session.agent) ? row.message : row;
+    const row = rows[index];
+    if (session.agent === "claude" && (row.type !== "user" && row.type !== "assistant" || row.isMeta || row.isVisibleInTranscriptOnly || row.isCompactSummary || row.origin?.kind === "task-notification")) continue;
+    if (session.agent === "pi" && row.type && row.type !== "message") continue;
+    const value = ["claude", "pi"].includes(session.agent) ? row.message : row;
     const role = value?.role || value?.type;
-    if (!["user", "assistant", "tool_result"].includes(role)) continue;
+    if (!["user", "assistant", "tool", "tool_result", "toolResult"].includes(role)) continue;
     const content = value.content;
+    const timestamp = Date.parse(row.timestamp || row.created_at || "") || (session.agent === "grok" && Number.isInteger(value?.prompt_index) ? grokTimestamps.get(value.prompt_index) || 0 : 0);
     let hasImages = !!content?.some?.((block) => block.type === "image");
     const toolResultOnly = role === "user" && Array.isArray(content) && content.some((block) => block.type === "tool_result") && content.every((block) => block.type === "tool_result");
-    let text = typeof content === "string" ? content : Array.isArray(content) ? content.map((block) => block.type === "text" ? block.text : block.type === "tool_result" ? typeof block.content === "string" ? block.content : JSON.stringify(block.content) : "").filter(Boolean).join("\n") : "";
-    if (session.agent === "grok" && role === "user" && !toolResultOnly) {
+    if (role === "assistant") {
+      const textParts = [];
+      let textPartIndex = 0;
+      const flushAssistantText = () => {
+        const text = textParts.join("\n").trim();
+        textParts.length = 0;
+        if (!text && !hasImages) return;
+        const suffix = textPartIndex++ > 0 ? `-${textPartIndex}` : "";
+        const identity = (row.uuid || row.id ? `${row.uuid || row.id}${suffix}` : null) || crypto.createHash("sha256").update(`${session.sessionRef}:${index}:${textPartIndex}:${text}`).digest("hex");
+        messages.push({ id: row.uuid ? `${row.uuid}${suffix}` : `native-${identity}`, providerMessageId: row.uuid || row.id, timestamp, role: "assistant", text, state: "done" });
+        hasImages = false;
+      };
+      if (typeof content === "string") {
+        if (content.trim()) textParts.push(content);
+      } else if (Array.isArray(content)) {
+        for (let i = 0; i < content.length; i++) {
+          const block = content[i];
+          if (block.type === "text" && block.text) textParts.push(block.text);
+          else if (isNarrationThinking(block, row.narration_block_indexes, i)) textParts.push(block.thinking);
+          else if (block.type === "tool_use" || block.type === "toolCall") {
+            flushAssistantText();
+            const callId = block.id, inputObj = block.input ?? block.arguments ?? {};
+            const inputText = typeof inputObj === "string" ? inputObj : JSON.stringify(inputObj, null, 2);
+            const toolMsg = { id: callId ? `native-tool-${callId}` : `native-tool-${index}-${i}`, providerMessageId: row.uuid || row.id, timestamp, role: "tool", title: block.name || "Tool", text: inputText, state: "done" };
+            messages.push(toolMsg);
+            if (callId) toolsByCallId.set(callId, toolMsg);
+          }
+        }
+      }
+      flushAssistantText();
+      if (Array.isArray(value.tool_calls)) {
+        for (let i = 0; i < value.tool_calls.length; i++) {
+          const tc = value.tool_calls[i], callId = tc.id, name = tc.name || tc.function?.name || "Tool", inputObj = tc.arguments ?? tc.function?.arguments ?? {};
+          const inputText = typeof inputObj === "string" ? inputObj : JSON.stringify(inputObj, null, 2);
+          const toolMsg = { id: callId ? `native-tool-${callId}` : `native-tool-${index}-${i}`, providerMessageId: row.uuid || row.id, timestamp, role: "tool", title: name, text: inputText, state: "done" };
+          messages.push(toolMsg);
+          if (callId) toolsByCallId.set(callId, toolMsg);
+        }
+      }
+      continue;
+    }
+    if (toolResultOnly) {
+      for (const block of content) {
+        const detail = formatToolDetail(block.content);
+        const existing = block.tool_use_id ? toolsByCallId.get(block.tool_use_id) : null;
+        if (existing) {
+          if (detail) existing.text = detail;
+          existing.state = block.is_error ? "error" : "done";
+        } else if (detail) {
+          const identity = row.uuid || row.id || crypto.createHash("sha256").update(`${session.sessionRef}:${index}:${detail}`).digest("hex");
+          messages.push({ id: block.tool_use_id ? `native-tool-${block.tool_use_id}` : row.uuid || `native-${identity}`, providerMessageId: row.uuid || row.id, timestamp, role: "tool", title: "Tool result", text: detail, state: block.is_error ? "error" : "done" });
+        }
+      }
+      continue;
+    }
+    if (role === "toolResult" || role === "tool_result" || role === "tool") {
+      const detail = formatToolDetail(content);
+      const callId = value.toolCallId || value.tool_call_id;
+      const isError = !!(value.isError ?? value.is_error);
+      const toolTitle = value.toolName || value.tool_name || value.name;
+      const existing = callId ? toolsByCallId.get(callId) : null;
+      if (existing) {
+        if (detail) existing.text = detail;
+        if (toolTitle && (!existing.title || existing.title === "Tool")) existing.title = toolTitle;
+        existing.state = isError ? "error" : "done";
+      } else if (detail) {
+        const identity = row.uuid || row.id || crypto.createHash("sha256").update(`${session.sessionRef}:${index}:${detail}`).digest("hex");
+        messages.push({ id: callId ? `native-tool-${callId}` : row.uuid || `native-${identity}`, providerMessageId: row.uuid || row.id, timestamp, role: "tool", title: toolTitle || "Tool result", text: detail, state: isError ? "error" : "done" });
+      }
+      continue;
+    }
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === "tool_result") {
+          const detail = formatToolDetail(block.content);
+          const existing = block.tool_use_id ? toolsByCallId.get(block.tool_use_id) : null;
+          if (existing) {
+            if (detail) existing.text = detail;
+            existing.state = block.is_error ? "error" : "done";
+          }
+        }
+      }
+    }
+    let text = typeof content === "string" ? content : Array.isArray(content) ? content.map((block) => block.type === "text" ? block.text : "").filter(Boolean).join("\n") : "";
+    if (session.agent === "claude" && /^\[Request interrupted by user\b/.test(text.trim())) continue;
+    if (session.agent === "grok" && role === "user") {
       hasImages = hasImages || /^<image_files>[\s\S]*?<\/image_files>/.test(text);
       text = grokUserText(value, text, hasImages);
       if (text === null) continue;
     }
     if (!text && !hasImages) continue;
-    const timestamp = Date.parse(row.timestamp || row.created_at || "") || (session.agent === "grok" && Number.isInteger(value?.prompt_index) ? grokTimestamps.get(value.prompt_index) || 0 : 0);
     const identity = row.uuid || row.id || crypto.createHash("sha256").update(`${session.sessionRef}:${index}:${text}`).digest("hex");
-    messages.push({ id: row.uuid || `native-${identity}`, providerMessageId: row.uuid || row.id, timestamp, role: role === "tool_result" || toolResultOnly ? "tool" : role, text, state: "done" });
+    messages.push({ id: row.uuid || `native-${identity}`, providerMessageId: row.uuid || row.id, timestamp, role, text, state: "done" });
   }
   return { messages, file };
 }
@@ -73,4 +176,4 @@ function preserveAttachments(messages, saved = []) {
     return { ...message, attachments: previous[index].attachments || message.attachments, delivery: previous[index].delivery, deliveryState: "confirmed" };
   });
 }
-module.exports = { sessionFile, readHistory, preserveAttachments };
+module.exports = { sessionFile, readHistory, preserveAttachments, isNarrationThinking, formatToolDetail };

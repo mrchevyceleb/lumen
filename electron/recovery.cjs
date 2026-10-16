@@ -136,8 +136,8 @@ class RecoveryStore {
       const id = `${tab.turn || "init"}-${event.key || event.type}`;
       let message = tab.messages.find((value) => value.id === id);
       if (!message) { message = { id, turn: tab.turn, role: event.type === "text" ? "assistant" : event.type === "tool" ? "tool" : event.type === "error" ? "error" : "notice", text: "" }; tab.messages.push(message); }
-      message.text = event.type === "tool" ? event.detail || "" : event.type === "error" ? event.message || "" : event.replace ? event.text || "" : message.text + (event.text || "");
-      message.title = event.title || message.title; message.state = event.state;
+      message.text = event.type === "tool" ? event.detail || message.text || "" : event.type === "error" ? event.message || "" : event.replace ? event.text || "" : message.text + (event.text || "");
+      message.title = event.title === "Tool result" && message.title ? message.title : event.title || message.title; message.state = event.state;
     }
   }
   flush() {
