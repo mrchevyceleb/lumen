@@ -856,7 +856,14 @@ kbd {
   opacity: 0.7;
 }
 .vertical-chats { display: flex; flex-direction: column; gap: 2px; padding: 2px 1px 4px 27px; }
-.vertical-chats .session-tab { min-width: 0; max-width: none; min-height: 30px; border: 0; border-left: 2px solid transparent; border-radius: 5px; padding-right: 3px; }
+.vertical-chats .session-tab { min-width: 0; max-width: none; min-height: 30px; border: 0; border-left: 2px solid transparent; border-radius: 5px; padding-right: 3px; flex-wrap: wrap; }
+.vertical-chats .chat-options { display: grid; place-items: center; color: var(--muted); padding: 3px; opacity: 0; flex-shrink: 0; }
+.vertical-chats .session-tab:hover > .chat-options, .vertical-chats .session-tab:focus-within > .chat-options, .vertical-chats .session-tab.selected > .chat-options, .vertical-chats .chat-options[aria-expanded="true"] { opacity: 0.7; }
+.vertical-chats .chat-options:hover { color: var(--text); opacity: 1; }
+.vertical-chats .chat-menu { flex: 1 0 100%; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--surface); padding: 4px; border-radius: 7px; margin: 2px 0 4px; }
+.vertical-chats .chat-menu button { text-align: left; font-size: 10px; padding: 7px; border-radius: 4px; }
+.vertical-chats .chat-menu button:hover, .vertical-chats .chat-menu button:focus-visible { background: var(--border); }
+.vertical-chats .chat-rename { flex: 1; min-width: 0; font-size: 11px; padding: 4px 7px; margin: 2px 4px; }
 .vertical-chats .session-tab.selected { border-left-color: var(--tab-color); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .vertical-chats .tab-select { padding: 6px 5px 6px 7px; gap: 6px; font-size: 11px; text-align: left; }
 .vertical-chats .tab-select > span:not(.agent-mark):not(.tiny-pulse):not(.chat-phase):not(.native-tag) { flex: 1; }

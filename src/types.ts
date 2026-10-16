@@ -87,6 +87,7 @@ export interface Tab {
   accountId?: string;
   accountName?: string;
   name: string;
+  nameCustom?: boolean;
   color?: string;
   messages: Message[];
   busy: boolean;

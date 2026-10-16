@@ -410,6 +410,7 @@ export default function App() {
         agent,
         mode,
         name: resume?.name || control?.name || agentNames[agent],
+        nameCustom: resume?.nameCustom === true,
         managedBy: resume?.managedBy || control?.managedBy,
         accountId: created.accountId,
         accountName: created.accountName,
@@ -798,7 +799,7 @@ export default function App() {
           setUiRequests((old) => [...old.filter((value) => value.session !== e.id || value.request.id !== request.id), { session: e.id, request }]);
         else if (request.method === "notify") notify(request.message || "Pi notification");
         else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
-        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, name: request.title || tab.name } : tab));
+        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id && !tab.nameCustom ? { ...tab, name: request.title || tab.name } : tab));
         // Pi's footer status updates are routine, not popup notifications.
         else if (request.method === "setStatus") return;
         else if (request.method === "setWidget") {
@@ -925,7 +926,7 @@ export default function App() {
     if (action === "focus") {
       if (!tab.projectless) rememberProject(tab.root, undefined, true);
       setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
-    } else if (action === "rename") setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name: body.name } : t));
+    } else if (action === "rename") setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name: body.name, nameCustom: true } : t));
     else if (action === "close") {
       if (tab.busy || tab.queuedMessages?.length || tab.mode === "native") throw new Error("Stop this task and remove queued messages in readable view before closing it.");
       await api("session:close", tab.id);
@@ -1236,7 +1237,7 @@ export default function App() {
     setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
     if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
   };
-  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onClose: closeTab };
+  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab };
   const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
   const sessionActions = <div className="tab-actions">
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
@@ -1915,7 +1916,7 @@ export default function App() {
           onClose={() => setDialog(null)}
           onUpdate={(changes) =>
             setTabs((old) =>
-              old.map((t) => (t.id === active.id ? { ...t, ...changes } : t)),
+              old.map((t) => (t.id === active.id ? { ...t, ...changes, ...(Object.hasOwn(changes, "name") ? { nameCustom: true } : {}) } : t)),
             )
           }
           defaultColor={settings.agents[active.agent].color}
