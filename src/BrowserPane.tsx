@@ -4,8 +4,8 @@ import { api, type BrowserState } from "./types";
 import { IconButton } from "./Components";
 import "./browser.css";
 
-export default function BrowserPane({ workspace, open, blocked, width, onWidth, onClose, onAttach, canAttach, onError }: {
-  workspace: string; open: boolean; blocked: boolean; width: number; onWidth: (width: number) => void;
+export default function BrowserPane({ workspace, open, blocked, width, maxWidth, onWidth, onClose, onAttach, canAttach, onError }: {
+  workspace: string; open: boolean; blocked: boolean; width: number; maxWidth: number; onWidth: (width: number) => void;
   onClose: () => void; onAttach: (id: string) => Promise<void>; canAttach: boolean; onError: (message: string) => void;
 }) {
   const [state, setState] = useState<BrowserState>({ workspace, tabs: [], activeId: "" });
@@ -14,10 +14,13 @@ export default function BrowserPane({ workspace, open, blocked, width, onWidth, 
   const [capturing, setCapturing] = useState(false);
   const captureLock = useRef(false);
   const [dragging, setDragging] = useState(false);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const host = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
+  const onWidthRef = useRef(onWidth);
+  onWidthRef.current = onWidth;
   const current = state.workspace === workspace ? state.tabs.find((tab) => tab.id === state.activeId) : undefined;
   const action = async (body: object) => {
     try { setError(""); return await api("browser:action", body); }
@@ -77,21 +80,35 @@ export default function BrowserPane({ workspace, open, blocked, width, onWidth, 
     if (current) await action({ action: "navigate", id: current.id, url });
     else await action({ action: "open", workspace, url });
   };
+  useEffect(() => {
+    if (!open) dragCleanupRef.current?.();
+    return () => dragCleanupRef.current?.();
+  }, [open]);
   const resize = (event: React.PointerEvent<HTMLDivElement>) => {
+    dragCleanupRef.current?.();
     const element = event.currentTarget, start = event.clientX, initial = element.nextElementSibling!.getBoundingClientRect().width;
     element.setPointerCapture(event.pointerId); setDragging(true);
-    const move = (e: PointerEvent) => onWidth(Math.min(window.innerWidth * 0.6, Math.max(300, initial + start - e.clientX)));
+    const move = (e: PointerEvent) => onWidthRef.current(initial + start - e.clientX);
     const end = () => {
-      setDragging(false); element.removeEventListener("pointermove", move); element.removeEventListener("pointerup", end); element.removeEventListener("pointercancel", end);
+      if (dragCleanupRef.current === end) dragCleanupRef.current = null;
+      setDragging(false);
+      element.removeEventListener("pointermove", move);
+      element.removeEventListener("pointerup", end);
+      element.removeEventListener("pointercancel", end);
+      element.removeEventListener("lostpointercapture", end);
     };
-    element.addEventListener("pointermove", move); element.addEventListener("pointerup", end); element.addEventListener("pointercancel", end);
+    dragCleanupRef.current = end;
+    element.addEventListener("pointermove", move);
+    element.addEventListener("pointerup", end);
+    element.addEventListener("pointercancel", end);
+    element.addEventListener("lostpointercapture", end);
   };
   if (!open) return null;
   return <>
     <div className="resizer browser-resizer" role="separator" aria-label="Resize browser" aria-orientation="vertical"
-      aria-valuemin={300} aria-valuemax={Math.round(window.innerWidth * 0.6)} aria-valuenow={Math.round(width)} tabIndex={0}
+      aria-valuemin={48} aria-valuemax={maxWidth} aria-valuenow={Math.round(width)} tabIndex={0}
       onPointerDown={resize} onKeyDown={(e) => {
-        if (["ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); onWidth(Math.max(300, Math.min(window.innerWidth * 0.6, width + (e.key === "ArrowLeft" ? 20 : -20)))); }
+        if (["ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); onWidth(width + (e.key === "ArrowLeft" ? 20 : -20)); }
       }} />
     <aside id="browser-panel" className="browser-pane" style={{ width }} aria-label="Chromium browser">
       <div className="browser-heading"><Globe size={14} /><strong>Browser</strong><span title={workspace}>{workspace.replace(/\\/g, "/").split("/").at(-1) || "No workspace"}</span>

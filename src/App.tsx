@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   lazy,
@@ -133,26 +134,96 @@ export default function App() {
     });
   }, [accounts]);
   const projectTabsRef = useRef<Record<string, string>>({});
+  const MIN_PANEL = 48;
+  const MIN_MAIN = 48;
+  const RAIL_WIDTH = 44;
   const [panelPreferences] = useState(() => { try { return JSON.parse(localStorage.getItem("lumen.panels") || "{}") || {}; } catch { return {}; } });
   const [panel, setPanel] = useState<"files" | "git">(panelPreferences.panel === "git" ? "git" : "files");
   const [sidebar, setSidebar] = useState(panelPreferences.projects !== false);
   const [explorer, setExplorer] = useState(panelPreferences.workspace === true);
   const [browserOpen, setBrowserOpen] = useState(panelPreferences.browser === true);
-  const [browserWidth, setBrowserWidth] = useState(Number.isFinite(panelPreferences.browserWidth) ? Math.min(900, Math.max(300, panelPreferences.browserWidth)) : 500);
+  const [browserWidth, setBrowserWidth] = useState(Number.isFinite(panelPreferences.browserWidth) ? Math.max(MIN_PANEL, panelPreferences.browserWidth) : 500);
   const projectsToggle = useRef<HTMLButtonElement>(null);
   const explorerToggle = useRef<HTMLButtonElement>(null);
-  const [sidebarWidth, setSidebarWidth] = useState(Number.isFinite(panelPreferences.projectsWidth) ? Math.min(420, Math.max(200, panelPreferences.projectsWidth)) : 250);
-  const [explorerWidth, setExplorerWidth] = useState(Number.isFinite(panelPreferences.workspaceWidth) ? Math.min(420, Math.max(200, panelPreferences.workspaceWidth)) : 270);
+  const [sidebarWidth, setSidebarWidth] = useState(Number.isFinite(panelPreferences.projectsWidth) ? Math.max(MIN_PANEL, panelPreferences.projectsWidth) : 250);
+  const [explorerWidth, setExplorerWidth] = useState(Number.isFinite(panelPreferences.workspaceWidth) ? Math.max(MIN_PANEL, panelPreferences.workspaceWidth) : 270);
+  const [split, setSplit] = useState(Number.isFinite(panelPreferences.split) ? Math.min(98, Math.max(2, panelPreferences.split)) : 50);
+  const [terminalHeight, setTerminalHeight] = useState(Number.isFinite(panelPreferences.terminalHeight) ? Math.max(60, panelPreferences.terminalHeight) : 280);
+  const [resizing, setResizing] = useState(false);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const resizeTargetRef = useRef<HTMLElement | null>(null);
+  const [mainElement, setMainElement] = useState<HTMLElement | null>(null);
+  const [mainHeight, setMainHeight] = useState(() => Math.max(120, window.innerHeight - 52));
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
   useEffect(() => {
     const measure = () => setViewportWidth(window.innerWidth);
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("resize", measure);
+      resizeCleanupRef.current?.();
+    };
   }, []);
-  const visibleExplorer = explorer && (!browserOpen || viewportWidth - 52 - (sidebar ? sidebarWidth : 0) - explorerWidth >= 580);
-  const visibleSidebar = sidebar && (!browserOpen || viewportWidth - 52 - (visibleExplorer ? explorerWidth : 0) - sidebarWidth >= 580);
-  const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
   useEffect(() => {
+    if (resizing && !resizeTargetRef.current?.isConnected) {
+      resizeCleanupRef.current?.();
+    }
+  });
+  useLayoutEffect(() => {
+    if (!mainElement) return;
+    const measure = () => setMainHeight(mainElement.clientHeight);
+    const observer = new ResizeObserver(measure);
+    observer.observe(mainElement);
+    measure();
+    return () => observer.disconnect();
+  }, [mainElement]);
+  const maxTerminalHeight = Math.max(60, mainHeight - nativeTop - 60);
+  useEffect(() => {
+    if (terminalHeight > maxTerminalHeight) setTerminalHeight(maxTerminalHeight);
+  }, [maxTerminalHeight, terminalHeight]);
+  const visibleExplorer = explorer;
+  const visibleSidebar = sidebar;
+  const panelWidthsRef = useRef({ sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen });
+  panelWidthsRef.current = { sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen };
+  useEffect(() => {
+    const openKeys: Array<"sidebar" | "browser" | "explorer"> = [];
+    if (visibleSidebar) openKeys.push("sidebar");
+    if (browserOpen) openKeys.push("browser");
+    if (visibleExplorer) openKeys.push("explorer");
+    if (!openKeys.length) return;
+    const maxTotal = Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN);
+    const current = panelWidthsRef.current;
+    const activeTotal = openKeys.reduce((sum, key) => sum + current[key], 0);
+    if (activeTotal <= maxTotal) return;
+    const minEach = Math.min(MIN_PANEL, Math.floor(maxTotal / openKeys.length));
+    const distributable = Math.max(0, maxTotal - openKeys.length * minEach);
+    const currentExtra = openKeys.reduce((sum, key) => sum + Math.max(0, current[key] - minEach), 0);
+    let allocated = 0;
+    const nextWidths: Partial<Record<"sidebar" | "browser" | "explorer", number>> = {};
+    openKeys.forEach((key, index) => {
+      if (index === openKeys.length - 1) {
+        nextWidths[key] = Math.max(minEach, maxTotal - allocated);
+      } else {
+        const extra = currentExtra > 0 ? Math.floor((Math.max(0, current[key] - minEach) / currentExtra) * distributable) : 0;
+        const w = minEach + extra;
+        nextWidths[key] = w;
+        allocated += w;
+      }
+    });
+    if (nextWidths.sidebar !== undefined && nextWidths.sidebar !== current.sidebar) {
+      panelWidthsRef.current.sidebar = nextWidths.sidebar;
+      setSidebarWidth(nextWidths.sidebar);
+    }
+    if (nextWidths.browser !== undefined && nextWidths.browser !== current.browser) {
+      panelWidthsRef.current.browser = nextWidths.browser;
+      setBrowserWidth(nextWidths.browser);
+    }
+    if (nextWidths.explorer !== undefined && nextWidths.explorer !== current.explorer) {
+      panelWidthsRef.current.explorer = nextWidths.explorer;
+      setExplorerWidth(nextWidths.explorer);
+    }
+  }, [viewportWidth, visibleSidebar, browserOpen, visibleExplorer]);
+  const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
+  useLayoutEffect(() => {
     const element = contextBar.current;
     if (!element) return;
     const measure = () => setNativeTop(element.offsetTop + element.offsetHeight);
@@ -160,14 +231,13 @@ export default function App() {
     return () => observer.disconnect();
   }, [activeId, verticalChats]);
   useEffect(() => {
-    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browser: browserOpen, browserWidth })); } catch {}
-  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserOpen, browserWidth]);
+    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browser: browserOpen, browserWidth, split, terminalHeight })); } catch {}
+  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserOpen, browserWidth, split, terminalHeight]);
   const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
   const hideExplorer = () => { setExplorer(false); explorerToggle.current?.focus(); };
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocKey, setActiveDocKey] = useState("");
   const [editorExpanded, setEditorExpanded] = useState(false);
-  const [split, setSplit] = useState(50);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [signIn, setSignIn] = useState<SignInProfile | null>(null);
   const signInLock = useRef(false);
@@ -1047,35 +1117,107 @@ export default function App() {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   });
-  const resize = (event: React.PointerEvent, kind: "sidebar" | "explorer" | "split") => {
-    const start = event.clientX;
-    const initial = kind === "sidebar" ? sidebarWidth : kind === "explorer" ? explorerWidth : split;
-    const host = event.currentTarget.parentElement!;
-    const width = host.clientWidth;
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  const applySidebarWidth = (desired: number, hostWidth = window.innerWidth) => {
+    const state = panelWidthsRef.current;
+    const maxTotal = Math.max(MIN_PANEL, hostWidth - RAIL_WIDTH - MIN_MAIN);
+    const maxSidebar = Math.max(MIN_PANEL, maxTotal - (state.browserOpen ? MIN_PANEL : 0) - (state.explorerOpen ? MIN_PANEL : 0));
+    const next = Math.min(maxSidebar, Math.max(MIN_PANEL, Math.round(desired)));
+    state.sidebar = next;
+    setSidebarWidth(next);
+    let remaining = maxTotal - next;
+    if (state.explorerOpen) {
+      const nextExp = Math.min(state.explorer, Math.max(MIN_PANEL, remaining - (state.browserOpen ? MIN_PANEL : 0)));
+      if (nextExp !== state.explorer) { state.explorer = nextExp; setExplorerWidth(nextExp); }
+      remaining -= nextExp;
+    }
+    if (state.browserOpen) {
+      const nextBrow = Math.min(state.browser, Math.max(MIN_PANEL, remaining));
+      if (nextBrow !== state.browser) { state.browser = nextBrow; setBrowserWidth(nextBrow); }
+    }
+  };
+  const applyExplorerWidth = (desired: number, hostWidth = window.innerWidth) => {
+    const state = panelWidthsRef.current;
+    const maxTotal = Math.max(MIN_PANEL, hostWidth - RAIL_WIDTH - MIN_MAIN);
+    const maxExplorer = Math.max(MIN_PANEL, maxTotal - (state.sidebarOpen ? MIN_PANEL : 0) - (state.browserOpen ? MIN_PANEL : 0));
+    const next = Math.min(maxExplorer, Math.max(MIN_PANEL, Math.round(desired)));
+    state.explorer = next;
+    setExplorerWidth(next);
+    let remaining = maxTotal - next;
+    if (state.sidebarOpen) {
+      const nextSide = Math.min(state.sidebar, Math.max(MIN_PANEL, remaining - (state.browserOpen ? MIN_PANEL : 0)));
+      if (nextSide !== state.sidebar) { state.sidebar = nextSide; setSidebarWidth(nextSide); }
+      remaining -= nextSide;
+    }
+    if (state.browserOpen) {
+      const nextBrow = Math.min(state.browser, Math.max(MIN_PANEL, remaining));
+      if (nextBrow !== state.browser) { state.browser = nextBrow; setBrowserWidth(nextBrow); }
+    }
+  };
+  const applyBrowserWidth = (desired: number, hostWidth = window.innerWidth) => {
+    const state = panelWidthsRef.current;
+    const maxTotal = Math.max(MIN_PANEL, hostWidth - RAIL_WIDTH - MIN_MAIN);
+    const reservedRight = state.explorerOpen ? state.explorer : 0;
+    const maxBrowser = Math.max(MIN_PANEL, maxTotal - reservedRight - (state.sidebarOpen ? MIN_PANEL : 0));
+    const next = Math.min(maxBrowser, Math.max(MIN_PANEL, Math.round(desired)));
+    state.browser = next;
+    setBrowserWidth(next);
+    const remaining = maxTotal - reservedRight - next;
+    if (state.sidebarOpen) {
+      const nextSide = Math.min(state.sidebar, Math.max(MIN_PANEL, remaining));
+      if (nextSide !== state.sidebar) { state.sidebar = nextSide; setSidebarWidth(nextSide); }
+    }
+  };
+  const resize = (event: React.PointerEvent, kind: "sidebar" | "explorer" | "split" | "terminal") => {
+    resizeCleanupRef.current?.();
+    const target = event.currentTarget as HTMLElement;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const host = target.parentElement!;
+    const width = Math.max(1, host.clientWidth);
+    const initial =
+      kind === "sidebar"
+        ? target.previousElementSibling?.getBoundingClientRect().width ?? sidebarWidth
+        : kind === "explorer"
+          ? target.nextElementSibling?.getBoundingClientRect().width ?? explorerWidth
+          : kind === "terminal"
+            ? host.getBoundingClientRect().height
+            : split;
+    target.setPointerCapture(event.pointerId);
+    resizeTargetRef.current = target;
+    setResizing(true);
     const move = (e: PointerEvent) => {
       if (kind === "sidebar")
-        setSidebarWidth(
-          Math.min(420, Math.max(200, initial + e.clientX - start)),
-        );
-      else if (kind === "explorer") setExplorerWidth(Math.min(420, Math.max(200, initial + start - e.clientX)));
-      else
+        applySidebarWidth(initial + e.clientX - startX, host.clientWidth || width);
+      else if (kind === "explorer")
+        applyExplorerWidth(initial + startX - e.clientX, host.clientWidth || width);
+      else if (kind === "terminal") {
+        const currentMainHeight = (target.closest(".main") as HTMLElement | null)?.clientHeight || mainHeight;
+        const maxTerm = Math.max(60, currentMainHeight - nativeTop - 60);
+        setTerminalHeight(Math.min(maxTerm, Math.max(60, Math.round(initial + e.clientY - startY))));
+      } else {
+        const currentWidth = Math.max(1, host.clientWidth || width);
         setSplit(
           Math.min(
-            75,
-            Math.max(25, initial + ((e.clientX - start) / width) * 100),
+            98,
+            Math.max(2, initial + ((e.clientX - startX) / currentWidth) * 100),
           ),
         );
+      }
     };
-    const target = event.currentTarget;
     const end = () => {
+      if (resizeCleanupRef.current === end) resizeCleanupRef.current = null;
+      if (resizeTargetRef.current === target) resizeTargetRef.current = null;
+      setResizing(false);
       target.removeEventListener("pointermove", move as any);
       target.removeEventListener("pointerup", end);
       target.removeEventListener("pointercancel", end);
+      target.removeEventListener("lostpointercapture", end);
     };
+    resizeCleanupRef.current = end;
     target.addEventListener("pointermove", move as any);
     target.addEventListener("pointerup", end);
     target.addEventListener("pointercancel", end);
+    target.addEventListener("lostpointercapture", end);
   };
   const githubURL = (remote?: string) => {
     if (!remote) return "";
@@ -1110,7 +1252,7 @@ export default function App() {
   </div>;
   return (
     <div
-      className={`app ${verticalChats ? "vertical-layout" : "horizontal-layout"} ${settings.motion ? "" : "motion-off"} ${settings.theme === "Paper" ? "light" : ""}`}
+      className={`app ${verticalChats ? "vertical-layout" : "horizontal-layout"} ${settings.motion ? "" : "motion-off"} ${settings.theme === "Paper" ? "light" : ""} ${resizing ? "resizing" : ""}`}
       style={styleVars(settings) as CSSProperties}
       onClick={(e) => {
         if (!settings.playful) return;
@@ -1153,7 +1295,7 @@ export default function App() {
         <span className="titlebar-caption">a little more room to think</span>
         <div className="titlebar-right">
           <button className={`icon-button ${browserOpen ? "active" : ""}`} aria-label={browserOpen ? "Hide browser" : "Show browser"} title="Browser (Ctrl Shift B)" aria-expanded={browserOpen} aria-controls="browser-panel" onClick={() => setBrowserOpen(!browserOpen)}><Globe size={17} /></button>
-          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { if (browserOpen && !visibleExplorer) setBrowserOpen(false); setPanel("files"); setExplorer(!(visibleExplorer && panel === "files")); }}>
+          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); setExplorer(!(visibleExplorer && panel === "files")); }}>
             {visibleExplorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
           </button>
           <button className="command-hint" onClick={() => setDialog("palette")}>
@@ -1186,7 +1328,7 @@ export default function App() {
       <div className="app-body" style={{ "--projects-panel-width": `${visibleSidebar ? sidebarWidth : 0}px`, "--workspace-panel-width": `${visibleExplorer ? explorerWidth : 0}px` } as CSSProperties}>
         <nav className="rail" aria-label="Workspace panels">
           <div>
-            <button ref={projectsToggle} className={`icon-button ${visibleSidebar ? "active" : ""}`} aria-label={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={visibleSidebar} aria-controls="projects-sidebar" onClick={() => { if (browserOpen && !visibleSidebar) setBrowserOpen(false); setSidebar(!visibleSidebar); }}><Files size={21} /></button>
+            <button ref={projectsToggle} className={`icon-button ${visibleSidebar ? "active" : ""}`} aria-label={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={visibleSidebar} aria-controls="projects-sidebar" onClick={() => setSidebar(!visibleSidebar)}><Files size={21} /></button>
             <button
               className={`icon-button ${panel === "git" && visibleExplorer ? "active" : ""}`}
               aria-label="Source control"
@@ -1195,7 +1337,6 @@ export default function App() {
               aria-controls="workspace-panel"
               onClick={() => {
                 setPanel("git");
-                if (browserOpen && !visibleExplorer) setBrowserOpen(false);
                 setExplorer(!(visibleExplorer && panel === "git"));
               }}
             >
@@ -1251,21 +1392,25 @@ export default function App() {
               role="separator"
               aria-label="Resize projects sidebar"
               aria-orientation="vertical"
-              aria-valuemin={200}
-              aria-valuemax={420}
-              aria-valuenow={sidebarWidth}
+              aria-valuemin={MIN_PANEL}
+              aria-valuemax={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (browserOpen ? MIN_PANEL : 0) - (visibleExplorer ? MIN_PANEL : 0))}
+              aria-valuenow={Math.round(sidebarWidth)}
               tabIndex={0}
               onPointerDown={(e) => resize(e, "sidebar")}
               onKeyDown={(e) => {
-                if (e.key === "ArrowRight")
-                  setSidebarWidth((n) => Math.min(420, n + 10));
-                if (e.key === "ArrowLeft")
-                  setSidebarWidth((n) => Math.max(200, n - 10));
+                if (e.key === "ArrowRight") {
+                  e.preventDefault();
+                  applySidebarWidth(sidebarWidth + 16);
+                }
+                if (e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  applySidebarWidth(sidebarWidth - 16);
+                }
               }}
             />
           </>
         )}
-        <main className="main">
+        <main className="main" ref={setMainElement}>
           {(!verticalChats || !active) && <div className="tabbar">
             <SessionTabs tabs={tabs.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless)} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
             {sessionActions}
@@ -1326,7 +1471,7 @@ export default function App() {
                   }}
                 >
                   {active ? <>
-                  {active.mode === "rich" && active.terminalOpen && <div className="terminal-reserve" />}
+                  {active.mode === "rich" && active.terminalOpen && <div className="terminal-reserve" style={{ flexBasis: Math.min(maxTerminalHeight, terminalHeight), maxHeight: "calc(100% - 60px)" }} />}
                   {(active.mode === "rich" || active.recoveryError) && (
                     <Conversation
                       key={active.id}
@@ -1377,13 +1522,20 @@ export default function App() {
                         role="separator"
                         aria-label="Resize editor"
                         aria-orientation="vertical"
+                        aria-valuemin={2}
+                        aria-valuemax={98}
+                        aria-valuenow={Math.round(split)}
                         tabIndex={0}
                         onPointerDown={(e) => resize(e, "split")}
                         onKeyDown={(e) => {
-                          if (e.key === "ArrowRight")
-                            setSplit((n) => Math.min(75, n + 2));
-                          if (e.key === "ArrowLeft")
-                            setSplit((n) => Math.max(25, n - 2));
+                          if (e.key === "ArrowRight") {
+                            e.preventDefault();
+                            setSplit((n) => Math.min(98, n + 2));
+                          }
+                          if (e.key === "ArrowLeft") {
+                            e.preventDefault();
+                            setSplit((n) => Math.max(2, n - 2));
+                          }
                         }}
                       />
                     )}
@@ -1437,6 +1589,8 @@ export default function App() {
                 display: (active?.mode === "native" || active?.terminalOpen) && !(editorExpanded && activeDoc) ? "block" : "none",
                 top: nativeTop,
                 width: activeDoc ? `${split}%` : "100%",
+                height: active?.mode === "rich" ? Math.min(maxTerminalHeight, terminalHeight) : undefined,
+                maxHeight: active?.mode === "rich" ? `calc(100% - ${nativeTop + 60}px)` : undefined,
               }}
             >
               <div className="terminal-panel-heading"><span>{active?.terminalId ? "Tool terminal" : "Interactive terminal"}</span>
@@ -1462,11 +1616,35 @@ export default function App() {
                 ))}
               {tabs.flatMap((tab) => (tab.toolTerminals || []).map((terminal) => <NativeTerminal key={`${tab.id}:${terminal.id}`} id={tab.id} terminalId={terminal.id}
                 active={activeId === tab.id && active?.terminalId === terminal.id && !!active?.terminalOpen} settings={settings} onWeb={openWeb} onError={notify} onDismissDraft={() => {}} />))}
+              {active?.mode === "rich" && (
+                <div
+                  className="resizer terminal-resizer"
+                  role="separator"
+                  aria-label="Resize terminal panel"
+                  aria-orientation="horizontal"
+                  aria-valuemin={60}
+                  aria-valuemax={maxTerminalHeight}
+                  aria-valuenow={Math.min(maxTerminalHeight, Math.round(terminalHeight))}
+                  tabIndex={0}
+                  onPointerDown={(e) => resize(e, "terminal")}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setTerminalHeight((n) => Math.min(maxTerminalHeight, Math.min(maxTerminalHeight, n) + 16));
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setTerminalHeight((n) => Math.max(60, Math.min(maxTerminalHeight, n) - 16));
+                    }
+                  }}
+                />
+              )}
             </div>
           )}
         </main>
-        <BrowserPane workspace={checkoutPath} open={browserOpen} blocked={!!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
-          width={browserWidth} onWidth={setBrowserWidth} onClose={() => setBrowserOpen(false)} onAttach={attachBrowser}
+        <BrowserPane workspace={checkoutPath} open={browserOpen} blocked={resizing || !!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
+          width={browserWidth} maxWidth={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleExplorer ? explorerWidth : 0) - (visibleSidebar ? MIN_PANEL : 0))}
+          onWidth={applyBrowserWidth} onClose={() => setBrowserOpen(false)} onAttach={attachBrowser}
           canAttach={!!active && active.agent !== "shell" && active.mode === "rich" && !active.recoveryError} onError={notify} />
         {visibleExplorer && (
           <>
@@ -1475,16 +1653,20 @@ export default function App() {
               role="separator"
               aria-label="Resize workspace panel"
               aria-orientation="vertical"
-              aria-valuemin={200}
-              aria-valuemax={420}
-              aria-valuenow={explorerWidth}
+              aria-valuemin={MIN_PANEL}
+              aria-valuemax={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? MIN_PANEL : 0) - (browserOpen ? MIN_PANEL : 0))}
+              aria-valuenow={Math.round(explorerWidth)}
               tabIndex={0}
               onPointerDown={(e) => resize(e, "explorer")}
               onKeyDown={(e) => {
-                if (e.key === "ArrowRight")
-                  setExplorerWidth((n) => Math.max(200, n - 10));
-                if (e.key === "ArrowLeft")
-                  setExplorerWidth((n) => Math.min(420, n + 10));
+                if (e.key === "ArrowRight") {
+                  e.preventDefault();
+                  applyExplorerWidth(explorerWidth - 16);
+                }
+                if (e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  applyExplorerWidth(explorerWidth + 16);
+                }
               }}
             />
             <aside id="workspace-panel" aria-label={panel === "files" ? "File explorer" : "Source control"} className="sidebar workspace-panel" style={{ width: explorerWidth }}>

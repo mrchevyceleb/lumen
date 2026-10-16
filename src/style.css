@@ -493,7 +493,7 @@ kbd {
 .sidebar {
   display: flex;
   flex-direction: column;
-  min-width: 200px;
+  min-width: 0;
   flex-shrink: 0;
   background: color-mix(in srgb, var(--surface) 54%, var(--bg) 30%);
   border-right: 1px solid var(--border);
@@ -733,6 +733,11 @@ kbd {
   touch-action: none;
   z-index: 3;
 }
+.resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+}
 .resizer:hover,
 .resizer:focus-visible {
   background: var(--accent);
@@ -740,6 +745,26 @@ kbd {
 }
 .sidebar-resizer {
   margin-left: -3px;
+}
+.explorer-resizer,
+.browser-resizer {
+  margin-left: 0;
+  margin-right: -3px;
+}
+.terminal-resizer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  width: 100%;
+  height: 3px;
+  cursor: row-resize;
+}
+.terminal-resizer::before {
+  inset: -4px 0;
+}
+.app.resizing {
+  user-select: none;
 }
 .sidebar-empty {
   padding: 45px 25px;
@@ -1021,6 +1046,7 @@ kbd {
   min-width: 0;
   min-height: 0;
   position: relative;
+  overflow: hidden;
 }
 .conversation {
   height: 100%;
@@ -1867,7 +1893,8 @@ kbd {
 }
 .editor-pane {
   flex: 1;
-  min-width: 250px;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--bg);
@@ -1988,9 +2015,9 @@ kbd {
   background: transparent;
   padding: 17px 14px 8px;
 }
-.native-layers.embedded-terminal { bottom: auto; height: min(300px, 40vh); background: var(--surface); border-bottom: 1px solid var(--border); padding-top: 0; }
+.native-layers.embedded-terminal { bottom: auto; height: 280px; max-height: calc(100% - 60px); background: var(--surface); border-bottom: 1px solid var(--border); padding-top: 0; }
 .session-pane.with-terminal { display: flex; flex-direction: column; }
-.terminal-reserve { flex: 0 0 min(300px, 40vh); }
+.terminal-reserve { flex: 0 0 280px; max-height: calc(100% - 60px); }
 .session-pane.with-terminal .conversation { height: auto; min-height: 0; flex: 1; }
 .terminal-panel-heading { height: 36px; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
 .terminal-panel-heading > span { flex: 1; }
@@ -3153,9 +3180,6 @@ kbd {
   }
 }
 @media (max-width: 950px) {
-  .sidebar {
-    max-width: 220px;
-  }
   .sidebar-heading {
     padding-left: 12px;
   }
@@ -3203,9 +3227,6 @@ kbd {
     transition: none !important;
     scroll-behavior: auto !important;
   }
-}
-@media (max-width: 800px) {
-  .sidebar { min-width: 160px; max-width: 160px; }
 }
 .model-controls {
   display: contents;
