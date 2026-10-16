@@ -182,6 +182,7 @@ export interface Settings {
   terminalFontSize: number;
   backgroundOpacity: number;
   backgroundBlur: number;
+  animationSpeed: number;
   motion: boolean;
   playful: boolean;
   coloredTabs: boolean;

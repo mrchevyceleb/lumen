@@ -6,17 +6,92 @@
   padding: clamp(24px, 5vw, 64px);
   display: flex;
 }
-.session-start-content { width: 590px; max-width: 100%; margin: auto; }
-.session-start-project { display: flex; align-items: center; gap: 10px; color: var(--accent); font-size: 15px; }
+.session-start-content { width: 620px; max-width: 100%; margin: auto; }
+.session-start-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 550;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: 0 0 24px -6px color-mix(in srgb, var(--accent) 30%, transparent);
+}
 .session-start-project span { overflow-wrap: anywhere; }
 .session-start p { color: var(--muted); font-size: 14px; line-height: 1.7; }
-.session-start .session-start-path { font-size: 12px; overflow-wrap: anywhere; margin: 8px 0 28px; }
-.session-start h1 { font-size: clamp(25px, 3vw, 36px); line-height: 1.2; font-weight: 500; letter-spacing: -1px; margin: 20px 0 12px; }
-.session-start-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(235px, 100%), 1fr)); gap: 10px; margin: 26px 0 20px; }
-.session-start-options button { display: flex; align-items: center; gap: 14px; padding: 18px; text-align: left; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--surface) 75%, transparent); }
-.session-start-options button:hover:not(:disabled) { border-color: var(--accent); background: var(--surface); }
+.session-start .session-start-path { font-size: 12px; overflow-wrap: anywhere; margin: 10px 0 24px; opacity: 0.78; }
+.session-start h1 {
+  font-size: clamp(28px, 3.4vw, 40px);
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: -1.2px;
+  margin: 18px 0 10px;
+  background: linear-gradient(135deg, var(--text) 35%, color-mix(in srgb, var(--accent) 85%, var(--text)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.session-start-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(245px, 100%), 1fr));
+  gap: 12px;
+  margin: 28px 0 22px;
+}
+.session-start-options button {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  text-align: left;
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--accent)) 20%, var(--border));
+  border-radius: 14px;
+  background:
+    radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--agent-color, var(--accent)) 11%, transparent) 0%, transparent 65%),
+    color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 7%, transparent),
+    0 6px 20px -8px color-mix(in srgb, black 45%, transparent);
+}
+.session-start-options button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--agent-color, var(--accent)) 65%, var(--border));
+  background:
+    radial-gradient(130% 130% at 0% 0%, color-mix(in srgb, var(--agent-color, var(--accent)) 20%, transparent) 0%, transparent 70%),
+    color-mix(in srgb, var(--surface) 92%, transparent);
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 12%, transparent),
+    0 14px 32px -10px color-mix(in srgb, var(--agent-color, var(--accent)) 32%, transparent);
+}
+.session-start-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--agent-color, var(--accent)) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--accent)) 28%, transparent);
+  box-shadow: 0 0 18px -4px color-mix(in srgb, var(--agent-color, var(--accent)) 35%, transparent);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.session-start-options button:hover:not(:disabled) .session-start-icon {
+  transform: scale(1.06);
+  box-shadow: 0 0 24px -2px color-mix(in srgb, var(--agent-color, var(--accent)) 55%, transparent);
+}
 .session-start-options button > span:nth-child(2) { flex: 1; min-width: 0; }
-.session-start-options strong { display: block; font-size: 14px; font-weight: 500; }
-.session-start-options small { display: block; font-size: 11px; color: var(--muted); margin-top: 5px; }
+.session-start-options strong { display: block; font-size: 14px; font-weight: 550; }
+.session-start-options small { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; }
 .session-start-options svg { flex-shrink: 0; }
-.session-start-options button > svg { color: var(--muted); }
+.session-start-options button > svg {
+  color: var(--muted);
+  transition: transform 0.18s, color 0.18s;
+}
+.session-start-options button:hover:not(:disabled) > svg {
+  color: var(--agent-color, var(--accent));
+  transform: translateX(3px);
+}

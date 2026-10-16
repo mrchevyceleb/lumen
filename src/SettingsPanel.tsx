@@ -32,12 +32,45 @@ const backgrounds = [
   ["rain", "Rain", "Gentle falling light"],
   ["stars", "Star field", "A slow drift through deep space"],
   ["nebula", "Nebula", "Violet clouds and distant stars"],
+  ["fireflies", "Fireflies", "Warm drifting bioluminescence"],
+  ["synthwave", "Synthwave", "Neon sunset & horizon grid"],
+  ["matrix", "Digital rain", "Cascading phosphor code streams"],
+  ["lava", "Lava lamp", "Morphing blobs of warm plasma"],
+  ["prism", "Prism rays", "Rotating spectral light beams"],
+  ["ripples", "Ripples", "Expanding concentric water rings"],
+  ["galaxy", "Spiral galaxy", "Swirling cosmic dust & core"],
+  ["meteors", "Meteor shower", "Streaking shooting stars"],
+  ["waves", "Ocean waves", "Flowing bioluminescent tides"],
+  ["cyberpulse", "Circuit pulse", "Grid nodes & radar sweeps"],
   ["grid", "Blueprint", "A fine architectural grid"],
   ["contour", "Contour", "Quiet topographic lines"],
   ["grain", "Grain", "A little analog texture"],
   ["image", "Your image", "Make it your space"],
 ];
-const animatedBackgrounds = new Set(["aurora", "orbits", "rain", "stars", "nebula"]);
+const animatedBackgrounds = new Set([
+  "aurora",
+  "orbits",
+  "rain",
+  "stars",
+  "nebula",
+  "fireflies",
+  "synthwave",
+  "matrix",
+  "lava",
+  "prism",
+  "ripples",
+  "galaxy",
+  "meteors",
+  "waves",
+  "cyberpulse",
+]);
+const speedPresets: [number, string][] = [
+  [0.5, "0.5× Chill"],
+  [1, "1× Normal"],
+  [1.5, "1.5× Lively"],
+  [2, "2× Fast"],
+  [3, "3× Hyper"],
+];
 export default function SettingsPanel({
   settings: s,
   update,
@@ -111,9 +144,10 @@ export default function SettingsPanel({
                   <button
                     key={theme.name}
                     className={`theme-card ${s.theme === theme.name ? "selected" : ""}`}
-                    onClick={() =>
-                      update({ ...s, ...theme, theme: theme.name })
-                    }
+                    onClick={() => {
+                      const { name, ...palette } = theme;
+                      update({ ...s, ...palette, theme: name });
+                    }}
                   >
                     <div
                       className="theme-preview"
@@ -231,7 +265,7 @@ export default function SettingsPanel({
                 title="Background intensity"
                 value={s.backgroundOpacity}
                 min={0}
-                max={50}
+                max={100}
                 suffix="%"
                 onChange={(v) => set("backgroundOpacity", v)}
               />
@@ -243,9 +277,30 @@ export default function SettingsPanel({
                 suffix="%"
                 onChange={(v) => set("backgroundBlur", v)}
               />
+              <Range
+                title="Animation speed"
+                value={s.animationSpeed}
+                min={0.2}
+                max={3}
+                step={0.1}
+                suffix="×"
+                onChange={(v) => set("animationSpeed", Math.round(v * 10) / 10)}
+              />
+              <div className="speed-presets" role="group" aria-label="Animation speed presets">
+                {speedPresets.map(([preset, label]) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    aria-pressed={s.animationSpeed === preset}
+                    onClick={() => set("animationSpeed", preset)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <Toggle
                 title="Animate backgrounds"
-                detail="Aurora, Orbital, Rain, Star field, and Nebula animate. Motion also follows your system’s reduced-motion setting."
+                detail="All 15 animated atmospheres respond to your speed setting and respect system reduced-motion preferences."
                 value={s.motion}
                 onChange={(v) => set("motion", v)}
               />

@@ -307,7 +307,7 @@ export default function App() {
     text: string;
     staged: boolean;
   } | null>(null);
-  const [spark, setSpark] = useState<{ x: number; y: number; id: number }[]>(
+  const [spark, setSpark] = useState<{ x: number; y: number; dx: number; dy: number; glyph: string; color: string; id: string }[]>(
     [],
   );
   const active = tabs.find((t) => t.id === activeId);
@@ -1358,15 +1358,28 @@ export default function App() {
       className={`app ${verticalChats ? "vertical-layout" : "horizontal-layout"} ${settings.motion ? "" : "motion-off"} ${settings.theme === "Paper" ? "light" : ""} ${resizing ? "resizing" : ""}`}
       style={styleVars(settings) as CSSProperties}
       onClick={(e) => {
-        if (!settings.playful) return;
-        const id = Date.now();
-        setSpark((old) => [
-          ...old.slice(-8),
-          { x: e.clientX, y: e.clientY, id },
-        ]);
+        if (!settings.playful || !settings.motion || window.matchMedia("(prefers-reduced-motion: reduce)").matches || e.detail === 0) return;
+        const baseId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const glyphs = ["✦", "✧", "⋆", "✺"];
+        const palette = [activeColor, settings.accent, "#fbbf24", "#38bdf8", "#f472b6", "#c084fc"];
+        const burst = [0, 1, 2].map((i) => {
+          const angle = -Math.PI / 2 + (i - 1) * 0.65 + (Math.random() - 0.5) * 0.35;
+          const dist = 26 + Math.random() * 22;
+          return {
+            x: e.clientX,
+            y: e.clientY,
+            dx: Math.round(Math.cos(angle) * dist),
+            dy: Math.round(Math.sin(angle) * dist - 14),
+            glyph: glyphs[(i + Math.floor(Math.random() * glyphs.length)) % glyphs.length],
+            color: palette[i % palette.length],
+            id: `${baseId}-${i}`,
+          };
+        });
+        const ids = new Set(burst.map((b) => b.id));
+        setSpark((old) => [...old.slice(-18), ...burst]);
         setTimeout(
-          () => setSpark((old) => old.filter((s) => s.id !== id)),
-          700,
+          () => setSpark((old) => old.filter((s) => !ids.has(s.id))),
+          750,
         );
       }}
     >
@@ -1682,6 +1695,7 @@ export default function App() {
           ) : (
             <Welcome
               boot={boot}
+              settings={settings}
               onOpen={() => openWorkspace()}
               onPath={() => setDialog("open")}
               onStart={startWithoutWorkspace}
@@ -2131,10 +2145,17 @@ export default function App() {
       {spark.map((s) => (
         <span
           className="click-spark"
+          aria-hidden="true"
           key={s.id}
-          style={{ left: s.x, top: s.y }}
+          style={{
+            left: s.x,
+            top: s.y,
+            color: s.color,
+            "--spark-dx": `${s.dx}px`,
+            "--spark-dy": `${s.dy}px`,
+          } as CSSProperties}
         >
-          ✧
+          {s.glyph}
         </span>
       ))}
     </div>
@@ -2142,6 +2163,7 @@ export default function App() {
 }
 function Welcome({
   boot,
+  settings,
   onOpen,
   onPath,
   onStart,
@@ -2150,6 +2172,7 @@ function Welcome({
   loaded,
 }: {
   boot: Bootstrap;
+  settings: Settings;
   onOpen: () => void;
   onPath: () => void;
   onStart: () => void;
@@ -2195,6 +2218,7 @@ function Welcome({
           {(["pi", "codex", "claude", "grok", "google"] as Agent[]).map((agent) => (
             <span
               key={agent}
+              style={{ "--agent-color": settings.coloredAgents ? settings.agents[agent].color : settings.accent } as CSSProperties}
               title={
                 boot.agents[agent]?.available
                   ? "CLI detected"
@@ -2203,7 +2227,7 @@ function Welcome({
             >
               <AgentMark
                 agent={agent}
-                color={defaults.agents[agent].color}
+                color={settings.coloredAgents ? settings.agents[agent].color : settings.accent}
                 size={18}
               />
               {agentNames[agent]}

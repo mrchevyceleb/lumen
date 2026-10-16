@@ -147,6 +147,17 @@ p {
   background-size: cover;
   background-position: center;
 }
+.atmosphere::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    circle at 50% 45%,
+    color-mix(in srgb, var(--bg) 22%, transparent),
+    color-mix(in srgb, var(--bg) 58%, transparent)
+  );
+  pointer-events: none;
+}
 .atmosphere i,
 .background-preview i {
   position: absolute;
@@ -161,22 +172,22 @@ p {
   background: var(--accent);
   left: 8%;
   top: -24%;
-  animation: aurora-flow 14s ease-in-out -4s infinite alternate;
+  animation: aurora-flow calc(14s * var(--anim-scale, 1)) ease-in-out calc(-4s * var(--anim-scale, 1)) infinite alternate;
 }
 .atmosphere-aurora i:nth-child(2) {
-  background: #7f8daa;
+  background: color-mix(in srgb, var(--accent) 40%, #38bdf8);
   left: 55%;
   top: 47%;
-  animation-delay: -11s;
+  animation-delay: calc(-11s * var(--anim-scale, 1));
   width: 55%;
 }
 .atmosphere-aurora i:nth-child(3) {
-  background: color-mix(in srgb, var(--accent) 55%, #8b78ba);
+  background: color-mix(in srgb, var(--accent) 45%, #a855f7);
   left: -8%;
   top: 65%;
   width: 45%;
   height: 40%;
-  animation-delay: -8s;
+  animation-delay: calc(-8s * var(--anim-scale, 1));
   animation-direction: alternate-reverse;
 }
 .atmosphere-aurora i:nth-child(n + 4) {
@@ -189,20 +200,22 @@ p {
   border: 2px solid var(--accent);
   left: 30%;
   top: 35%;
-  box-shadow: 0 0 80px color-mix(in srgb, var(--accent) 30%, transparent);
-  animation: orbit-drift 18s ease-in-out -4s infinite alternate;
+  box-shadow: 0 0 80px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: orbit-drift calc(18s * var(--anim-scale, 1)) ease-in-out calc(-4s * var(--anim-scale, 1)) infinite alternate;
 }
 .atmosphere-orbits i:nth-child(2) {
   left: 70%;
   top: -5%;
   width: 40%;
-  animation-delay: -12s;
+  border-color: color-mix(in srgb, var(--accent) 60%, #38bdf8);
+  animation-delay: calc(-12s * var(--anim-scale, 1));
 }
 .atmosphere-orbits i:nth-child(3) {
   left: 5%;
   top: 5%;
   width: 12%;
-  animation-delay: -8s;
+  border-color: color-mix(in srgb, var(--accent) 60%, #f472b6);
+  animation-delay: calc(-8s * var(--anim-scale, 1));
 }
 .atmosphere-orbits i:nth-child(n + 4) {
   display: none;
@@ -233,28 +246,28 @@ p {
   background: linear-gradient(transparent, var(--accent), transparent);
   left: 20%;
   top: -25%;
-  animation: rain 6s linear -2s infinite;
+  animation: rain calc(6s * var(--anim-scale, 1)) linear calc(-2s * var(--anim-scale, 1)) infinite;
   border-radius: 0;
 }
 .atmosphere-rain i:nth-child(2) {
   left: 38%;
-  animation-delay: -3s;
+  animation-delay: calc(-3s * var(--anim-scale, 1));
 }
 .atmosphere-rain i:nth-child(3) {
   left: 52%;
-  animation-delay: -7s;
+  animation-delay: calc(-7s * var(--anim-scale, 1));
 }
 .atmosphere-rain i:nth-child(4) {
   left: 66%;
-  animation-delay: -1s;
+  animation-delay: calc(-1s * var(--anim-scale, 1));
 }
 .atmosphere-rain i:nth-child(5) {
   left: 81%;
-  animation-delay: -5s;
+  animation-delay: calc(-5s * var(--anim-scale, 1));
 }
 .atmosphere-rain i:nth-child(6) {
   left: 94%;
-  animation-delay: -8s;
+  animation-delay: calc(-8s * var(--anim-scale, 1));
 }
 .atmosphere-stars,
 .atmosphere-nebula {
@@ -269,44 +282,427 @@ p {
   background: url("/space-stars.svg") repeat;
   background-size: var(--star-tile) var(--star-tile);
   opacity: .8;
-  animation: star-drift 160s linear -38s infinite;
+  animation: star-drift calc(160s * var(--anim-scale, 1)) linear calc(-38s * var(--anim-scale, 1)) infinite;
 }
 .atmosphere-stars i:nth-child(2) {
   --star-tile: 840px;
   background-position: 197px 93px;
   opacity: .55;
-  animation-duration: 220s;
-  animation-delay: -127s;
+  animation-duration: calc(220s * var(--anim-scale, 1));
+  animation-delay: calc(-127s * var(--anim-scale, 1));
 }
 .atmosphere-stars i:nth-child(3) {
   --star-tile: 430px;
   background-position: 61px 247px;
   opacity: .35;
-  animation-duration: 200s;
-  animation-delay: -71s;
+  animation-duration: calc(200s * var(--anim-scale, 1));
+  animation-delay: calc(-71s * var(--anim-scale, 1));
 }
 .atmosphere-nebula i:nth-child(-n + 3) {
   display: block;
   inset: -20%;
   border-radius: 0;
   background: url("/space-nebula.svg") center / cover no-repeat;
-  animation: nebula-drift 48s ease-in-out -18s infinite alternate;
+  animation: nebula-drift calc(48s * var(--anim-scale, 1)) ease-in-out calc(-18s * var(--anim-scale, 1)) infinite alternate;
 }
 .atmosphere-nebula i:nth-child(2) {
   opacity: .55;
   filter: hue-rotate(24deg);
-  animation-duration: 64s;
-  animation-delay: -39s;
+  animation-duration: calc(64s * var(--anim-scale, 1));
+  animation-delay: calc(-39s * var(--anim-scale, 1));
   animation-direction: alternate-reverse;
 }
 .atmosphere-nebula i:nth-child(3) {
   opacity: .35;
   filter: hue-rotate(-26deg);
-  animation-duration: 80s;
-  animation-delay: -57s;
+  animation-duration: calc(80s * var(--anim-scale, 1));
+  animation-delay: calc(-57s * var(--anim-scale, 1));
 }
 .atmosphere-nebula i:nth-child(4) { opacity: .85; }
-.motion-off *,
+
+/* 1. Fireflies — Warm drifting bioluminescence */
+.atmosphere-fireflies {
+  background: radial-gradient(ellipse at 50% 85%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%);
+}
+.atmosphere-fireflies i {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0%, #fde047 38%, var(--accent) 72%, transparent 100%);
+  box-shadow:
+    0 0 24px 6px color-mix(in srgb, var(--accent) 75%, #fde047),
+    0 0 54px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: firefly-float calc(11s * var(--anim-scale, 1)) ease-in-out infinite alternate;
+}
+.atmosphere-fireflies i:nth-child(1) { left: 16%; top: 72%; animation-duration: calc(9s * var(--anim-scale, 1)); animation-delay: calc(-2s * var(--anim-scale, 1)); }
+.atmosphere-fireflies i:nth-child(2) { left: 74%; top: 26%; width: 18px; height: 18px; animation-duration: calc(13s * var(--anim-scale, 1)); animation-delay: calc(-6s * var(--anim-scale, 1)); animation-direction: alternate-reverse; }
+.atmosphere-fireflies i:nth-child(3) { left: 42%; top: 48%; width: 11px; height: 11px; animation-duration: calc(8s * var(--anim-scale, 1)); animation-delay: calc(-4s * var(--anim-scale, 1)); }
+.atmosphere-fireflies i:nth-child(4) { left: 84%; top: 68%; width: 15px; height: 15px; animation-duration: calc(12s * var(--anim-scale, 1)); animation-delay: calc(-9s * var(--anim-scale, 1)); }
+.atmosphere-fireflies i:nth-child(5) { left: 26%; top: 22%; width: 12px; height: 12px; animation-duration: calc(10s * var(--anim-scale, 1)); animation-delay: calc(-5s * var(--anim-scale, 1)); animation-direction: alternate-reverse; }
+.atmosphere-fireflies i:nth-child(6) { left: 58%; top: 82%; width: 16px; height: 16px; animation-duration: calc(14s * var(--anim-scale, 1)); animation-delay: calc(-7s * var(--anim-scale, 1)); }
+
+/* 2. Synthwave — Neon sunset & horizon grid */
+.atmosphere-synthwave {
+  background: linear-gradient(180deg, #090418 0%, #1c0b3b 44%, #4a1259 64%, #120624 65%, #070312 100%);
+}
+.atmosphere-synthwave i:nth-child(1) {
+  display: block;
+  width: 28%;
+  aspect-ratio: 1;
+  left: 36%;
+  top: 20%;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #fde047 0%, #fb923c 42%, #f43f5e 78%, #c026d3 100%);
+  box-shadow: 0 0 90px #f43f5e88, 0 0 160px #c026d355;
+  -webkit-mask-image: repeating-linear-gradient(
+    180deg,
+    #000 0%,
+    #000 56%,
+    transparent 56%,
+    transparent 59%,
+    #000 59%,
+    #000 68%,
+    transparent 68%,
+    transparent 72%,
+    #000 72%,
+    #000 80%,
+    transparent 80%,
+    transparent 85%,
+    #000 85%,
+    #000 91%,
+    transparent 91%,
+    transparent 96%,
+    #000 96%
+  );
+  mask-image: repeating-linear-gradient(
+    180deg,
+    #000 0%,
+    #000 56%,
+    transparent 56%,
+    transparent 59%,
+    #000 59%,
+    #000 68%,
+    transparent 68%,
+    transparent 72%,
+    #000 72%,
+    #000 80%,
+    transparent 80%,
+    transparent 85%,
+    #000 85%,
+    #000 91%,
+    transparent 91%,
+    transparent 96%,
+    #000 96%
+  );
+  animation: synth-sun calc(8s * var(--anim-scale, 1)) ease-in-out infinite alternate;
+}
+.atmosphere-synthwave i:nth-child(2) {
+  display: block;
+  border-radius: 0;
+  left: -35%;
+  right: -35%;
+  bottom: -25%;
+  height: 55%;
+  background-image:
+    linear-gradient(transparent 0%, #f43f5e66 2%, transparent 4%),
+    linear-gradient(90deg, #38bdf855 1px, transparent 1px),
+    linear-gradient(0deg, #f472b666 1px, transparent 1px);
+  background-size: 100% 100%, 48px 48px, 48px 48px;
+  transform-origin: 50% 0%;
+  animation: synth-grid calc(2.4s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-synthwave i:nth-child(3) {
+  display: block;
+  border-radius: 0;
+  left: 0;
+  right: 0;
+  top: 63%;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, #38bdf8, #f472b6, #38bdf8, transparent);
+  box-shadow: 0 0 28px 4px #f472b6;
+}
+.atmosphere-synthwave i:nth-child(n + 4) { display: none; }
+
+/* 3. Matrix — Cascading phosphor code streams */
+.atmosphere-matrix {
+  background:
+    radial-gradient(ellipse at 50% 0%, color-mix(in srgb, #10b981 24%, transparent), transparent 70%),
+    repeating-linear-gradient(90deg, transparent 0 26px, color-mix(in srgb, #10b981 10%, transparent) 26px 27px);
+}
+.atmosphere-matrix i {
+  display: block;
+  width: 3px;
+  height: 36%;
+  top: -40%;
+  border-radius: 999px;
+  background: linear-gradient(180deg, transparent 0%, #059669 35%, #34d399 82%, #ecfdf5 100%);
+  box-shadow: 0 0 16px #10b981, 0 0 30px #34d399;
+  animation: matrix-drop calc(4.2s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-matrix i:nth-child(1) { left: 11%; animation-duration: calc(3.6s * var(--anim-scale, 1)); animation-delay: calc(-1.2s * var(--anim-scale, 1)); }
+.atmosphere-matrix i:nth-child(2) { left: 27%; height: 46%; animation-duration: calc(4.8s * var(--anim-scale, 1)); animation-delay: calc(-3.4s * var(--anim-scale, 1)); }
+.atmosphere-matrix i:nth-child(3) { left: 45%; height: 30%; animation-duration: calc(3.1s * var(--anim-scale, 1)); animation-delay: calc(-0.7s * var(--anim-scale, 1)); }
+.atmosphere-matrix i:nth-child(4) { left: 62%; height: 50%; animation-duration: calc(5.2s * var(--anim-scale, 1)); animation-delay: calc(-2.8s * var(--anim-scale, 1)); }
+.atmosphere-matrix i:nth-child(5) { left: 78%; height: 38%; animation-duration: calc(3.9s * var(--anim-scale, 1)); animation-delay: calc(-1.9s * var(--anim-scale, 1)); }
+.atmosphere-matrix i:nth-child(6) { left: 91%; height: 42%; animation-duration: calc(4.4s * var(--anim-scale, 1)); animation-delay: calc(-4.1s * var(--anim-scale, 1)); }
+
+/* 4. Lava lamp — Morphing blobs of warm plasma */
+.atmosphere-lava {
+  background: radial-gradient(ellipse at 50% 100%, color-mix(in srgb, var(--accent) 22%, #fb718533), transparent 70%);
+}
+.atmosphere-lava i {
+  display: block;
+  width: 34%;
+  aspect-ratio: 1;
+  filter: blur(28px);
+  background: linear-gradient(135deg, var(--accent), #f43f5e, #fb923c);
+  opacity: 0.78;
+  animation: lava-morph calc(16s * var(--anim-scale, 1)) ease-in-out infinite alternate;
+}
+.atmosphere-lava i:nth-child(1) { left: 10%; top: 55%; width: 38%; animation-duration: calc(14s * var(--anim-scale, 1)); animation-delay: calc(-3s * var(--anim-scale, 1)); }
+.atmosphere-lava i:nth-child(2) { left: 52%; top: 18%; width: 42%; background: linear-gradient(135deg, #c084fc, var(--accent), #38bdf8); animation-duration: calc(19s * var(--anim-scale, 1)); animation-delay: calc(-9s * var(--anim-scale, 1)); animation-direction: alternate-reverse; }
+.atmosphere-lava i:nth-child(3) { left: 32%; top: -8%; width: 28%; background: linear-gradient(135deg, #fbbf24, #f43f5e); animation-duration: calc(15s * var(--anim-scale, 1)); animation-delay: calc(-6s * var(--anim-scale, 1)); }
+.atmosphere-lava i:nth-child(4) { left: 68%; top: 62%; width: 30%; background: linear-gradient(135deg, var(--accent), #ec4899); animation-duration: calc(17s * var(--anim-scale, 1)); animation-delay: calc(-12s * var(--anim-scale, 1)); }
+.atmosphere-lava i:nth-child(n + 5) { display: none; }
+
+/* 5. Prism rays — Rotating spectral light beams */
+.atmosphere-prism i:nth-child(-n + 3) {
+  display: block;
+  inset: -45%;
+  border-radius: 50%;
+  filter: blur(42px);
+  background: conic-gradient(
+    from 0deg at 50% 50%,
+    transparent 0deg,
+    var(--accent) 28deg,
+    transparent 65deg,
+    #38bdf8 120deg,
+    transparent 165deg,
+    #f472b6 220deg,
+    transparent 265deg,
+    #a855f7 315deg,
+    transparent 360deg
+  );
+  opacity: 0.65;
+  animation: prism-spin calc(28s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-prism i:nth-child(2) {
+  opacity: 0.45;
+  filter: blur(55px) hue-rotate(45deg);
+  animation-duration: calc(38s * var(--anim-scale, 1));
+  animation-direction: reverse;
+}
+.atmosphere-prism i:nth-child(3) {
+  inset: -25%;
+  opacity: 0.35;
+  animation-duration: calc(20s * var(--anim-scale, 1));
+}
+.atmosphere-prism i:nth-child(n + 4) { display: none; }
+
+/* 6. Ripples — Expanding concentric water rings */
+.atmosphere-ripples i {
+  display: block;
+  left: 50%;
+  top: 50%;
+  width: 68%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  box-shadow:
+    0 0 35px color-mix(in srgb, var(--accent) 40%, transparent),
+    inset 0 0 35px color-mix(in srgb, var(--accent) 25%, transparent);
+  opacity: 0;
+  animation: ripple-expand calc(9s * var(--anim-scale, 1)) cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.atmosphere-ripples i:nth-child(1) { animation-delay: 0s; }
+.atmosphere-ripples i:nth-child(2) { animation-delay: calc(-1.5s * var(--anim-scale, 1)); border-color: color-mix(in srgb, var(--accent) 65%, #38bdf8); }
+.atmosphere-ripples i:nth-child(3) { animation-delay: calc(-3s * var(--anim-scale, 1)); }
+.atmosphere-ripples i:nth-child(4) { animation-delay: calc(-4.5s * var(--anim-scale, 1)); border-color: color-mix(in srgb, var(--accent) 65%, #a855f7); }
+.atmosphere-ripples i:nth-child(5) { animation-delay: calc(-6s * var(--anim-scale, 1)); }
+.atmosphere-ripples i:nth-child(6) { animation-delay: calc(-7.5s * var(--anim-scale, 1)); border-color: color-mix(in srgb, var(--accent) 65%, #f472b6); }
+
+/* 7. Spiral galaxy — Swirling cosmic dust & core */
+.atmosphere-galaxy {
+  background: radial-gradient(ellipse at 50% 50%, #1a103c 0%, #090618 70%, #04030a 100%);
+}
+.atmosphere-galaxy i:nth-child(1),
+.atmosphere-galaxy i:nth-child(2) {
+  display: block;
+  left: 15%;
+  top: 10%;
+  width: 70%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  filter: blur(26px);
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    var(--accent) 45deg,
+    #38bdf8 95deg,
+    transparent 155deg,
+    #ec4899 225deg,
+    #a855f7 280deg,
+    transparent 340deg
+  );
+  opacity: 0.72;
+  animation: galaxy-spin calc(32s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-galaxy i:nth-child(2) {
+  left: 22%;
+  top: 18%;
+  width: 56%;
+  filter: blur(18px) hue-rotate(50deg);
+  opacity: 0.6;
+  animation-duration: calc(22s * var(--anim-scale, 1));
+  animation-direction: reverse;
+}
+.atmosphere-galaxy i:nth-child(3) {
+  display: block;
+  left: 41%;
+  top: 38%;
+  width: 18%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 0%, #fde047 35%, var(--accent) 70%, transparent 100%);
+  filter: blur(12px);
+  box-shadow: 0 0 80px 25px var(--accent);
+  animation: breathe calc(5s * var(--anim-scale, 1)) ease-in-out infinite;
+}
+.atmosphere-galaxy i:nth-child(4) {
+  --star-tile: 520px;
+  display: block;
+  inset: calc(-1 * var(--star-tile));
+  border-radius: 0;
+  background: url("/space-stars.svg") repeat;
+  background-size: var(--star-tile) var(--star-tile);
+  opacity: 0.65;
+  animation: star-drift calc(180s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-galaxy i:nth-child(n + 5) { display: none; }
+
+/* 8. Meteor shower — Streaking shooting stars */
+.atmosphere-meteors {
+  background: radial-gradient(ellipse at 75% 20%, #131c38 0%, #070b18 75%);
+}
+.atmosphere-meteors i {
+  display: block;
+  width: 180px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #ffffff, var(--accent), transparent);
+  box-shadow: 0 0 16px 2px var(--accent);
+  opacity: 0;
+  animation: meteor-streak calc(5.5s * var(--anim-scale, 1)) ease-in infinite;
+}
+.atmosphere-meteors i:nth-child(1) { left: 65%; top: 8%; animation-duration: calc(4.6s * var(--anim-scale, 1)); animation-delay: calc(-0.5s * var(--anim-scale, 1)); }
+.atmosphere-meteors i:nth-child(2) { left: 88%; top: 24%; width: 230px; animation-duration: calc(6.2s * var(--anim-scale, 1)); animation-delay: calc(-2.1s * var(--anim-scale, 1)); }
+.atmosphere-meteors i:nth-child(3) { left: 45%; top: -4%; width: 150px; animation-duration: calc(5.1s * var(--anim-scale, 1)); animation-delay: calc(-3.7s * var(--anim-scale, 1)); }
+.atmosphere-meteors i:nth-child(4) { left: 95%; top: 45%; width: 200px; animation-duration: calc(5.8s * var(--anim-scale, 1)); animation-delay: calc(-1.3s * var(--anim-scale, 1)); }
+.atmosphere-meteors i:nth-child(5) { left: 32%; top: 14%; width: 160px; animation-duration: calc(6.8s * var(--anim-scale, 1)); animation-delay: calc(-4.8s * var(--anim-scale, 1)); }
+.atmosphere-meteors i:nth-child(6) {
+  --star-tile: 560px;
+  inset: calc(-1 * var(--star-tile));
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  box-shadow: none;
+  background: url("/space-stars.svg") repeat;
+  background-size: var(--star-tile) var(--star-tile);
+  opacity: 0.55;
+  animation: star-drift calc(200s * var(--anim-scale, 1)) linear infinite;
+}
+
+/* 9. Ocean waves — Flowing bioluminescent tides */
+.atmosphere-waves i {
+  display: block;
+  width: 220%;
+  aspect-ratio: 1;
+  left: -60%;
+  top: 58%;
+  border-radius: 43% 47% 41% 45%;
+  background: radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--accent) 42%, #06b6d4), transparent 72%);
+  border-top: 2px solid color-mix(in srgb, var(--accent) 80%, #fff);
+  box-shadow: 0 -18px 50px color-mix(in srgb, var(--accent) 35%, transparent);
+  opacity: 0.55;
+  animation: wave-roll calc(18s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-waves i:nth-child(2) {
+  top: 64%;
+  border-radius: 46% 42% 48% 40%;
+  border-top-color: #38bdf8;
+  opacity: 0.42;
+  animation-duration: calc(24s * var(--anim-scale, 1));
+  animation-direction: reverse;
+}
+.atmosphere-waves i:nth-child(3) {
+  top: 71%;
+  border-radius: 41% 49% 43% 46%;
+  border-top-color: #a855f7;
+  opacity: 0.35;
+  animation-duration: calc(30s * var(--anim-scale, 1));
+  animation-delay: calc(-9s * var(--anim-scale, 1));
+}
+.atmosphere-waves i:nth-child(n + 4) { display: none; }
+
+/* 10. Circuit pulse — Grid nodes & radar sweeps */
+.atmosphere-cyberpulse {
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--accent) 18%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 18%, transparent) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+.atmosphere-cyberpulse i:nth-child(1) {
+  display: block;
+  left: 20%;
+  top: 15%;
+  width: 60%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0deg, color-mix(in srgb, var(--accent) 55%, transparent) 60deg, transparent 65deg);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: prism-spin calc(8s * var(--anim-scale, 1)) linear infinite;
+}
+.atmosphere-cyberpulse i:nth-child(2),
+.atmosphere-cyberpulse i:nth-child(3) {
+  display: block;
+  border-radius: 999px;
+  height: 2px;
+  width: 28%;
+  left: -30%;
+  top: 32%;
+  background: linear-gradient(90deg, transparent, var(--accent), #fff);
+  box-shadow: 0 0 18px 2px var(--accent);
+  animation: cyber-trace-x calc(5s * var(--anim-scale, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.atmosphere-cyberpulse i:nth-child(3) {
+  top: 72%;
+  background: linear-gradient(90deg, transparent, #38bdf8, #fff);
+  box-shadow: 0 0 18px 2px #38bdf8;
+  animation-duration: calc(6.5s * var(--anim-scale, 1));
+  animation-delay: calc(-2.7s * var(--anim-scale, 1));
+}
+.atmosphere-cyberpulse i:nth-child(4),
+.atmosphere-cyberpulse i:nth-child(5) {
+  display: block;
+  border-radius: 999px;
+  width: 2px;
+  height: 28%;
+  top: -30%;
+  left: 28%;
+  background: linear-gradient(180deg, transparent, var(--accent), #fff);
+  box-shadow: 0 0 18px 2px var(--accent);
+  animation: cyber-trace-y calc(5.8s * var(--anim-scale, 1)) cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+.atmosphere-cyberpulse i:nth-child(5) {
+  left: 74%;
+  background: linear-gradient(180deg, transparent, #f472b6, #fff);
+  box-shadow: 0 0 18px 2px #f472b6;
+  animation-duration: calc(7.2s * var(--anim-scale, 1));
+  animation-delay: calc(-3.4s * var(--anim-scale, 1));
+}
+.atmosphere-cyberpulse i:nth-child(6) { display: none; }
+.motion-off *:not(.atmosphere i):not(.background-preview i),
 .motion-off *::before,
 .motion-off *::after {
   animation: none !important;
@@ -315,6 +711,13 @@ p {
 .motion-off * {
   transition: none !important;
 }
+.motion-off .atmosphere i,
+.motion-off .background-preview i {
+  animation-play-state: paused !important;
+}
+.motion-off .click-spark {
+  display: none;
+}
 .titlebar {
   height: 40px;
   flex-shrink: 0;
@@ -322,7 +725,8 @@ p {
   align-items: center;
   border-bottom: 1px solid var(--border);
   padding-left: 18px;
-  background: color-mix(in srgb, var(--bg) 95%, transparent);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(12px) saturate(130%);
   -webkit-app-region: drag;
   user-select: none;
 }
@@ -352,6 +756,7 @@ p {
   width: 24px;
   height: 27px;
   align-items: flex-end;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--accent) 30%, transparent));
 }
 .brand-glyph i {
   position: absolute;
@@ -361,6 +766,7 @@ p {
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 10px var(--accent), 0 0 20px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 .titlebar-caption {
   font-size: 11px;
@@ -423,7 +829,8 @@ kbd {
   width: 52px;
   flex-shrink: 0;
   border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter: blur(12px) saturate(130%);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -448,12 +855,13 @@ kbd {
 }
 .icon-button:hover:not(:disabled) {
   color: var(--text);
-  background: color-mix(in srgb, var(--muted) 10%, transparent);
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
   transform: translateY(-1px);
 }
 .icon-button.active {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .rail .icon-button {
   width: 34px;
@@ -467,6 +875,7 @@ kbd {
   left: -9px;
   background: var(--accent);
   border-radius: 2px;
+  box-shadow: 0 0 10px var(--accent);
 }
 .rail-badge {
   position: absolute;
@@ -495,7 +904,8 @@ kbd {
   flex-direction: column;
   min-width: 0;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--surface) 54%, var(--bg) 30%);
+  background: color-mix(in srgb, var(--surface) 74%, var(--bg) 14%);
+  backdrop-filter: blur(12px) saturate(130%);
   border-right: 1px solid var(--border);
   position: relative;
   min-height: 0;
@@ -801,7 +1211,8 @@ kbd {
   align-items: stretch;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  backdrop-filter: blur(12px) saturate(130%);
 }
 .session-tabs {
   display: flex;
@@ -825,11 +1236,16 @@ kbd {
   position: relative;
 }
 .session-tab.selected {
-  background: color-mix(in srgb, var(--surface) 56%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--tab-color, var(--accent)) 15%, transparent),
+    color-mix(in srgb, var(--surface) 58%, transparent)
+  );
   border-top-color: var(--tab-color);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--tab-color, var(--accent)) 35%, transparent);
 }
 .session-tab:hover {
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 75%, transparent);
 }
 .tab-select {
   padding: 0 10px 0 15px;
@@ -983,7 +1399,9 @@ kbd {
   flex-shrink: 0;
   font-size: 11px;
   color: var(--muted);
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
 }
 .contextbar > div {
   display: flex;
@@ -1217,7 +1635,15 @@ kbd {
 }
 .user-message > div {
   font-family: var(--font);
-  background: var(--bubble);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--agent-color, var(--accent)) 14%, var(--bubble)),
+    var(--bubble)
+  );
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--accent)) 24%, var(--border));
+  box-shadow:
+    0 10px 26px -10px #00000045,
+    inset 0 1px 0 #ffffff10;
   font-size: var(--font-size);
   line-height: 1.6;
   border-radius: 20px 20px 5px 20px;
@@ -1441,15 +1867,24 @@ kbd {
 @media (prefers-reduced-motion: reduce) { .command-menu, .command-refreshing { animation: none; } }
 .composer {
   container-type: inline-size;
-  border: 1px solid color-mix(in srgb, var(--border) 90%, var(--muted));
-  background: color-mix(in srgb, var(--surface) 80%, var(--bg));
-  border-radius: 13px;
-  box-shadow: 0 5px 30px #0000000d;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, var(--muted));
+  background: color-mix(in srgb, var(--surface) 88%, var(--bg) 8%);
+  backdrop-filter: blur(12px) saturate(130%);
+  border-radius: 14px;
+  box-shadow:
+    0 12px 36px -8px #00000040,
+    inset 0 1px 0 #ffffff0d;
   overflow: hidden;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
 .composer:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 33%, var(--border));
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 3%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color, var(--accent)) 55%, var(--border));
+  box-shadow:
+    0 14px 42px -8px #00000050,
+    0 0 28px -6px color-mix(in srgb, var(--agent-color, var(--accent)) 28%, transparent),
+    0 0 0 2px color-mix(in srgb, var(--agent-color, var(--accent)) 14%, transparent);
 }
 .composer textarea {
   display: block;
@@ -1505,14 +1940,19 @@ kbd {
   height: 30px;
   display: grid;
   place-items: center;
-  background: var(--accent);
-  color: var(--bg);
+  background: linear-gradient(
+    135deg,
+    var(--agent-color, var(--accent)),
+    color-mix(in srgb, var(--agent-color, var(--accent)) 72%, var(--accent))
+  );
+  color: var(--agent-foreground, var(--accent-foreground, var(--bg)));
   border-radius: 9px;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--agent-color, var(--accent)) 32%, transparent);
 }
 .send-button:hover:not(:disabled) {
-  filter: brightness(1.1);
+  filter: brightness(1.12);
   transform: translateY(-2px);
-  box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--agent-color, var(--accent)) 45%, transparent);
 }
 .stop-button {
   background: var(--text);
@@ -1563,23 +2003,34 @@ kbd {
   display: grid;
   place-items: center;
   margin: 0 auto 29px;
-  width: 76px;
-  height: 76px;
-  background: color-mix(in srgb, var(--accent) 3%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  width: 78px;
+  height: 78px;
+  background: radial-gradient(
+    circle at 35% 30%,
+    color-mix(in srgb, var(--agent-color, var(--accent)) 24%, transparent),
+    color-mix(in srgb, var(--surface) 45%, transparent)
+  );
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--accent)) 38%, var(--border));
+  box-shadow:
+    0 18px 44px -12px color-mix(in srgb, var(--agent-color, var(--accent)) 35%, #0008),
+    inset 0 1px 0 #ffffff1c;
   border-radius: 24px;
   animation: float 8s ease-in-out infinite;
 }
 .session-empty .eyebrow {
   font-size: 9px;
   letter-spacing: 2px;
-  opacity: 0.6;
+  color: color-mix(in srgb, var(--agent-color, var(--accent)) 75%, var(--muted));
 }
 .session-empty h1 {
-  font-size: 31px;
-  font-weight: 500;
+  font-size: 32px;
+  font-weight: 560;
   letter-spacing: -1px;
   margin: 14px 0;
+  background: linear-gradient(135deg, var(--text) 35%, color-mix(in srgb, var(--agent-color, var(--accent)) 65%, var(--text)));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .session-empty > p {
   font-size: 13px;
@@ -1591,31 +2042,34 @@ kbd {
 .prompt-suggestions {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
   margin: 29px auto 24px;
-  max-width: 380px;
+  max-width: 390px;
 }
 .prompt-suggestions button {
   display: flex;
   align-items: center;
   justify-content: space-between;
   text-align: left;
-  padding: 12px 15px;
+  padding: 12px 16px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 11px;
+  border-radius: 10px;
+  font-size: 11.5px;
   color: var(--muted);
-  background: color-mix(in srgb, var(--surface) 20%, transparent);
+  background: color-mix(in srgb, var(--surface) 58%, transparent);
+  backdrop-filter: blur(12px);
 }
 .prompt-suggestions button:hover {
   color: var(--text);
-  background: var(--surface);
-  border-color: color-mix(in srgb, var(--accent) 20%, var(--border));
-  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color, var(--accent)) 45%, var(--border));
+  box-shadow: 0 10px 24px -10px color-mix(in srgb, var(--agent-color, var(--accent)) 28%, #0006);
+  transform: translateY(-2px);
 }
 .prompt-suggestions button svg {
   transform: rotate(35deg);
-  opacity: 0.6;
+  opacity: 0.65;
+  color: var(--agent-color, var(--accent));
 }
 .session-empty-note {
   display: flex;
@@ -1653,13 +2107,20 @@ kbd {
   padding-bottom: 20px;
 }
 .welcome-orb {
-  width: 74px;
-  height: 74px;
+  width: 78px;
+  height: 78px;
   position: relative;
   margin-bottom: 34px;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--accent) 3%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 24px;
+  background: radial-gradient(
+    circle at 30% 25%,
+    color-mix(in srgb, var(--accent) 24%, transparent),
+    color-mix(in srgb, var(--surface) 55%, transparent)
+  );
+  box-shadow:
+    0 18px 50px -10px color-mix(in srgb, var(--accent) 34%, transparent),
+    inset 0 1px 0 #ffffff22;
   display: grid;
   place-items: center;
   animation: float 9s ease-in-out infinite;
@@ -1677,23 +2138,35 @@ kbd {
 }
 .orbit-dot {
   position: absolute;
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   right: -3px;
   top: 18px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 20px var(--accent);
+  box-shadow: 0 0 16px 3px var(--accent);
+  transform-origin: -35px 21px;
+  animation: orb-satellite 8s linear infinite;
 }
 .welcome h1 {
   font-size: clamp(40px, 4.7vw, 64px);
   line-height: 1.12;
   letter-spacing: -2.8px;
-  font-weight: 480;
+  font-weight: 540;
   margin: 20px 0 21px;
+  background: linear-gradient(
+    135deg,
+    var(--text) 30%,
+    color-mix(in srgb, var(--accent) 72%, var(--text)) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .welcome h1 > span {
   color: var(--accent);
+  -webkit-text-fill-color: var(--accent);
+  text-shadow: 0 0 26px color-mix(in srgb, var(--accent) 65%, transparent);
 }
 .welcome p {
   color: var(--muted);
@@ -1712,34 +2185,43 @@ kbd {
   align-items: center;
   justify-content: center;
   gap: 9px;
-  border-radius: 7px;
-  padding: 11px 15px;
+  border-radius: 9px;
+  padding: 11px 16px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 550;
 }
 .primary {
-  background: var(--accent);
-  color: var(--bg);
+  background: linear-gradient(
+    135deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 78%, #ffffff)
+  );
+  color: var(--accent-foreground, var(--bg));
+  box-shadow:
+    0 8px 24px -6px color-mix(in srgb, var(--accent) 45%, transparent),
+    inset 0 1px 0 #ffffff38;
 }
 .primary:hover:not(:disabled) {
-  filter: brightness(1.05);
-  transform: translateY(-1px);
-  box-shadow: 0 3px 15px color-mix(in srgb, var(--accent) 12%, transparent);
+  filter: brightness(1.08);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -6px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .secondary {
   border: 1px solid var(--border);
   color: var(--muted);
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+  backdrop-filter: blur(12px);
 }
 .secondary:hover:not(:disabled) {
   background: var(--surface);
   color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
-  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  transform: translateY(-2px);
 }
 .agent-line {
   display: flex;
-  gap: 26px;
+  flex-wrap: wrap;
+  gap: 10px;
   margin: 29px 0 0;
   padding: 21px 0;
   border-top: 1px solid var(--border);
@@ -1750,14 +2232,21 @@ kbd {
 .agent-line > span {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--agent-color, var(--accent)) 8%, color-mix(in srgb, var(--surface) 55%, transparent));
+  border: 1px solid color-mix(in srgb, var(--agent-color, var(--accent)) 22%, var(--border));
+  color: var(--text);
+  backdrop-filter: blur(10px);
 }
 .agent-line i {
   display: block;
-  width: 3px;
-  height: 3px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--agent-color, var(--accent));
+  box-shadow: 0 0 8px var(--agent-color, var(--accent));
 }
 .welcome-customize {
   font-size: 10px;
@@ -1839,7 +2328,8 @@ kbd {
   color: var(--muted);
   border-top: 1px solid var(--border);
   padding: 0 13px 0 20px;
-  background: color-mix(in srgb, var(--bg) 95%, transparent);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px) saturate(130%);
   flex-shrink: 0;
   gap: 15px;
 }
@@ -1904,9 +2394,10 @@ kbd {
   position: fixed;
   pointer-events: none;
   color: var(--accent);
-  font-size: 20px;
+  font-size: 18px;
+  text-shadow: 0 0 12px currentColor;
   z-index: 300;
-  animation: spark 0.7s ease-out forwards;
+  animation: spark 0.72s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 .editor-pane {
   flex: 1;
@@ -2887,27 +3378,33 @@ kbd {
 }
 .background-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 10px;
   margin-bottom: 19px;
 }
 .background-card {
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 10px;
   padding: 8px;
   text-align: left;
   overflow: hidden;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
 }
 .background-card.selected {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 10px 24px -10px color-mix(in srgb, var(--accent) 35%, #0006);
 }
 .background-card:hover {
   transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 .background-card strong {
   display: block;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 550;
   padding: 9px 4px 0;
 }
 .background-card small {
@@ -2927,22 +3424,30 @@ kbd {
 .background-kind.animated { color: var(--accent); }
 .background-swatch {
   height: 64px;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--surface);
   position: relative;
   overflow: hidden;
 }
 .background-swatch > svg {
-  z-index: 1;
+  z-index: 2;
   position: absolute;
   right: 8px;
   top: 8px;
   color: var(--accent);
+  filter: drop-shadow(0 0 6px var(--bg));
 }
 .swatch-aurora,
 .swatch-orbits,
-.swatch-rain {
-  background: var(--bg);
+.swatch-rain,
+.swatch-fireflies,
+.swatch-matrix,
+.swatch-lava,
+.swatch-prism,
+.swatch-ripples,
+.swatch-waves,
+.swatch-cyberpulse {
+  background-color: var(--bg);
 }
 .background-preview {
   position: absolute;
@@ -2950,22 +3455,81 @@ kbd {
   overflow: hidden;
   filter: blur(var(--bg-blur, 0px));
 }
+.background-card:not(.selected):not(:hover):not(:focus-visible) .background-preview i {
+  animation-play-state: paused;
+}
 .background-preview.atmosphere-aurora i {
   filter: blur(12px);
-  opacity: 0.55;
+  opacity: 0.65;
 }
 .background-preview.atmosphere-orbits i {
   border-width: 1px;
-  opacity: 0.6;
+  opacity: 0.7;
 }
 .background-preview.atmosphere-stars i:nth-child(-n + 3),
-.background-preview.atmosphere-nebula i:nth-child(4) {
+.background-preview.atmosphere-nebula i:nth-child(4),
+.background-preview.atmosphere-galaxy i:nth-child(4),
+.background-preview.atmosphere-meteors i:nth-child(6) {
   --star-tile: 170px;
-  animation-duration: 55s;
+  animation-duration: calc(55s * var(--anim-scale, 1));
 }
 .background-preview.atmosphere-stars i:nth-child(2) { --star-tile: 230px; }
 .background-preview.atmosphere-stars i:nth-child(3) { --star-tile: 130px; }
-.background-preview.atmosphere-nebula i:nth-child(-n + 3) { animation-duration: 24s; }
+.background-preview.atmosphere-nebula i:nth-child(-n + 3) { animation-duration: calc(24s * var(--anim-scale, 1)); }
+.background-preview.atmosphere-fireflies i {
+  width: 6px;
+  height: 6px;
+  box-shadow: 0 0 10px 3px color-mix(in srgb, var(--accent) 80%, #fde047);
+}
+.background-preview.atmosphere-lava i {
+  filter: blur(8px);
+}
+.background-preview.atmosphere-prism i:nth-child(-n + 3) {
+  filter: blur(10px);
+}
+.background-preview.atmosphere-ripples i {
+  border-width: 1px;
+}
+.background-preview.atmosphere-galaxy i:nth-child(1),
+.background-preview.atmosphere-galaxy i:nth-child(2) {
+  filter: blur(8px);
+}
+.background-preview.atmosphere-galaxy i:nth-child(3) {
+  filter: blur(4px);
+  box-shadow: 0 0 20px 6px var(--accent);
+}
+.background-preview.atmosphere-meteors i:nth-child(-n + 5) {
+  width: 48px;
+  height: 1.5px;
+}
+.background-preview.atmosphere-cyberpulse {
+  background-size: 14px 14px;
+}
+.speed-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -10px 0 18px;
+}
+.speed-presets button {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+.speed-presets button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.speed-presets button[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent);
+}
 .swatch-grid {
   background:
     linear-gradient(var(--border) 1px, transparent 1px),
@@ -3145,6 +3709,159 @@ kbd {
     transform: translate(-60px, 750%);
   }
 }
+@keyframes firefly-float {
+  0% {
+    transform: translate(0, 0) scale(0.75);
+    opacity: 0.35;
+  }
+  50% {
+    transform: translate(65px, -55px) scale(1.25);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-45px, -110px) scale(0.85);
+    opacity: 0.55;
+  }
+}
+@keyframes synth-sun {
+  from {
+    transform: translateY(0) scale(0.98);
+    filter: brightness(0.95);
+  }
+  to {
+    transform: translateY(-6%) scale(1.04);
+    filter: brightness(1.15);
+  }
+}
+@keyframes synth-grid {
+  from {
+    transform: perspective(260px) rotateX(68deg) translateY(0);
+  }
+  to {
+    transform: perspective(260px) rotateX(68deg) translateY(48px);
+  }
+}
+@keyframes matrix-drop {
+  from {
+    transform: translateY(0);
+    opacity: 0.95;
+  }
+  to {
+    transform: translateY(380%);
+    opacity: 0.2;
+  }
+}
+@keyframes lava-morph {
+  0% {
+    border-radius: 42% 58% 63% 37% / 45% 42% 58% 55%;
+    transform: translate(0, 0) rotate(0deg) scale(0.92);
+  }
+  50% {
+    border-radius: 58% 42% 38% 62% / 56% 62% 38% 44%;
+    transform: translate(18%, -22%) rotate(90deg) scale(1.12);
+  }
+  100% {
+    border-radius: 36% 64% 54% 46% / 63% 35% 65% 37%;
+    transform: translate(-14%, -34%) rotate(180deg) scale(0.96);
+  }
+}
+@keyframes prism-spin {
+  from {
+    transform: rotate(0deg) scale(1);
+  }
+  50% {
+    transform: rotate(180deg) scale(1.08);
+  }
+  to {
+    transform: rotate(360deg) scale(1);
+  }
+}
+@keyframes ripple-expand {
+  0% {
+    transform: translate(-50%, -50%) scale(0.06);
+    opacity: 0.9;
+  }
+  75% {
+    opacity: 0.35;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.65);
+    opacity: 0;
+  }
+}
+@keyframes galaxy-spin {
+  from {
+    transform: rotateX(52deg) rotateZ(0deg);
+  }
+  to {
+    transform: rotateX(52deg) rotateZ(360deg);
+  }
+}
+@keyframes meteor-streak {
+  0% {
+    transform: rotate(-35deg) translateX(0) scaleX(0.4);
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  38% {
+    transform: rotate(-35deg) translateX(-780px) scaleX(1.2);
+    opacity: 0;
+  }
+  100% {
+    transform: rotate(-35deg) translateX(-780px) scaleX(1.2);
+    opacity: 0;
+  }
+}
+@keyframes wave-roll {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes cyber-trace-x {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(520%);
+    opacity: 0;
+  }
+}
+@keyframes cyber-trace-y {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(520%);
+    opacity: 0;
+  }
+}
+@keyframes orb-satellite {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
 @keyframes breathe {
   0%,
   100% {
@@ -3179,12 +3896,15 @@ kbd {
   }
 }
 @keyframes spark {
-  from {
-    transform: translate(-50%, -50%) scale(0.4);
+  0% {
+    transform: translate(-50%, -50%) scale(0.35) rotate(0deg);
     opacity: 1;
   }
-  to {
-    transform: translate(-50%, -180%) scale(1.5);
+  65% {
+    opacity: 0.95;
+  }
+  100% {
+    transform: translate(calc(-50% + var(--spark-dx, 0px)), calc(-50% + var(--spark-dy, -36px))) scale(1.35) rotate(45deg);
     opacity: 0;
   }
 }
@@ -3268,12 +3988,19 @@ kbd {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  *,
+  *:not(.atmosphere i):not(.background-preview i),
   *::before,
   *::after {
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+  .atmosphere i,
+  .background-preview i {
+    animation-play-state: paused !important;
+  }
+  .click-spark {
+    display: none;
   }
 }
 .model-controls {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -25,7 +25,7 @@ import ModelControls, { type ControlPanel } from "./ModelControls";
 import SessionControls, { lumenCommands, parseThreshold } from "./SessionControls";
 import type { SessionControlsState } from "./types";
 import QueuedMessages, { sendingMessage } from "./QueuedMessages";
-import { agentNames } from "./settings";
+import { agentNames, foregroundFor } from "./settings";
 import { ChatLink, LinkText, rehypeWebLinks, webLink } from "./ChatLinks";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
@@ -240,7 +240,10 @@ export default function Conversation({
   const statusCaption = controlPending ? "Reading or applying CLI controls…" : isCommandInput && commandLoading ? "Discovering commands…" : isCommandInput && commandError ? commandError : tab.phase === "finishing" ? "Grok has finished its response; the CLI is closing." : tab.phase === "waiting" ? "Grok's output has paused. Its CLI may still be running hooks or continuing the turn." : "";
   const compactLabel = tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()} tokens` : "Auto-compact · CLI default";
   return (
-    <div className={`conversation ${settings.compact ? "compact" : ""}`} onDragOver={(event) => { if (tab.agent !== "shell" && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+    <div
+      className={`conversation ${settings.compact ? "compact" : ""}`}
+      style={{ "--agent-color": color, "--agent-foreground": foregroundFor(color) } as CSSProperties}
+      onDragOver={(event) => { if (tab.agent !== "shell" && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={(event) => { if (tab.agent === "shell") return; event.preventDefault(); const files = Array.from(event.dataTransfer.files).map((file) => window.lumen.filePath(file)).filter(Boolean); if (files.length) onDropAttachments(files); }}>
       {tab.recoveryError && <div className="recovery-banner" role="alert"><span>{tab.recoveryError}</span><button onClick={onReconnect}>Retry connection</button></div>}
       {tab.nativeOwned && <div className="recovery-banner"><span>Native CLI is still open. Exit it when ready; Readable will reconnect to this conversation.</span><button onClick={onTerminal}>Show terminal</button></div>}
