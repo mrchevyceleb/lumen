@@ -88,6 +88,7 @@ export interface Tab {
   accountName?: string;
   name: string;
   nameCustom?: boolean;
+  archived?: boolean;
   color?: string;
   messages: Message[];
   busy: boolean;

@@ -522,7 +522,12 @@ kbd {
 .project-heading button { display: grid; place-items: center; padding: 4px; border-radius: 5px; }
 .project-heading button:hover { background: var(--border); color: var(--text); }
 .project-sidebar > input { font-size: 11px; padding: 7px 9px; margin: 0 5px 8px; background: transparent; flex-shrink: 0; }
-.project-scroll { overflow: auto; min-height: 0; padding: 1px 2px; }
+.project-scroll { flex: 1; overflow: auto; min-height: 0; padding: 1px 2px; }
+.archive-filter { display: flex; align-items: center; gap: 6px; margin: 0 5px 6px; padding: 6px 8px; border-radius: 7px; color: var(--muted); font-size: 11px; text-align: left; flex-shrink: 0; }
+.archive-filter > span { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.archive-filter small { font-size: 9px; }
+.archive-filter[aria-pressed="true"] { color: var(--text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.archive-filter:hover { color: var(--text); background: color-mix(in srgb, var(--muted) 8%, transparent); }
 .project-group { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; padding: 6px 10px; }
 .project-row { display: grid; grid-template-columns: 13px minmax(0, 1fr) 25px; align-items: center; position: relative; border: 1px solid transparent; border-radius: 7px; margin: 2px 0; }
 .project-row.selected { background: color-mix(in srgb, var(--project-color, var(--accent)) 8%, transparent); border-color: color-mix(in srgb, var(--project-color, var(--accent)) 18%, transparent); }
@@ -530,6 +535,7 @@ kbd {
 .project-row.drop-target { border-color: var(--accent); }
 .project-grip { color: var(--muted); opacity: .25; display: grid; cursor: grab; }
 .project-row:hover .project-grip { opacity: .7; }
+.project-row.archived .project-grip, .project-row.archived:hover .project-grip { opacity: 0; cursor: default; }
 .project-open { display: flex; align-items: center; gap: 7px; min-width: 0; text-align: left; padding: 7px 3px; font-size: 12px; }
 .project-open svg { color: var(--project-color, var(--muted)); }
 .project-row.selected .project-open svg { color: var(--project-color, var(--accent)); }
@@ -559,13 +565,11 @@ kbd {
 .project-menu .project-colors button { width: 18px; height: 18px; padding: 0; border: 2px solid transparent; border-radius: 50%; }
 .project-menu .project-colors button[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
 .project-colors input[type="color"] { width: 22px; height: 22px; padding: 1px; border-radius: 4px; }
-.archived-projects { margin-top: 12px; padding-top: 5px; border-top: 1px solid var(--border); }
-.archive-heading { display: flex; align-items: center; gap: 6px; width: 100%; padding: 8px 5px; color: var(--muted); font-size: 11px; text-align: left; }
-.archive-heading span { flex: 1; }
-.archive-heading small { font-size: 9px; }
-.archived-project { display: flex; align-items: center; gap: 4px; padding: 0 5px 0 17px; }
-.archived-project .project-open { flex: 1; }
-.project-restore { padding: 5px; color: var(--accent); font-size: 10px; }
+.archived-projects { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.project-row.archived { opacity: 0.82; }
+.project-row.archived.selected { opacity: 1; }
+.session-tab.archived { opacity: 0.72; }
+.session-tab.archived.selected { opacity: 1; }
 .update-card { display: flex; gap: 16px; align-items: flex-start; border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 24px 0 18px; }
 .update-card > svg { color: var(--accent); flex-shrink: 0; margin-top: 3px; }
 .update-card h4 { margin: 0 0 8px; font-size: 16px; }
@@ -846,6 +850,11 @@ kbd {
 .selected .tab-select {
   color: var(--text);
 }
+.session-tabs .chat-options { display: grid; place-items: center; color: var(--muted); padding: 2px; opacity: 0; }
+.session-tabs .session-tab:hover > .chat-options, .session-tabs .session-tab:focus-within > .chat-options, .session-tabs .chat-options[aria-expanded="true"] { opacity: 0.85; }
+.session-tabs .chat-menu { position: fixed; z-index: 40; min-width: 148px; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; padding: 4px; box-shadow: 0 10px 28px color-mix(in srgb, black 40%, transparent); }
+.session-tabs .chat-menu button { text-align: left; font-size: 11px; padding: 7px; border-radius: 4px; }
+.session-tabs .chat-menu button:hover, .session-tabs .chat-menu button:focus-visible { background: var(--border); }
 .session-tab > .icon-button {
   padding: 3px;
   opacity: 0;
@@ -866,7 +875,7 @@ kbd {
 .vertical-chats .chat-rename { flex: 1; min-width: 0; font-size: 11px; padding: 4px 7px; margin: 2px 4px; }
 .vertical-chats .session-tab.selected { border-left-color: var(--tab-color); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .vertical-chats .tab-select { padding: 6px 5px 6px 7px; gap: 6px; font-size: 11px; text-align: left; }
-.vertical-chats .tab-select > span:not(.agent-mark):not(.tiny-pulse):not(.chat-phase):not(.native-tag) { flex: 1; }
+.vertical-chats .tab-select > span:not(.agent-mark):not(.tiny-pulse):not(.chat-phase):not(.native-tag):not(.archived-tag) { flex: 1; }
 .chat-phase { color: var(--accent); flex-shrink: 0; }
 .screen-reader-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .active-chat-name { font-size: 11px; font-weight: 500; color: var(--text); max-width: 150px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -877,13 +886,14 @@ kbd {
 .chat-layout-picker button { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--muted); }
 .chat-layout-picker button:hover { color: var(--text); }
 .chat-layout-picker button[aria-pressed="true"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: color-mix(in srgb, var(--accent) 7%, transparent); }
-.native-tag {
+.native-tag, .archived-tag {
   font-size: 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 3px;
   opacity: 0.7;
 }
+.archived-tag { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; letter-spacing: 0; }
 .tab-actions {
   display: flex;
   align-items: center;
