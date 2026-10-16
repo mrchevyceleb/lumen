@@ -39,18 +39,30 @@ export interface GitFile {
   code: string;
   staged: boolean;
   unstaged: boolean;
+  conflict?: boolean;
+  untracked?: boolean;
   original?: string;
+}
+export interface GitWorktree {
+  path: string;
+  branch: string;
+  detached?: boolean;
+  primary?: boolean;
+  current?: boolean;
 }
 export interface GitState {
   available: boolean;
   error?: string;
+  root?: string;
   branch: string;
+  detached?: boolean;
   files: GitFile[];
+  truncated?: boolean;
   ahead: number;
   behind: number;
   upstream?: string;
   remote?: string;
-  worktrees: { path: string; branch: string }[];
+  worktrees: GitWorktree[];
   log: { hash: string; subject: string; author: string; when: string }[];
 }
 export interface Workspace {

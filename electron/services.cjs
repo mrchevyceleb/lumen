@@ -37,6 +37,89 @@ const strip = (value) =>
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
+// Parent GIT_DIR / GIT_WORK_TREE pins every command to one checkout. Drop only
+// those pins so each worktree is the repository its own path says it is.
+const GIT_PINS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_PREFIX", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_IMPLICIT_WORK_TREE", "GIT_NAMESPACE"];
+const gitEnv = () => {
+  const env = { ...process.env, LC_ALL: "C", GIT_OPTIONAL_LOCKS: "0" };
+  for (const key of GIT_PINS) delete env[key];
+  return env;
+};
+const gitPathKey = (value) => {
+  let key = String(value || "").replace(/[\\/]+/g, "/");
+  const root = key === "/" || /^[a-zA-Z]:\/$/.test(key);
+  if (!root) key = key.replace(/\/+$/, "");
+  // Windows paths are case-insensitive. Linux can have distinct folders that differ only by case.
+  if (process.platform === "win32") key = key.toLowerCase();
+  return key;
+};
+const pathInside = (child, parent) => {
+  if (!child || !parent) return false;
+  if (child === parent) return true;
+  const prefix = parent.endsWith("/") ? parent : `${parent}/`;
+  return child.startsWith(prefix);
+};
+// Git index paths already use "/". A backslash is a real filename character on Linux.
+const gitIndexPath = (value) => process.platform === "win32" ? String(value).replace(/\\/g, "/") : String(value);
+const STATUS_LIMIT = 10000;
+function parsePorcelain(raw, forceTruncated = false) {
+  const parts = String(raw || "").split("\0");
+  // A buffer cutoff ends mid-record. Drop that partial field so it is not stored as a path.
+  if (forceTruncated) parts.pop();
+  const files = [];
+  let branch = "", detached = false, upstream = "", ahead = 0, behind = 0, truncated = false;
+  for (let i = 0; i < parts.length; i++) {
+    const record = parts[i].replace(/\r/g, "");
+    if (!record || record === "\n") continue;
+    if (record.startsWith("# ")) {
+      if (record.startsWith("# branch.head ")) {
+        const head = record.slice("# branch.head ".length);
+        if (head === "(detached)") { detached = true; branch = "detached HEAD"; }
+        else branch = head;
+      } else if (record.startsWith("# branch.upstream ")) upstream = record.slice("# branch.upstream ".length);
+      else if (record.startsWith("# branch.ab ")) {
+        const counts = record.match(/\+(\d+)\s+-(\d+)/);
+        if (counts) { ahead = Number(counts[1]); behind = Number(counts[2]); }
+      }
+      continue;
+    }
+    if (files.length >= STATUS_LIMIT) { truncated = true; continue; }
+    if (record.startsWith("? ")) {
+      files.push({ path: gitIndexPath(record.slice(2)), code: "??", staged: false, unstaged: true, conflict: false, untracked: true });
+      continue;
+    }
+    if (record.startsWith("! ")) continue;
+    const kind = record[0];
+    if (kind !== "1" && kind !== "2" && kind !== "u") continue;
+    const tokens = record.split(" ");
+    const code = tokens[1] || "  ";
+    const pathStart = kind === "u" ? 10 : kind === "2" ? 9 : 8;
+    const filePath = gitIndexPath(tokens.slice(pathStart).join(" "));
+    if (!filePath) continue;
+    const conflict = kind === "u";
+    const file = {
+      path: filePath,
+      code,
+      staged: !conflict && code[0] !== " " && code[0] !== "." && code[0] !== "?",
+      unstaged: !conflict && code[1] !== " " && code[1] !== "." && code[1] !== "?",
+      conflict,
+      untracked: false,
+    };
+    if (kind === "2") {
+      const original = gitIndexPath((parts[++i] || "").replace(/\r/g, ""));
+      if (original && original !== "\n") file.original = original;
+    }
+    files.push(file);
+  }
+  return { branch, detached, upstream, ahead, behind, files, truncated: truncated || forceTruncated };
+}
+async function linkedWorktree(folder) {
+  try {
+    const gitPath = path.join(folder, ".git");
+    if ((await fs.stat(gitPath)).isDirectory()) return false;
+    return /[\\/]worktrees[\\/]/i.test(await fs.readFile(gitPath, "utf8"));
+  } catch { return false; }
+}
 
 function findExecutable(command, environment = process.env) {
   if (path.isAbsolute(command) && fsSync.existsSync(command)) return command;
@@ -131,7 +214,7 @@ class WorkspaceService {
       );
     } catch {}
   }
-  async open(folder) {
+  async resolveFolder(folder, remember) {
     let root = await fs.realpath(folder);
     if (!(await fs.stat(root)).isDirectory())
       throw new Error("Choose a folder.");
@@ -139,18 +222,22 @@ class WorkspaceService {
       const { stdout } = await execute(
         "git",
         ["-C", root, "rev-parse", "--show-toplevel"],
-        { windowsHide: true },
+        { encoding: "utf8", env: gitEnv(), windowsHide: true },
       );
       root = await fs.realpath(stdout.trim());
     } catch {}
     this.roots.add(root);
-    this.recent = [root, ...this.recent.filter((x) => x !== root)].slice(0, 12);
-    await fs.writeFile(
-      path.join(this.dataDir, "recent.json"),
-      JSON.stringify(this.recent),
-    );
+    if (remember) {
+      this.recent = [root, ...this.recent.filter((x) => x !== root)].slice(0, 12);
+      await fs.writeFile(
+        path.join(this.dataDir, "recent.json"),
+        JSON.stringify(this.recent),
+      );
+    }
     return { root, name: path.basename(root), git: await this.status(root) };
   }
+  open(folder) { return this.resolveFolder(folder, true); }
+  inspect(folder) { return this.resolveFolder(folder, false); }
   async register(folder) {
     const root = await fs.realpath(folder);
     if (!(await fs.stat(root)).isDirectory()) throw new Error("Choose a folder.");
@@ -158,8 +245,12 @@ class WorkspaceService {
     return { root, name: path.basename(root), git: { available: false, branch: "", files: [], ahead: 0, behind: 0, worktrees: [], log: [] } };
   }
   root(root) {
-    if (!this.roots.has(root)) throw new Error("Open this workspace first.");
-    return root;
+    if (this.roots.has(root)) return root;
+    if (process.platform === "win32") {
+      const key = gitPathKey(root);
+      for (const known of this.roots) if (gitPathKey(known) === key) return known;
+    }
+    throw new Error("Open this workspace first.");
   }
   async safe(root, relative = "") {
     this.root(root);
@@ -254,97 +345,113 @@ class WorkspaceService {
     await visit("", 0);
     return result.slice(0, 100);
   }
-  async git(root, args) {
-    this.root(root);
+  gitAt(cwd, args, options = {}) {
+    const maxBuffer = options.maxBuffer || 8 * 1024 * 1024;
+    return execute("git", ["-C", cwd, ...args], {
+      cwd,
+      encoding: "utf8",
+      env: gitEnv(),
+      windowsHide: true,
+      maxBuffer,
+      timeout: 120000,
+    }).then(
+      ({ stdout }) => stdout,
+      (error) => {
+        const overflow = error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/i.test(String(error.message || ""));
+        if (options.partial && overflow && error.stdout) {
+          const partial = new Error("Git status is too large to read in full.");
+          partial.partial = String(error.stdout);
+          partial.truncated = true;
+          throw partial;
+        }
+        throw new Error(strip(error.stderr || error.message).trim());
+      },
+    );
+  }
+  async worktreeRoot(folder) {
+    const registered = this.root(folder);
     try {
-      const { stdout } = await execute("git", ["-C", root, ...args], {
-        windowsHide: true,
-        maxBuffer: 8 * 1024 * 1024,
-        timeout: 120000,
-      });
-      return stdout;
-    } catch (error) {
-      throw new Error(strip(error.stderr || error.message).trim());
+      const toplevel = (await this.gitAt(registered, ["rev-parse", "--show-toplevel"])).trim();
+      const root = await fs.realpath(toplevel);
+      this.roots.add(root);
+      return root;
+    } catch {
+      return registered;
     }
   }
+  async git(root, args) {
+    return this.gitAt(await this.worktreeRoot(root), args);
+  }
+  async listWorktrees(cwd) {
+    const raw = await this.gitAt(cwd, ["worktree", "list", "--porcelain", "-z"]);
+    const worktrees = [];
+    let current;
+    for (const line of raw.split("\0")) {
+      const text = line.replace(/\r/g, "");
+      if (!text || text === "\n") continue;
+      if (text.startsWith("worktree ")) {
+        current = { path: text.slice("worktree ".length), branch: "detached HEAD", detached: true, primary: true, current: false };
+        worktrees.push(current);
+      } else if (!current) continue;
+      else if (text.startsWith("branch ")) {
+        current.branch = text.slice("branch ".length).replace(/^refs\/heads\//, "");
+        current.detached = false;
+      } else if (text === "detached") {
+        current.detached = true;
+        current.branch = "detached HEAD";
+      }
+    }
+    const here = gitPathKey(cwd);
+    await Promise.all(worktrees.map(async (tree) => {
+      try { tree.path = await fs.realpath(tree.path); } catch {}
+      tree.primary = !(await linkedWorktree(tree.path));
+      tree.current = gitPathKey(tree.path) === here;
+    }));
+    return worktrees;
+  }
   async status(root) {
-    this.root(root);
     try {
-      await this.git(root, ["rev-parse", "--show-toplevel"]);
-      const [raw, branch, log, remote, worktree] = await Promise.all([
-        this.git(root, ["status", "--porcelain=v1", "-z"]),
-        this.git(root, ["branch", "--show-current"]),
-        this.git(root, ["log", "-8", "--format=%h%x00%s%x00%an%x00%ar"]).catch(
-          () => "",
-        ),
-        this.git(root, ["remote", "get-url", "origin"]).catch(() => ""),
-        this.git(root, ["worktree", "list", "--porcelain", "-z"]),
+      const cwd = await this.worktreeRoot(root);
+      const insideWorktree = (await this.gitAt(cwd, ["rev-parse", "--is-inside-work-tree"])).trim();
+      if (insideWorktree !== "true") throw new Error("This folder is not a Git worktree.");
+      let porcelain = "";
+      let overflow = false;
+      const [statusText, log, remote, worktrees] = await Promise.all([
+        this.gitAt(cwd, ["status", "--porcelain=v2", "--branch", "-z", "-uall"], { maxBuffer: 32 * 1024 * 1024, partial: true }).catch((error) => {
+          if (!error.truncated || !error.partial) throw error;
+          overflow = true;
+          return error.partial;
+        }),
+        this.gitAt(cwd, ["log", "-8", "--format=%h%x00%s%x00%an%x00%ar"]).catch(() => ""),
+        this.gitAt(cwd, ["remote", "get-url", "origin"]).catch(() => ""),
+        this.listWorktrees(cwd).catch(() => []),
       ]);
-      const records = raw.split("\0");
-      const files = [];
-      for (let i = 0; i < records.length; i++) {
-        if (!records[i]) continue;
-        const code = records[i].slice(0, 2);
-        const file = {
-          path: records[i].slice(3),
-          code,
-          staged: code[0] !== " " && code[0] !== "?",
-          unstaged: code[1] !== " ",
-        };
-        if (/[RC]/.test(code)) file.original = records[++i];
-        files.push(file);
-      }
-      let ahead = 0,
-        behind = 0;
-      let upstream = "";
-      try {
-        upstream = (
-          await this.git(root, [
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{u}",
-          ])
-        ).trim();
-        const counts = (
-          await this.git(root, [
-            "rev-list",
-            "--left-right",
-            "--count",
-            "HEAD...@{u}",
-          ])
-        )
-          .trim()
-          .split(/\s+/);
-        ahead = Number(counts[0]);
-        behind = Number(counts[1]);
-      } catch {}
-      const worktrees = [];
-      let current;
-      for (const line of worktree.split("\0")) {
-        if (line.startsWith("worktree ")) {
-          current = { path: line.slice(9), branch: "detached" };
-          worktrees.push(current);
-        } else if (line.startsWith("branch ") && current)
-          current.branch = line.slice(7).replace("refs/heads/", "");
-      }
+      porcelain = statusText;
+      const parsed = parsePorcelain(porcelain, overflow);
+      const here = gitPathKey(cwd);
+      const otherTrees = worktrees
+        .map((tree) => gitPathKey(tree.path))
+        .filter((tree) => tree && tree !== here && !pathInside(here, tree));
+      const files = parsed.files.filter((file) => {
+        const full = gitPathKey(path.resolve(cwd, file.path));
+        return !otherTrees.some((tree) => pathInside(full, tree));
+      });
       return {
         available: true,
-        branch: branch.trim() || "detached HEAD",
+        root: cwd,
+        branch: parsed.branch || (parsed.detached ? "detached HEAD" : ""),
+        detached: parsed.detached,
         files,
-        ahead,
-        behind,
-        upstream,
+        truncated: parsed.truncated,
+        ahead: parsed.ahead,
+        behind: parsed.behind,
+        upstream: parsed.upstream,
         remote: remote.trim(),
         worktrees,
-        log: log
-          .trim()
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => {
-            const [hash, subject, author, when] = line.split("\0");
-            return { hash, subject, author, when };
-          }),
+        log: log.trim().split("\n").filter(Boolean).map((line) => {
+          const [hash, subject, author, when] = line.split("\0");
+          return { hash, subject, author, when };
+        }),
       };
     } catch (error) {
       return {
@@ -359,8 +466,24 @@ class WorkspaceService {
       };
     }
   }
+  async gitPaths(cwd, prefix, paths) {
+    const batch = [];
+    let size = prefix.reduce((sum, arg) => sum + arg.length + 1, 0);
+    const flush = async () => {
+      if (!batch.length) return;
+      await this.gitAt(cwd, [...prefix, ...batch]);
+      batch.length = 0;
+      size = prefix.reduce((sum, arg) => sum + arg.length + 1, 0);
+    };
+    for (const file of paths) {
+      if (batch.length && size + file.length + 1 > 24000) await flush();
+      batch.push(file);
+      size += file.length + 1;
+    }
+    await flush();
+  }
   async action(root, action, payload = {}) {
-    this.root(root);
+    const cwd = await this.worktreeRoot(root);
     const paths = payload.paths;
     if (
       paths &&
@@ -369,103 +492,75 @@ class WorkspaceService {
           (p) =>
             typeof p !== "string" ||
             path.isAbsolute(p) ||
-            !inside(root, path.resolve(root, p)),
+            !inside(cwd, path.resolve(cwd, p)),
         ))
     )
       throw new Error("Invalid file paths.");
-    if (action === "stage")
-      await this.git(
-        root,
-        paths?.length ? ["add", "--", ...paths] : ["add", "-A"],
-      );
-    else if (action === "unstage") {
-      const hasHead = await this.git(root, [
-        "rev-parse",
-        "--verify",
-        "HEAD",
-      ]).then(
-        () => true,
-        () => false,
-      );
-      await this.git(
-        root,
-        hasHead
-          ? ["restore", "--staged", "--", ...(paths?.length ? paths : ["."])]
-          : ["rm", "--cached", "-r", "--", ...(paths?.length ? paths : ["."])],
-      );
+    if (action === "stage") {
+      let targets = paths;
+      if (!targets?.length) {
+        const current = await this.status(cwd);
+        targets = current.files.filter((file) => !file.conflict).map((file) => file.path);
+      }
+      if (targets.length) await this.gitPaths(cwd, ["add", "--"], targets);
+    } else if (action === "unstage") {
+      const hasHead = await this.gitAt(cwd, ["rev-parse", "--verify", "HEAD"]).then(() => true, () => false);
+      await this.gitPaths(cwd, hasHead ? ["restore", "--staged", "--"] : ["rm", "--cached", "-r", "--"], paths?.length ? paths : ["."]);
     } else if (action === "commit") {
-      if (!payload.message?.trim())
-        throw new Error("Write a commit message first.");
-      await this.git(root, ["commit", "-m", payload.message]);
-    } else if (action === "pull") await this.git(root, ["pull", "--ff-only"]);
-    else if (action === "fetch")
-      await this.git(root, ["fetch", "--all", "--prune"]);
+      if (!payload.message?.trim()) throw new Error("Write a commit message first.");
+      await this.gitAt(cwd, ["commit", "-m", payload.message]);
+    } else if (action === "pull") await this.gitAt(cwd, ["pull", "--ff-only"]);
+    else if (action === "fetch") await this.gitAt(cwd, ["fetch", "--all", "--prune"]);
     else if (action === "push") {
-      const status = await this.status(root);
+      const status = await this.status(cwd);
       if (!status.branch || status.branch === "detached HEAD")
         throw new Error("Create a branch before pushing.");
-      if (status.upstream) await this.git(root, ["push"]);
+      if (status.upstream) await this.gitAt(cwd, ["push"]);
       else {
-        const remotes = (await this.git(root, ["remote"]))
-          .trim()
-          .split("\n")
-          .filter(Boolean);
-        const name = remotes.includes("origin")
-          ? "origin"
-          : remotes.length === 1
-            ? remotes[0]
-            : "";
+        const remotes = (await this.gitAt(cwd, ["remote"])).trim().split("\n").filter(Boolean);
+        const name = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : "";
         if (!name) throw new Error("Add an origin remote before pushing.");
-        await this.git(root, ["push", "--set-upstream", name, status.branch]);
+        await this.gitAt(cwd, ["push", "--set-upstream", name, status.branch]);
       }
     } else throw new Error("Unknown Git action.");
-    return this.status(root);
+    return this.status(cwd);
   }
-  async diff(root, file, staged) {
-    await this.safe(root, file).catch(async (error) => {
-      if (!inside(root, path.resolve(root, file))) throw error;
-    });
-    const output = await this.git(root, [
-      "diff",
-      ...(staged ? ["--cached"] : []),
-      "--no-ext-diff",
-      "--",
-      file,
-    ]);
+  async diff(root, file, staged, original) {
+    const cwd = await this.worktreeRoot(root);
+    const valid = (value) => typeof value === "string" && !!value && !path.isAbsolute(value) && inside(cwd, path.resolve(cwd, value));
+    if (!valid(file)) throw new Error("Invalid file path.");
+    const spec = valid(original) ? [file, original] : [file];
+    const output = await this.gitAt(cwd, ["diff", "-M", "--no-ext-diff", ...(staged ? ["--cached"] : []), "--", ...spec]);
     if (output) return output;
-    const status = await this.status(root);
-    if (status.files.find((x) => x.path === file)?.code === "??")
-      return `New file: ${file}\n\n${(await this.read(root, file)).content}`;
+    const status = await this.status(cwd);
+    const entry = status.files.find((item) => item.path === file);
+    if (entry?.untracked) return `New file: ${file}\n\n${(await this.read(cwd, file)).content}`;
     return "No changes in this view.";
   }
   async worktree(root, branch, base) {
     if (typeof branch !== "string" || !branch.trim() || branch.startsWith("-"))
       throw new Error("Enter a branch name.");
-    await this.git(root, ["check-ref-format", "--branch", branch]);
+    const cwd = await this.worktreeRoot(root);
+    await this.gitAt(cwd, ["check-ref-format", "--branch", branch]);
     const ref = typeof base === "string" && base.trim() ? base.trim() : "HEAD";
     if (ref.startsWith("-")) throw new Error("Invalid base reference.");
-    await this.git(root, ["rev-parse", "--verify", `${ref}^{commit}`]);
+    await this.gitAt(cwd, ["rev-parse", "--verify", `${ref}^{commit}`]);
+    const trees = await this.listWorktrees(cwd).catch(() => []);
+    const primary = trees.find((tree) => tree.primary)?.path || cwd;
     const folder = path.join(
-      path.dirname(root),
-      `${path.basename(root)}.worktrees`,
+      path.dirname(primary),
+      `${path.basename(primary)}.worktrees`,
       branch.replace(/[^a-zA-Z0-9_.-]/g, "-"),
     );
-    await this.git(root, ["worktree", "add", "-b", branch, folder, ref]);
+    await this.gitAt(cwd, ["worktree", "add", "-b", branch, folder, ref]);
     return this.open(folder);
   }
   async prs(root) {
-    this.root(root);
+    const cwd = await this.worktreeRoot(root);
     const { stdout } = await execute(
       "gh",
-      [
-        "pr",
-        "list",
-        "--limit",
-        "15",
-        "--json",
-        "number,title,url,state,isDraft,headRefName",
-      ],
-      { cwd: root, windowsHide: true, timeout: 20000 },
+      ["pr", "list", "--limit", "15", "--json", "number,title,url,state,isDraft,headRefName"],
+      { cwd, encoding: "utf8", env: gitEnv(), windowsHide: true, timeout: 20000 },
     );
     return JSON.parse(stdout);
   }
@@ -1425,7 +1520,8 @@ class Sessions {
         `${stream?.id || s.messageId || "answer"}:${event.index ?? 0}`,
       );
     }
-    if (e.type === "assistant" && e.message?.content)
+    if (e.type === "assistant" && e.message?.content) {
+      const { isNarrationThinking } = require("./session-history.cjs");
       for (let i = 0; i < e.message.content.length; i++) {
         const block = e.message.content[i];
         if (block.type === "text") {
@@ -1439,6 +1535,13 @@ class Sessions {
             `${e.message.id || stream?.id || s.messageId || "answer"}:${index}`,
             true,
           );
+        } else if (isNarrationThinking(block, e.narration_block_indexes, i)) {
+          this.text(
+            s,
+            block.thinking,
+            `${e.message.id || stream?.id || s.messageId || "answer"}:${e.uuid || "narration"}:${i}`,
+            true,
+          );
         }
         if (block.type === "tool_use")
           this.tool(
@@ -1448,18 +1551,19 @@ class Sessions {
             JSON.stringify(block.input, null, 2),
           );
       }
-    if (e.type === "user" && Array.isArray(e.message?.content))
+    }
+    if (e.type === "user" && Array.isArray(e.message?.content)) {
+      const { formatToolDetail } = require("./session-history.cjs");
       for (const block of e.message.content)
         if (block.type === "tool_result")
           this.tool(
             s,
             block.tool_use_id,
             "Tool result",
-            typeof block.content === "string"
-              ? block.content
-              : JSON.stringify(block.content),
+            formatToolDetail(block.content),
             block.is_error ? "error" : "done",
           );
+    }
     if (e.type === "result") {
       if (!s.hadText && e.result) this.text(s, e.result, "answer", true);
       if (e.is_error)

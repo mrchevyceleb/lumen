@@ -79,6 +79,36 @@ const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok", "google"];
 const docKey = (doc: { root: string; path: string }) =>
   `${doc.root}|${doc.path}`;
+const foldPathCase = typeof process !== "undefined" && process.platform
+  ? process.platform === "win32"
+  : typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
+const normalizePath = (value: string) => {
+  let key = value.replace(/[\\/]+/g, "/");
+  const root = key === "/" || /^[a-zA-Z]:\/$/.test(key);
+  if (!root) key = key.replace(/\/+$/, "");
+  return foldPathCase ? key.toLowerCase() : key;
+};
+const samePath = (a?: string, b?: string) => !!a && !!b && normalizePath(a) === normalizePath(b);
+const insideFolder = (folder: string, parent: string) => {
+  const target = normalizePath(folder);
+  const base = normalizePath(parent);
+  if (!target || !base) return false;
+  if (target === base) return true;
+  const prefix = base.endsWith("/") ? base : `${base}/`;
+  return target.startsWith(prefix);
+};
+const gitRootOf = (item?: Workspace) => item?.git.root || item?.root || "";
+function matchingWorktree(trees: Workspace["git"]["worktrees"], folder: string) {
+  const target = normalizePath(folder);
+  return trees.reduce<Workspace["git"]["worktrees"][number] | undefined>((best, tree) => {
+    const candidate = normalizePath(tree.path);
+    const prefix = candidate.endsWith("/") ? candidate : `${candidate}/`;
+    const hit = !!candidate && (target === candidate || target.startsWith(prefix));
+    if (!hit) return best;
+    if (!best || candidate.length > normalizePath(best.path).length) return tree;
+    return best;
+  }, undefined);
+}
 type Bootstrap = {
   recent: string[];
   platform: string;
@@ -243,6 +273,7 @@ export default function App() {
   const [activeDocKey, setActiveDocKey] = useState("");
   const [editorExpanded, setEditorExpanded] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [worktreeFocus, setWorktreeFocus] = useState("");
   const [signIn, setSignIn] = useState<SignInProfile | null>(null);
   const signInLock = useRef(false);
   const [settingsSection, setSettingsSection] = useState("appearance");
@@ -286,22 +317,54 @@ export default function App() {
   rootRef.current = root;
   const workspace = workspaces[root];
   const checkoutPath = active?.cwd && active.cwd !== active.root ? active.cwd : active?.projectless ? "" : root;
-  const statusWorkspace = checkoutPath ? workspaces[checkoutPath] : undefined;
-  const normalizePath = (value: string) => value.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
-  const checkout = statusWorkspace?.git.worktrees.find((tree) => normalizePath(checkoutPath).startsWith(normalizePath(tree.path) + "/") || normalizePath(checkoutPath) === normalizePath(tree.path));
-  const linkedCheckout = checkout && statusWorkspace?.git.worktrees[0] !== checkout;
+  const statusWorkspace = (() => {
+    if (!checkoutPath) return undefined;
+    if (workspaces[checkoutPath]) return workspaces[checkoutPath];
+    let best: Workspace | undefined;
+    let bestLength = -1;
+    for (const item of Object.values(workspaces)) {
+      const candidate = gitRootOf(item) || item.root;
+      if (!insideFolder(checkoutPath, candidate)) continue;
+      const length = normalizePath(candidate).length;
+      if (length > bestLength) { best = item; bestLength = length; }
+    }
+    return best;
+  })();
+  const checkout = statusWorkspace?.git.worktrees.find((tree) => tree.current) || matchingWorktree(statusWorkspace?.git.worktrees || [], statusWorkspace?.git.root || checkoutPath);
+  const linkedCheckout = checkout?.primary === false;
   const checkoutName = (checkout?.path || checkoutPath).replace(/\\/g, "/").split("/").filter(Boolean).at(-1);
+  const checkoutInsideProject = !!(workspace && checkoutPath && insideFolder(checkoutPath, gitRootOf(workspace) || workspace.root));
+  const scmRepos = (() => {
+    const entries: { workspace: Workspace; current: boolean }[] = [];
+    const seen = new Set<string>();
+    const add = (item: Workspace | undefined, current: boolean) => {
+      if (!item?.git.available) return;
+      const key = normalizePath(gitRootOf(item));
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      entries.push({ workspace: item, current });
+    };
+    add(statusWorkspace, true);
+    if (!statusWorkspace?.git.available && (checkoutInsideProject || !checkoutPath || samePath(checkoutPath, workspace?.root))) add(workspace, true);
+    add(workspace, false);
+    return entries;
+  })();
+  const currentRepo = scmRepos.find((entry) => entry.current)?.workspace || workspace;
+  const worktreeTarget = useRef("");
+  worktreeTarget.current = currentRepo?.root || root;
+  const editorRoots = [root, ...scmRepos.flatMap((entry) => [entry.workspace.root, entry.workspace.git.root || ""])].filter(Boolean);
+  const editorDocs = docs.filter((doc) => editorRoots.some((folder) => samePath(folder, doc.root)));
   useEffect(() => {
     if (!active?.cwd || active.cwd === active.root) return;
     let alive = true;
-    api<Workspace>("workspace:open", active.cwd).then((value) => {
+    api<Workspace>("workspace:inspect", active.cwd).then((value) => {
       if (alive) setWorkspaces((old) => ({ ...old, [value.root]: value, [active.cwd!]: value }));
     }).catch(() => {});
     return () => { alive = false; };
   }, [active?.id, active?.cwd]);
   const projectDocsRef = useRef<Record<string, string>>({});
-  const activeDoc = root ? docs.find((d) => d.root === root && docKey(d) === activeDocKey) || docs.find((d) => d.root === root && docKey(d) === projectDocsRef.current[root]) : undefined;
-  if (activeDoc) projectDocsRef.current[root] = docKey(activeDoc);
+  const activeDoc = editorDocs.find((doc) => docKey(doc) === activeDocKey) || (root ? editorDocs.find((doc) => samePath(doc.root, root) && docKey(doc) === projectDocsRef.current[root]) : undefined);
+  if (activeDoc && root && samePath(activeDoc.root, root)) projectDocsRef.current[root] = docKey(activeDoc);
   useEffect(() => setAttachment(""), [activeId]);
   useEffect(() => {
     api("editor:dirty", docs.filter((d) => d.content !== d.saved).length).catch(
@@ -687,8 +750,9 @@ export default function App() {
     if (!folder) return;
     try {
       const git = await api("git:status", folder);
-      setWorkspaces((old) => Object.fromEntries(Object.entries(old).map(([key, value]) =>
-        [key, normalizePath(value.root) === normalizePath(folder) ? { ...value, git } : value])));
+      const key = normalizePath(folder);
+      setWorkspaces((old) => Object.fromEntries(Object.entries(old).map(([id, value]) =>
+        [id, normalizePath(value.root) === key || normalizePath(value.git?.root || "") === key ? { ...value, git } : value])));
       setRefresh((n) => n + 1);
     } catch (e: any) {
       notify(e.message);
@@ -777,7 +841,7 @@ export default function App() {
                       : "notice") as any,
                 text:
                   e.type === "tool"
-                    ? e.detail || ""
+                    ? e.detail || previous?.text || ""
                     : e.type === "error"
                       ? e.message || ""
                       : e.replace
@@ -976,20 +1040,20 @@ export default function App() {
     await settleControl(); persist();
     return { ...view(find() || tab), ...(action === "message" ? { messageId: body.id } : {}) };
   });
-  const openFile = async (file: string) => {
-    if (!root) return;
+  const openFile = async (file: string, folder = root) => {
+    if (!folder) return;
     const normalized = file
       .replace(/^file:\/\//, "")
       .replace(/^\//, "")
       .split("#")[0];
-    const existing = docs.find((d) => d.root === root && d.path === normalized);
+    const existing = docs.find((d) => samePath(d.root, folder) && d.path === normalized);
     if (existing) {
       setActiveDocKey(docKey(existing));
       return;
     }
     try {
-      const result = await api("files:read", root, normalized);
-      const doc: Doc = { root, ...result, saved: result.content };
+      const result = await api("files:read", folder, normalized);
+      const doc: Doc = { root: folder, ...result, saved: result.content };
       setDocs((old) => [...old, doc]);
       setActiveDocKey(docKey(doc));
     } catch (e: any) {
@@ -1065,12 +1129,14 @@ export default function App() {
       });
     else action();
   };
-  const gitAction = async (action: string, payload?: any) => {
-    if (!root || gitBusy) return false;
+  const gitAction = async (folder: string, action: string, payload?: any) => {
+    if (!folder || gitBusy) return false;
     setGitBusy(true);
     try {
-      const git = await api("git:action", root, action, payload);
-      setWorkspaces((old) => ({ ...old, [root]: { ...old[root], git } }));
+      const git = await api("git:action", folder, action, payload);
+      const key = normalizePath(git.root || folder);
+      setWorkspaces((old) => Object.fromEntries(Object.entries(old).map(([id, value]) =>
+        [id, normalizePath(value.root) === key || normalizePath(value.git?.root || "") === key || normalizePath(id) === normalizePath(folder) ? { ...value, git } : value])));
       setRefresh((n) => n + 1);
       notify(
         {
@@ -1122,6 +1188,7 @@ export default function App() {
         setDialog("settings");
       } else if (e.shiftKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
+        setWorktreeFocus(worktreeTarget.current);
         setDialog("worktrees");
       }
     };
@@ -1281,7 +1348,7 @@ export default function App() {
       {agentMenu && <div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
         {agents.map((agent) => <button key={agent} onClick={() => addTab(agent, "rich", agentMenuRoot ?? root)}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
         <div className="menu-divider" /><button onClick={() => void addTab("shell", "rich", "")}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={startWithoutWorkspace}><Sparkles size={17} /><span>New chat without workspace</span></button>
-        <button onClick={() => { setAgentMenu(false); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
+        <button onClick={() => { setAgentMenu(false); setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
       </div>}
     </div>
     <IconButton label="Settings" onClick={() => setDialog("settings")}><MoreHorizontal size={18} /></IconButton>
@@ -1377,13 +1444,13 @@ export default function App() {
               }}
             >
               <GitBranch size={21} />
-              {workspace?.git.files.length > 0 && (
-                <span className="rail-badge">{workspace.git.files.length}</span>
+              {scmRepos.reduce((count, entry) => count + entry.workspace.git.files.length, 0) > 0 && (
+                <span className="rail-badge">{scmRepos.reduce((count, entry) => count + entry.workspace.git.files.length, 0)}</span>
               )}
             </button>
             <IconButton
               label="Worktrees"
-              onClick={() => setDialog("worktrees")}
+              onClick={() => { setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }}
             >
               <Layers size={21} />
             </IconButton>
@@ -1466,12 +1533,13 @@ export default function App() {
                   <span>{workspace?.name || "No workspace"}</span>
                   {verticalChats && <strong className="active-chat-name" title={active.name}>{active.name}</strong>}
                   <ChevronDown size={11} />
-                  {workspace ? <button
+                  {workspace || currentRepo ? <button
                     className="branch-chip"
-                    onClick={() => setDialog("worktrees")}
+                    title={currentRepo ? `Branch: ${currentRepo.git.branch || "No Git repository"}\n${gitRootOf(currentRepo)}` : "Worktrees"}
+                    onClick={() => { setWorktreeFocus(gitRootOf(currentRepo) || currentRepo?.root || root); setDialog("worktrees"); }}
                   >
                     <GitBranch size={12} />
-                    {workspace.git.branch || "folder"}
+                    {currentRepo?.git.branch || workspace?.git.branch || "folder"}
                   </button> : <button className="branch-chip" onClick={() => openWorkspace()}>
                     <FolderOpen size={12} />
                     Open workspace
@@ -1587,7 +1655,7 @@ export default function App() {
                       }
                     >
                       <EditorPane
-                        docs={docs.filter((d) => d.root === root)}
+                        docs={editorDocs}
                         active={activeDoc}
                         settings={settings}
                         expanded={editorExpanded}
@@ -1732,8 +1800,8 @@ export default function App() {
                   )}
                   <IconButton
                     label="Refresh workspace"
-                    disabled={!workspace}
-                    onClick={() => refreshGit()}
+                    disabled={!workspace && !scmRepos.length}
+                    onClick={() => { const folders = [...new Set([root, ...scmRepos.map((entry) => gitRootOf(entry.workspace))].filter(Boolean))]; for (const folder of folders) void refreshGit(folder); }}
                   >
                     <RefreshCw size={14} />
                   </IconButton>
@@ -1745,7 +1813,7 @@ export default function App() {
                   </IconButton>
                 </div>
               </div>
-              {workspace ? (
+              {(panel === "files" ? workspace : scmRepos.length || workspace) ? (
                 panel === "files" ? (
                   <>
                     <div className="tree-scroll">
@@ -1768,7 +1836,7 @@ export default function App() {
                       </span>
                       <button
                         className="worktree-shortcut"
-                        onClick={() => setDialog("worktrees")}
+                        onClick={() => { setWorktreeFocus(root); setDialog("worktrees"); }}
                       >
                         <Layers size={16} />
                         <span>
@@ -1783,25 +1851,25 @@ export default function App() {
                       </div>
                     </div>
                   </>
-                ) : (
+                ) : scmRepos.length ? (
                   <GitPanel
-                    workspace={workspace}
+                    repos={scmRepos}
                     busy={gitBusy}
                     action={gitAction}
-                    onDiff={async (file, staged) => {
+                    onDiff={async (folder, file, staged) => {
                       try {
                         setDiff({
                           path: file.path,
                           staged,
-                          text: await api("git:diff", root, file.path, staged),
+                          text: await api("git:diff", folder, file.path, staged, file.original),
                         });
                       } catch (e: any) {
                         notify(e.message);
                       }
                     }}
-                    onFile={openFile}
-                    onGitHub={() => {
-                      const url = githubURL(workspace.git.remote);
+                    onFile={(folder, file) => void openFile(file, folder)}
+                    onGitHub={(remote) => {
+                      const url = githubURL(remote);
                       if (url)
                         api("external:open", url).catch((e) =>
                           notify(e.message),
@@ -1811,9 +1879,15 @@ export default function App() {
                           "Add a GitHub origin remote to open this repository.",
                         );
                     }}
-                    onWorktree={() => setDialog("worktrees")}
+                    onWorktree={(folder) => { setWorktreeFocus(folder); setDialog("worktrees"); }}
                     onError={notify}
                   />
+                ) : (
+                    <div className="sidebar-empty">
+                      <GitBranch size={28} />
+                      <p>This folder isn't a Git repository.</p>
+                      <small>Run git init in a terminal to get started.</small>
+                    </div>
                 )
               ) : (
                 <div className="sidebar-empty">
@@ -1832,13 +1906,13 @@ export default function App() {
         <div className="checkout-status">
           <span className="live-dot" />
           {checkoutPath ? <button className="checkout-location" title={checkout?.path || checkoutPath} aria-label={`Current ${linkedCheckout ? "worktree" : "folder"}: ${checkout?.path || checkoutPath}`}
-            onClick={() => linkedCheckout ? setDialog("worktrees") : void openWorkspace(checkoutPath, !isHiddenProject(checkoutPath))}>
+            onClick={() => linkedCheckout ? (setWorktreeFocus(gitRootOf(statusWorkspace) || checkoutPath), setDialog("worktrees")) : void openWorkspace(checkoutPath, !isHiddenProject(checkoutPath))}>
             <FolderOpen size={12} /><span>{linkedCheckout ? "Worktree" : "Folder"}: {checkoutName}</span>
           </button> : <span>No workspace</span>}
           {statusWorkspace && (
             <>
               <span className="status-divider" />
-              <button className="checkout-branch" title={`Branch: ${statusWorkspace.git.branch || "No Git repository"}`} onClick={async () => { await openWorkspace(checkoutPath, !isHiddenProject(checkoutPath)); setDialog("worktrees"); }}>
+              <button className="checkout-branch" title={`Branch: ${statusWorkspace.git.branch || "No Git repository"}\n${gitRootOf(statusWorkspace)}`} onClick={async () => { const folder = gitRootOf(statusWorkspace) || checkoutPath; setWorktreeFocus(folder); await openWorkspace(folder, !isHiddenProject(folder)); setDialog("worktrees"); }}>
                 <GitBranch size={12} />
                 <span>{statusWorkspace.git.branch || "No Git repository"}</span>
               </button>
@@ -1900,19 +1974,18 @@ export default function App() {
       )}
       {dialog === "worktrees" && (
         <WorktreeDialog
-          workspace={workspace}
-          onClose={() => setDialog(null)}
+          workspace={Object.values(workspaces).find((item) => samePath(item.root, worktreeFocus) || samePath(item.git.root, worktreeFocus)) || currentRepo || workspace}
+          onClose={() => { setDialog(null); setWorktreeFocus(""); }}
           onOpen={openWorkspace}
           onCreate={async (branch, base) => {
-            if (!root) throw new Error("Open a Git repository first.");
-            const next = await api<Workspace>(
-              "git:worktree",
-              root,
-              branch,
-              base,
-            );
+            const source = gitRootOf(Object.values(workspaces).find((item) => samePath(item.root, worktreeFocus) || samePath(item.git.root, worktreeFocus)) || currentRepo || workspace);
+            if (!source) throw new Error("Open a Git repository first.");
+            const next = await api<Workspace>("git:worktree", source, branch, base);
             activateWorkspace(next);
-            refreshGit(root);
+            const loaded = Object.values(workspaces);
+            const related = [source, ...(next.git.worktrees || []).map((tree) => tree.path)].filter((folder, index, all) =>
+              !!folder && all.findIndex((item) => samePath(item, folder)) === index && loaded.some((item) => samePath(item.root, folder) || samePath(item.git.root, folder)));
+            await Promise.all(related.map((folder) => refreshGit(folder)));
           }}
         />
       )}
@@ -1929,7 +2002,7 @@ export default function App() {
             if (action === "open") setDialog("open");
             else if (action === "projectless") startWithoutWorkspace();
             else if (action === "settings") setDialog("settings");
-            else if (action === "worktrees") setDialog("worktrees");
+            else if (action === "worktrees") { setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }
             else addTab(action as Agent);
           }}
         />
@@ -2244,6 +2317,7 @@ function WorktreeDialog({
   const [base, setBase] = useState("HEAD");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const here = workspace?.git.worktrees.find((tree) => tree.current) || workspace?.git.worktrees.find((tree) => samePath(tree.path, gitRootOf(workspace)));
   return (
     <Modal
       title="A fresh space for your next idea"
@@ -2260,8 +2334,7 @@ function WorktreeDialog({
               <strong>{tree.branch}</strong>
               <small>{tree.path}</small>
             </span>
-            {tree.path.replace(/\\/g, "/") ===
-            workspace.root.replace(/\\/g, "/") ? (
+            {here && samePath(here.path, tree.path) ? (
               <span className="current-tag">Current</span>
             ) : (
               <ArrowRight size={16} />
@@ -2324,8 +2397,19 @@ function WorktreeDialog({
     </Modal>
   );
 }
+function changeLetter(file: GitFile, kind: "staged" | "unstaged" | "conflict") {
+  if (file.untracked) return "U";
+  if (kind === "conflict") return file.code.trim() || "U";
+  const side = kind === "staged" ? file.code[0] : file.code[1];
+  return side && side !== " " && side !== "." ? side : file.code.trim();
+}
+function repoLabel(repo: Workspace, repos: Workspace[]) {
+  const name = repo.name;
+  if (repos.filter((item) => item.name === name).length < 2) return name;
+  return gitRootOf(repo).replace(/\\/g, "/").split("/").filter(Boolean).slice(-2).join("/") || name;
+}
 function GitPanel({
-  workspace: w,
+  repos,
   busy,
   action,
   onDiff,
@@ -2334,233 +2418,155 @@ function GitPanel({
   onWorktree,
   onError,
 }: {
-  workspace: Workspace;
+  repos: { workspace: Workspace; current: boolean }[];
   busy: boolean;
-  action: (action: string, payload?: any) => Promise<boolean>;
-  onDiff: (file: GitFile, staged: boolean) => void;
-  onFile: (file: string) => void;
-  onGitHub: () => void;
-  onWorktree: () => void;
+  action: (root: string, action: string, payload?: any) => Promise<boolean>;
+  onDiff: (root: string, file: GitFile, staged: boolean) => void;
+  onFile: (root: string, file: string) => void;
+  onGitHub: (remote?: string) => void;
+  onWorktree: (root: string) => void;
   onError: (text: string) => void;
 }) {
-  const [message, setMessage] = useState("");
+  const current = repos.find((entry) => entry.current) || repos[0];
+  const folder = gitRootOf(current.workspace);
+  const [messages, setMessages] = useState<Record<string, string>>({});
   const [view, setView] = useState<"changes" | "history" | "github">("changes");
   const [prs, setPrs] = useState<any[]>([]);
   const [prError, setPrError] = useState("");
   useEffect(() => {
-    if (view === "github") {
-      let alive = true;
-      setPrError("");
-      api("git:prs", w.root)
-        .then((result) => {
-          if (alive) setPrs(result);
-        })
-        .catch((e) => {
-          if (alive)
-            setPrError(
-              "Install GitHub CLI (gh) and run gh auth login to list pull requests. " +
-                e.message,
-            );
-        });
-      return () => {
-        alive = false;
-      };
-    }
-  }, [view, w.root]);
-  if (!w.git.available)
+    if (view !== "github") return;
+    let alive = true;
+    setPrError("");
+    setPrs([]);
+    api("git:prs", folder)
+      .then((result) => { if (alive) setPrs(result); })
+      .catch((e) => {
+        if (alive) setPrError("Install GitHub CLI (gh) and run gh auth login to list pull requests. " + e.message);
+      });
+    return () => { alive = false; };
+  }, [view, folder]);
+  const identity = (repo: { workspace: Workspace; current: boolean }) => {
+    const tree = repo.workspace.git.worktrees.find((item) => item.current) || matchingWorktree(repo.workspace.git.worktrees, gitRootOf(repo.workspace));
+    return { tree, linked: tree?.primary === false };
+  };
+  const header = (repo: { workspace: Workspace; current: boolean }) => {
+    const { linked } = identity(repo);
     return (
-      <div className="sidebar-empty">
-        <GitBranch size={28} />
-        <p>This folder isn't a Git repository.</p>
-        <small>Run git init in a terminal to get started.</small>
+      <div className="git-repo">
+        <GitBranch size={14} />
+        <strong>{repo.workspace.git.branch || "No branch"}</strong>
+        <span title={gitRootOf(repo.workspace)}>{repoLabel(repo.workspace, repos.map((entry) => entry.workspace))}</span>
+        {linked && <em className="current-tag">Worktree</em>}
+        {repo.current && repos.length > 1 && <em className="current-tag">Current</em>}
       </div>
     );
-  const staged = w.git.files.filter((f) => f.staged);
-  const unstaged = w.git.files.filter((f) => f.unstaged);
+  };
+  const sync = (repo: Workspace) => {
+    const root = gitRootOf(repo);
+    return (
+      <div className="git-sync">
+        <button disabled={busy} onClick={() => action(root, "pull")}><ArrowDownToLine size={14} />Pull <small>{repo.git.behind}</small></button>
+        <button disabled={busy} onClick={() => action(root, "push")}><ArrowUpFromLine size={14} />Push <small>{repo.git.ahead}</small></button>
+        <IconButton label="Fetch remotes" disabled={busy} onClick={() => action(root, "fetch")}><RefreshCw size={14} /></IconButton>
+      </div>
+    );
+  };
+  const changes = (repo: { workspace: Workspace; current: boolean }) => {
+    const root = gitRootOf(repo.workspace);
+    const text = messages[root] || "";
+    const groups = [
+      { name: "MERGE CHANGES", kind: "conflict" as const, files: repo.workspace.git.files.filter((file) => file.conflict) },
+      { name: "STAGED CHANGES", kind: "staged" as const, files: repo.workspace.git.files.filter((file) => file.staged) },
+      { name: "CHANGES", kind: "unstaged" as const, files: repo.workspace.git.files.filter((file) => file.unstaged) },
+    ].filter((group) => group.files.length);
+    return (
+      <div className="git-repo-block" key={root}>
+        {header(repo)}
+        {sync(repo.workspace)}
+        <div className="commit-box">
+          <textarea aria-label={`Commit message for ${repo.workspace.git.branch || repo.workspace.name}`} placeholder="What's changed?" rows={3} value={text} onChange={(e) => setMessages((old) => ({ ...old, [root]: e.target.value }))} />
+          <button className="primary" disabled={busy || !text.trim() || !repo.workspace.git.files.some((file) => file.staged)} onClick={async () => { if (await action(root, "commit", { message: text })) setMessages((old) => ({ ...old, [root]: "" })); }}>
+            <GitCommitHorizontal size={15} />Commit staged changes
+          </button>
+        </div>
+        {groups.map((group) => (
+          <div className="git-file-group" key={group.name}>
+            <div className="git-group-heading">
+              <span>{group.name}<i>{group.files.length}</i></span>
+              <IconButton label={group.kind === "staged" ? "Unstage all" : group.kind === "conflict" ? "Mark all resolved" : "Stage all"} disabled={busy} onClick={() => action(root, group.kind === "staged" ? "unstage" : "stage", { paths: group.files.map((file) => file.path) })}>
+                {group.kind === "staged" ? <Minus size={14} /> : <Plus size={14} />}
+              </IconButton>
+            </div>
+            {group.files.map((file) => {
+              const detail = file.original ? `from ${file.original}` : file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+              return (
+                <div className="git-file-row" key={`${group.kind}:${file.path}`}>
+                  <button className="git-file-name" onClick={() => onDiff(root, file, group.kind === "staged")} title={file.original ? `${file.original} → ${file.path}` : file.path}>
+                    <FileIcon name={file.path} />
+                    <span>{file.path.split("/").at(-1)}{detail && <small>{detail}</small>}</span>
+                    <em>{changeLetter(file, group.kind)}</em>
+                  </button>
+                  <IconButton label={`Open ${file.path}`} onClick={() => onFile(root, file.path)}><ExternalLink size={12} /></IconButton>
+                  <IconButton label={`${group.kind === "staged" ? "Unstage" : group.kind === "conflict" ? "Mark resolved" : "Stage"} ${file.path}`} disabled={busy} onClick={() => action(root, group.kind === "staged" ? "unstage" : "stage", { paths: [file.path] })}>
+                    {group.kind === "staged" ? <Minus size={13} /> : <Plus size={13} />}
+                  </IconButton>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+        {!repo.workspace.git.files.length && <div className="git-clean"><span><Check size={20} /></span><strong>All clear.</strong><p>This working tree is clean.</p></div>}
+        {repo.workspace.git.truncated && <p className="git-truncated">Showing the first 10,000 changes in this worktree.</p>}
+      </div>
+    );
+  };
+  const ordered = current.current ? [current, ...repos.filter((entry) => entry !== current)] : repos;
   return (
     <div className="git-panel">
-      <div className="git-sync">
-        <button disabled={busy} onClick={() => action("pull")}>
-          <ArrowDownToLine size={14} />
-          Pull <small>{w.git.behind}</small>
-        </button>
-        <button disabled={busy} onClick={() => action("push")}>
-          <ArrowUpFromLine size={14} />
-          Push <small>{w.git.ahead}</small>
-        </button>
-        <IconButton
-          label="Fetch remotes"
-          disabled={busy}
-          onClick={() => action("fetch")}
-        >
-          <RefreshCw size={14} />
-        </IconButton>
-      </div>
       <div className="git-nav">
         {(["changes", "history", "github"] as const).map((tab) => (
-          <button
-            key={tab}
-            className={view === tab ? "selected" : ""}
-            onClick={() => setView(tab)}
-          >
-            {tab === "github"
-              ? "GitHub"
-              : tab.charAt(0).toUpperCase() + tab.slice(1)}
+          <button key={tab} className={view === tab ? "selected" : ""} onClick={() => setView(tab)}>
+            {tab === "github" ? "GitHub" : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
         ))}
       </div>
-      {busy && (
-        <div className="git-working">
-          <Busy text="Updating repository" />
-        </div>
-      )}
+      {busy && <div className="git-working"><Busy text="Updating repository" /></div>}
       {view === "changes" ? (
+        <div className="git-files-scroll">{ordered.map((repo) => changes(repo))}</div>
+      ) : view === "history" ? (
         <>
-          <div className="commit-box">
-            <textarea
-              aria-label="Commit message"
-              placeholder="What's changed?"
-              rows={3}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-            />
-            <button
-              className="primary"
-              disabled={busy || !message.trim() || !staged.length}
-              onClick={async () => {
-                if (await action("commit", { message })) setMessage("");
-              }}
-            >
-              <GitCommitHorizontal size={15} />
-              Commit staged changes
-            </button>
-          </div>
-          <div className="git-files-scroll">
-            {[
-              { name: "STAGED CHANGES", files: staged, staged: true },
-              { name: "CHANGES", files: unstaged, staged: false },
-            ].map((group) => (
-              <div className="git-file-group" key={group.name}>
-                <div className="git-group-heading">
-                  <span>
-                    {group.name}
-                    <i>{group.files.length}</i>
-                  </span>
-                  <IconButton
-                    label={group.staged ? "Unstage all" : "Stage all"}
-                    disabled={busy || !group.files.length}
-                    onClick={() => action(group.staged ? "unstage" : "stage")}
-                  >
-                    {group.staged ? <Minus size={14} /> : <Plus size={14} />}
-                  </IconButton>
-                </div>
-                {group.files.map((file) => (
-                  <div className="git-file-row" key={file.path}>
-                    <button
-                      className="git-file-name"
-                      onClick={() => onDiff(file, group.staged)}
-                      title={file.path}
-                    >
-                      <FileIcon name={file.path} />
-                      <span>
-                        {file.path.split("/").at(-1)}
-                        <small>
-                          {file.path.includes("/")
-                            ? file.path.slice(0, file.path.lastIndexOf("/"))
-                            : ""}
-                        </small>
-                      </span>
-                      <em>{file.code.trim()}</em>
-                    </button>
-                    <IconButton
-                      label={`Open ${file.path}`}
-                      onClick={() => onFile(file.path)}
-                    >
-                      <ExternalLink size={12} />
-                    </IconButton>
-                    <IconButton
-                      label={`${group.staged ? "Unstage" : "Stage"} ${file.path}`}
-                      disabled={busy}
-                      onClick={() =>
-                        action(group.staged ? "unstage" : "stage", {
-                          paths: [
-                            file.path,
-                            ...(file.original ? [file.original] : []),
-                          ],
-                        })
-                      }
-                    >
-                      {group.staged ? <Minus size={13} /> : <Plus size={13} />}
-                    </IconButton>
-                  </div>
-                ))}
+          {header(current)}
+          <div className="git-history">
+            {current.workspace.git.log.map((commit) => (
+              <div key={commit.hash}>
+                <GitCommitHorizontal size={16} />
+                <span>
+                  <strong>{commit.subject}</strong>
+                  <small>{commit.author} · {commit.when}</small>
+                  <code>{commit.hash}</code>
+                </span>
               </div>
             ))}
-            {!w.git.files.length && (
-              <div className="git-clean">
-                <span>
-                  <Check size={20} />
-                </span>
-                <strong>All clear.</strong>
-                <p>Your working tree is clean.</p>
-              </div>
-            )}
+            {!current.workspace.git.log.length && <p className="dialog-copy">Your first commit will appear here.</p>}
           </div>
         </>
-      ) : view === "history" ? (
-        <div className="git-history">
-          {w.git.log.map((commit) => (
-            <div key={commit.hash}>
-              <GitCommitHorizontal size={16} />
-              <span>
-                <strong>{commit.subject}</strong>
-                <small>
-                  {commit.author} · {commit.when}
-                </small>
-                <code>{commit.hash}</code>
-              </span>
-            </div>
-          ))}
-          {!w.git.log.length && (
-            <p className="dialog-copy">Your first commit will appear here.</p>
-          )}
-        </div>
       ) : (
-        <div className="github-panel">
-          <button className="secondary" onClick={onGitHub}>
-            <ExternalLink size={14} />
-            Open on GitHub
-          </button>
-          <div className="section-divider">
-            <span>OPEN PULL REQUESTS</span>
-          </div>
-          {prError ? (
-            <p className="inline-error">{prError}</p>
-          ) : prs.length ? (
-            prs.map((pr) => (
-              <button
-                className="pr-row"
-                key={pr.number}
-                onClick={() =>
-                  api("external:open", pr.url).catch((e) => onError(e.message))
-                }
-              >
+        <>
+          {header(current)}
+          <div className="github-panel">
+            <button className="secondary" onClick={() => onGitHub(current.workspace.git.remote)}><ExternalLink size={14} />Open on GitHub</button>
+            <div className="section-divider"><span>OPEN PULL REQUESTS</span></div>
+            {prError ? <p className="inline-error">{prError}</p> : prs.length ? prs.map((pr) => (
+              <button className="pr-row" key={pr.number} onClick={() => api("external:open", pr.url).catch((e) => onError(e.message))}>
                 <GitPullRequest size={15} />
-                <span>
-                  <strong>{pr.title}</strong>
-                  <small>
-                    #{pr.number} · {pr.isDraft ? "Draft" : pr.headRefName}
-                  </small>
-                </span>
+                <span><strong>{pr.title}</strong><small>#{pr.number} · {pr.isDraft ? "Draft" : pr.headRefName}</small></span>
               </button>
-            ))
-          ) : (
-            <p className="dialog-copy">No open pull requests.</p>
-          )}
-        </div>
+            )) : <p className="dialog-copy">No open pull requests.</p>}
+          </div>
+        </>
       )}
       <div className="git-bottom">
-        <button onClick={onWorktree}>
+        <button onClick={() => onWorktree(folder)}>
           <Layers size={15} />
           Manage worktrees
           <ArrowRight size={13} />

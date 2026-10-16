@@ -177,6 +177,7 @@ startup.then(async (start) => {
     return result.canceled ? null : workspace.open(result.filePaths[0]);
   });
   handle("workspace:open", (root) => workspace.open(root));
+  handle("workspace:inspect", (root) => workspace.inspect(root));
   handle("workspace:register", (root) => workspace.register(root));
   handle("launch:take", () => pendingPaths.splice(0));
   handle("launch:resolve", (target) => resolveOpenPath(workspace, target));
@@ -191,8 +192,8 @@ startup.then(async (start) => {
   handle("git:action", (root, action, payload) =>
     workspace.action(root, action, payload),
   );
-  handle("git:diff", (root, file, staged) =>
-    workspace.diff(root, file, staged),
+  handle("git:diff", (root, file, staged, original) =>
+    workspace.diff(root, file, staged, original),
   );
   handle("git:worktree", (root, branch, base) =>
     workspace.worktree(root, branch, base),

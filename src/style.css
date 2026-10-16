@@ -2067,6 +2067,37 @@ kbd {
   flex: 1;
   min-height: 0;
 }
+.git-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 14px 2px;
+}
+.git-repo svg { flex-shrink: 0; }
+.git-repo strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+.git-repo > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+.git-repo .current-tag { flex-shrink: 0; }
+.git-repo-block + .git-repo-block {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 4px;
+}
+.git-truncated { margin: 4px 14px 12px; color: var(--muted); font-size: 11px; }
 .git-sync {
   display: flex;
   align-items: center;
