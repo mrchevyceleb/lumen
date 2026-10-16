@@ -62,12 +62,33 @@ function findExecutable(command, environment = process.env) {
   );
 }
 
-// Resolve npm and executable forwarding shims without passing prompts through cmd.exe.
+// Resolve npm and executable forwarding shims without passing prompts through cmd.exe or PowerShell.
 function resolveLauncher(command, environment = process.env, powerShell) {
   const file = findExecutable(command, environment);
+  const dir = path.dirname(file);
+  const node = () => {
+    const local = path.join(dir, process.platform === "win32" ? "node.exe" : "node");
+    return fsSync.existsSync(local) ? local : findExecutable("node", environment);
+  };
   if (/\.(js|cjs|mjs)$/i.test(file))
-    return { file: findExecutable("node", environment), args: [file] };
+    return { file: node(), args: [file] };
   if (/\.ps1$/i.test(file)) {
+    const content = fsSync.readFileSync(file, "utf8");
+    const script = content.match(/^\s*(?:\$input\s*\|\s*)?&\s*"?(?:\$basedir[\\/])?node(?:\$exe|\.exe)?"?\s+"\$basedir[\\/]([^"\r\n]+\.(?:js|cjs|mjs))"\s+\$args\s*$/im);
+    if (script && fsSync.existsSync(path.join(dir, script[1])))
+      return { file: node(), args: [path.join(dir, script[1])] };
+    const bundled = content.match(/^\s*(?:\$input\s*\|\s*)?&\s*"\$basedir[\\/]([^"\r\n]+\.exe)"\s+\$args\s*$/im);
+    if (bundled && fsSync.existsSync(path.join(dir, bundled[1])))
+      return { file: path.join(dir, bundled[1]), args: [] };
+    const direct = content.match(/^\s*(?:\$input\s*\|\s*)?&\s*"([A-Za-z]:[^"\r\n]+\.exe)"\s+\$args\s*$/im);
+    if (direct && fsSync.existsSync(direct[1]))
+      return { file: direct[1], args: [] };
+    for (const ext of [".cmd", ".bat"]) {
+      const sibling = file.replace(/\.ps1$/i, ext);
+      if (fsSync.existsSync(sibling)) {
+        try { return resolveLauncher(sibling, environment, powerShell); } catch {}
+      }
+    }
     const shell = powerShell || (() => {
       try { return findExecutable("pwsh", environment); }
       catch { return findExecutable("powershell", environment); }
@@ -79,15 +100,18 @@ function resolveLauncher(command, environment = process.env, powerShell) {
   }
   if (!/\.(cmd|bat)$/i.test(file)) return { file, args: [] };
   const content = fsSync.readFileSync(file, "utf8");
-  const direct = content.match(/"([A-Za-z]:[^"\r\n]+\.exe)"\s+%\*/i);
+  const script = content.match(/(?:^\s*@?\s*|&\s*@?\s*)"(?:%_prog%|%(?:~?dp0%?)[\\/]node(?:\.exe)?|node(?:\.exe)?)"\s+"%(?:~?dp0%?)[\\/]([^"\r\n]+\.(?:js|cjs|mjs))"\s+%\*\s*$/im);
+  if (script && fsSync.existsSync(path.join(dir, script[1])))
+    return {
+      file: node(),
+      args: [path.join(dir, script[1])],
+    };
+  const bundled = content.match(/^\s*@?\s*"%(?:~?dp0%?)[\\/]([^"\r\n]+\.exe)"\s+%\*\s*$/im);
+  if (bundled && fsSync.existsSync(path.join(dir, bundled[1])))
+    return { file: path.join(dir, bundled[1]), args: [] };
+  const direct = content.match(/^\s*@?\s*"([A-Za-z]:[^"\r\n]+\.exe)"\s+%\*\s*$/im);
   if (direct && fsSync.existsSync(direct[1]))
     return { file: direct[1], args: [] };
-  const script = content.match(/"%dp0%[\\/]([^"\r\n]+\.(?:js|cjs|mjs))"/i);
-  if (script)
-    return {
-      file: findExecutable("node", environment),
-      args: [path.join(path.dirname(file), script[1])],
-    };
   throw new Error(
     "Select the underlying .exe or JavaScript CLI file instead of this command shim.",
   );
@@ -1199,9 +1223,10 @@ class Sessions {
       this.finish(s, 1);
     });
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (data) =>
-      this.event(s, { type: "diagnostic", text: strip(data).slice(-10000) }),
-    );
+    child.stderr.on("data", (data) => {
+      if (s.agent === "pi" && !s.busy) return;
+      this.event(s, { type: "diagnostic", text: strip(data).slice(-10000) });
+    });
     return child;
   }
   jsonStream(s, child, handler) {
@@ -1588,6 +1613,13 @@ class Sessions {
         e.isError ? "error" : "done",
       );
     if (e.type === "extension_ui_request") {
+      if (e.method === "setWidget") {
+        s.piWidgets ||= new Set();
+        const hasLines = Array.isArray(e.widgetLines) && e.widgetLines.some((line) => strip(line).trim());
+        if (hasLines) s.piWidgets.add(e.widgetKey);
+        else if (s.piWidgets.has(e.widgetKey)) s.piWidgets.delete(e.widgetKey);
+        else return;
+      }
       if (["select", "confirm", "input", "editor", "custom"].includes(e.method)) { s.piDialogs ||= new Set(); s.piDialogs.add(e.id); }
       this.event(s, { type: "pi_ui", request: { ...e, ...(typeof e.message === "string" ? { message: strip(e.message) } : {}), ...(e.lines ? { lines: e.lines.map(strip) } : {}), ...(e.widgetLines ? { widgetLines: e.widgetLines.map(strip) } : {}) } });
     }
