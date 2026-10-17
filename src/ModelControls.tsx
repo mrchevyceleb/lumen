@@ -25,6 +25,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
   const alive = useRef(true);
   const inFlight = useRef(false);
   const root = useRef<HTMLDivElement>(null);
+  const picker = useRef<HTMLDivElement>(null);
   useEffect(() => {
     alive.current = true;
     api<Record<string, string[]>>("session:shortcuts", tab.id).then((value) => { if (alive.current) setShortcuts(value); }).catch(() => {});
@@ -55,7 +56,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
   useEffect(() => {
     if (panel) {
       setQuery(""); setSelected(0); setError(""); if (panel !== "plan") void load();
-      if (panel === "model") requestAnimationFrame(() => root.current?.querySelector<HTMLInputElement>('[aria-label="Search models"]')?.focus());
+      if (panel === "model") requestAnimationFrame(() => picker.current?.querySelector<HTMLInputElement>('[aria-label="Search models"]')?.focus());
     }
   }, [panel]);
   useEffect(() => {
@@ -94,7 +95,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
     [...(["pi", "google"].includes(tab.agent) || !levels.length ? [] : [{ id: "", name: "CLI default", description: "Use the CLI's effort setting for this model." }]), ...levels];
   const selection = Math.min(selected, Math.max(0, choices.length - 1));
   useEffect(() => {
-    root.current?.querySelectorAll<HTMLElement>(".model-option")[selection]?.scrollIntoView({ block: "nearest" });
+    picker.current?.querySelectorAll<HTMLElement>(".model-option")[selection]?.scrollIntoView({ block: "nearest" });
   }, [selection, query]);
   const choose = (id: string) => void apply(panel === "model" ? { model: id } : { effort: id });
   const locked = tab.busy || loading || applying;
@@ -114,7 +115,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
     {panel && <Modal title={panel === "model" ? "Choose a model" : panel === "effort" ? "Thinking & effort" : "Plan before building"}
       subtitle={`${agentNames[tab.agent]} · ${panel === "plan" ? "Choose the CLI's planning workflow." : "Apply to this conversation. Your draft and history stay here."}`}
       onClose={() => { if (!applying) setPanel(null); }}>
-      <div className="model-picker-body">
+      <div className="model-picker-body" ref={picker}>
       {panel !== "plan" ? <>
         <div className="model-search-row">
           {panel === "model" && <label className="model-search"><Search size={16} /><input autoFocus placeholder="Search models or providers…" aria-label="Search models" value={query}

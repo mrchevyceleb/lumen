@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   X,
   Check,
@@ -86,7 +87,8 @@ export function Modal({
       previous?.focus();
     };
   }, []);
-  return (
+  // Escape clipped and filtered panels while retaining the app's theme variables.
+  return createPortal(
     <div
       className="overlay"
       onMouseDown={(e) => {
@@ -111,7 +113,8 @@ export function Modal({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.querySelector(".app") || document.body,
   );
 }
 export function FileIcon({ name }: { name: string }) {
