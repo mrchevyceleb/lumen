@@ -939,13 +939,20 @@ kbd {
 .archive-filter[aria-pressed="true"] { color: var(--text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .archive-filter:hover { color: var(--text); background: color-mix(in srgb, var(--muted) 8%, transparent); }
 .project-group { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 9px; padding: 6px 10px; }
-.project-row { display: grid; grid-template-columns: 13px minmax(0, 1fr) 25px; align-items: center; position: relative; border: 1px solid transparent; border-radius: 7px; margin: 2px 0; }
+.project-section { margin-bottom: 10px; }
+.project-section.pinned { padding: 3px 2px 7px; border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.project-section.pinned .project-group { color: var(--accent); }
+.project-section.unpinned .project-group { border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent); padding-top: 9px; }
+.project-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) 25px; align-items: center; position: relative; border: 1px solid transparent; border-radius: 7px; margin: 2px 0; }
 .project-row.selected { background: color-mix(in srgb, var(--project-color, var(--accent)) 8%, transparent); border-color: color-mix(in srgb, var(--project-color, var(--accent)) 18%, transparent); }
 .project-row.has-color { border-left-color: var(--project-color); }
-.project-row.drop-target { border-color: var(--accent); }
-.project-grip { color: var(--muted); opacity: .25; display: grid; cursor: grab; }
-.project-row:hover .project-grip { opacity: .7; }
+.project-row.drop-target { border-color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.project-row.dragging { opacity: .45; }
+.project-grip { color: var(--muted); opacity: .25; display: grid; place-items: center; min-width: 18px; min-height: 24px; cursor: grab; touch-action: none; user-select: none; -webkit-user-drag: element; }
+.project-row:hover .project-grip, .project-row:focus-within .project-grip { opacity: .7; }
+.project-grip:active { cursor: grabbing; }
 .project-row.archived .project-grip, .project-row.archived:hover .project-grip { opacity: 0; cursor: default; }
+.project-pin-mark { color: var(--accent); flex-shrink: 0; }
 .project-open { display: flex; align-items: center; gap: 7px; min-width: 0; text-align: left; padding: 7px 3px; font-size: 12px; }
 .project-open svg { color: var(--project-color, var(--muted)); }
 .project-row.selected .project-open svg { color: var(--project-color, var(--accent)); }
@@ -954,7 +961,7 @@ kbd {
 .project-options { display: grid; place-items: center; color: var(--muted); padding: 4px; }
 .project-row > input { min-width: 0; font-size: 12px; padding: 7px 5px; }
 .project-menu { grid-column: 2 / -1; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--surface); padding: 4px; border-radius: 7px; margin: 0 4px 6px 0; }
-.with-chats .project-row { grid-template-columns: 12px 18px minmax(0, 1fr) 22px 22px; }
+.with-chats .project-row { grid-template-columns: 18px 18px minmax(0, 1fr) 22px 22px; }
 .project-collapse { display: grid; place-items: center; color: var(--muted); padding: 6px 0; }
 .project-collapse:hover, .project-options:hover { color: var(--text); }
 .project-entry + .project-entry { margin-top: 3px; }
@@ -975,7 +982,7 @@ kbd {
 .project-menu .project-colors button { width: 18px; height: 18px; padding: 0; border: 2px solid transparent; border-radius: 50%; }
 .project-menu .project-colors button[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
 .project-colors input[type="color"] { width: 22px; height: 22px; padding: 1px; border-radius: 4px; }
-.archived-projects { margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.archived-projects { margin-top: 12px; padding-top: 6px; border-top: 1px solid var(--border); }
 .project-row.archived { opacity: 0.82; }
 .project-row.archived.selected { opacity: 1; }
 .session-tab.archived { opacity: 0.72; }
