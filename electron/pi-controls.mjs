@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 export default function lumenControls(pi) {
-  let context, socket, view = process.env.LUMEN_PI_VIEW === "native" ? "native" : "rich";
+  let context, socket, socketConnected = false, view = process.env.LUMEN_PI_VIEW === "native" ? "native" : "rich";
   const dialogs = new Map();
   const deliveries = new Map();
   const activeTools = new Map();
@@ -97,9 +97,15 @@ export default function lumenControls(pi) {
     // a missing file: retain its header separately until Pi materializes it.
     if (fs.existsSync(file)) { const fd = fs.openSync(file, "r+"); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
   };
-  const output = (message) => { if (socket && !socket.destroyed) socket.write(JSON.stringify(message) + "\n"); };
-  const state = () => ({ sessionFile: context?.sessionManager.getSessionFile(), sessionHeader: context?.sessionManager.getHeader(), model: context?.model,
-    thinkingLevel: pi.getThinkingLevel(), isStreaming: context ? !context.isIdle() : false, isCompacting: compacting, pendingMessageCount: context?.hasPendingMessages() ? 1 : 0 });
+  const output = (message) => { if (socket && socketConnected && !socket.destroyed) socket.write(JSON.stringify(message) + "\n"); };
+  const state = () => {
+    const usage = context?.getContextUsage?.();
+    return {
+      sessionFile: context?.sessionManager.getSessionFile(), sessionHeader: context?.sessionManager.getHeader(), model: context?.model,
+      thinkingLevel: pi.getThinkingLevel(), isStreaming: context ? !context.isIdle() : false, isCompacting: compacting, pendingMessageCount: context?.hasPendingMessages() ? 1 : 0,
+      contextUsage: context ? { tokens: usage?.tokens ?? null, contextWindow: usage?.contextWindow ?? context.model?.contextWindow ?? null } : null,
+    };
+  };
   const installUI = (ctx) => {
     const ui = ctx.ui;
     if (ui.__lumenBridge) return;
@@ -204,7 +210,7 @@ export default function lumenControls(pi) {
     socket = net.createConnection(process.env.LUMEN_PI_BRIDGE);
     socket.setEncoding("utf8");
     let buffer = "";
-    socket.on("connect", () => { output({ token: process.env.LUMEN_PI_BRIDGE_TOKEN }); if (context) output({ type: "bridge_ready", ...state() }); });
+    socket.on("connect", () => { socketConnected = true; output({ token: process.env.LUMEN_PI_BRIDGE_TOKEN }); if (context) output({ type: "bridge_ready", ...state() }); });
     socket.on("error", () => {});
     socket.on("close", () => { for (const dialog of [...dialogs.values()]) dialog.native(); });
     pi.on("session_shutdown", () => { for (const component of widgets.values()) component?.dispose?.(); widgets.clear(); for (const dialog of [...dialogs.values()]) dialog.finish({ cancelled: true }); });
@@ -251,8 +257,11 @@ export default function lumenControls(pi) {
   const contextEvent = (ctx, data) => {
     data = { contextWindow: ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? null, ...data };
     if (process.env.LUMEN_RPC_CONTROLS === "1") ctx.ui.notify("LUMEN_CONTEXT:" + JSON.stringify(data), "info");
-    else if (data.compacting === true) ctx.ui.notify("Compacting context…", "info");
-    else if (data.compacting === false) ctx.ui.notify(data.error ? "Auto-compact: " + data.error : "Context compacted", data.error ? "warning" : "info");
+    else {
+      if (process.env.LUMEN_PI_BRIDGE) output({ type: "extension_ui_request", method: "notify", message: "LUMEN_CONTEXT:" + JSON.stringify(data), notificationType: "info" });
+      if (data.compacting === true) ctx.ui.notify("Compacting context…", "info");
+      else if (data.compacting === false) ctx.ui.notify(data.error ? "Auto-compact: " + data.error : "Context compacted", data.error ? "warning" : "info");
+    }
   };
   for (const event of ["session_start", "model_select", "message_end", "session_compact"])
     pi.on(event, (_event, ctx) => contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null }));
@@ -286,6 +295,7 @@ export default function lumenControls(pi) {
           if (!model || !await pi.setModel(model)) throw new Error("This model is no longer available.");
           const level = scoped.find((s) => s.model.provider === model.provider && s.model.id === model.id)?.thinkingLevel;
           if (level) pi.setThinkingLevel(level);
+          contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null });
         } else if (request.action === "backward") {
           const choices = scoped.length ? scoped : available.map((model) => ({ model }));
           if (choices.length > 1) {
@@ -294,6 +304,7 @@ export default function lumenControls(pi) {
             const next = choices[(index + choices.length - 1) % choices.length];
             if (!await pi.setModel(next.model)) throw new Error("No account configured for this model.");
             if (next.thinkingLevel) pi.setThinkingLevel(next.thinkingLevel);
+            contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null });
           }
         } else if (request.action === "autocompact") {
           threshold = request.tokens ?? null;

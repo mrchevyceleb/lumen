@@ -2,6 +2,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const validId = (id) => typeof id === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id);
+function applyContext(tab, event, allowTokens = true, allowWindow = true) {
+  if (allowTokens && ((Number.isFinite(event.contextTokens) && event.contextTokens >= 0) || event.contextTokens === null)) tab.contextTokens = event.contextTokens;
+  if (allowWindow && Object.hasOwn(event, "contextWindow") && ((Number.isFinite(event.contextWindow) && event.contextWindow > 0) || (event.contextWindow === null && (event.resetContextWindow || event.contextTokens === null))))
+    tab.contextWindow = event.contextWindow;
+}
 
 // The main process owns recovery. Every runtime event is journaled before the
 // renderer sees it; closing the window is not a prerequisite for saving a chat.
@@ -21,13 +26,26 @@ class RecoveryStore {
         break;
       } catch (error) { if (error.code !== "ENOENT") this.error = "Recovered the last available session snapshot."; }
     }
+    const backfillTokensIds = new Set(
+      (this.state.tabs || []).filter((tab) => !Object.hasOwn(tab, "contextTokens")).map((tab) => tab.controlId),
+    );
+    const backfillWindowIds = new Set(
+      (this.state.tabs || []).filter((tab) => !Object.hasOwn(tab, "contextWindow")).map((tab) => tab.controlId),
+    );
     try {
       const lines = fs.readFileSync(this.journal, "utf8").split("\n");
       for (const line of lines) {
         if (!line) continue;
         let record;
         try { record = JSON.parse(line); } catch { this.error = "Recovered sessions up to the last complete saved event."; break; }
-        if (record.revision <= this.state.revision) continue;
+        if (record.revision <= this.state.revision) {
+          const cid = record.data?.controlId;
+          if (record.kind === "event" && record.data?.event?.type === "context" && (backfillTokensIds.has(cid) || backfillWindowIds.has(cid))) {
+            const tab = this.state.tabs.find((item) => item.controlId === cid);
+            if (tab) applyContext(tab, record.data.event, backfillTokensIds.has(cid), backfillWindowIds.has(cid));
+          }
+          continue;
+        }
         this.apply(record);
       }
       // Remove an incomplete tail before appending; otherwise the next valid
@@ -64,6 +82,8 @@ class RecoveryStore {
       root: session.root, cwd: session.cwd, projectless: session.projectless, scratchId: saved.scratchId || session.scratchId,
       agent: session.agent, mode: session.mode, accountId: session.accountId, accountName: session.accountName,
       command: session.command, model: session.model, effort: session.effort, workMode: session.workMode,
+      contextTokens: session.contextTokens ?? existing?.contextTokens ?? saved.contextTokens ?? null,
+      contextWindow: session.contextWindow ?? existing?.contextWindow ?? saved.contextWindow ?? null,
       sessionRef: session.sessionRef, autoCompactTokens: session.autoCompactTokens, mcpOverrides: session.mcpOverrides,
       messages: existing?.messages || saved.messages || [], busy: false,
       interrupted: !!saved.interrupted || !!existing?.busy || !!existing?.interrupted,
@@ -128,6 +148,7 @@ class RecoveryStore {
     if (event.type === "view") tab.mode = event.mode;
     if (event.type === "cwd") tab.cwd = event.cwd;
     if (["config", "session-controls"].includes(event.type)) for (const key of ["model", "effort", "workMode", "autoCompactTokens", "mcpOverrides"]) if (Object.hasOwn(event, key)) tab[key] = event[key];
+    if (event.type === "context") applyContext(tab, event);
     if (event.type === "queue") { tab.queuedMessages = event.queuedMessages; tab.queuePaused = event.queuePaused; }
     if (event.type === "user-message-retracted") tab.messages = tab.messages.filter((message) => message.id !== event.messageId);
     if (event.type === "user-message" && !tab.messages.some((message) => message.id === event.messageId))

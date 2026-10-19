@@ -465,7 +465,7 @@ export default function App() {
         shellCommand: settingsRef.current.agents.shell.command,
         savedTab: resume || {},
       };
-      let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string };
+      let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string; contextTokens?: number | null; contextWindow?: number | null };
       created = await api("session:create", request);
       delete pendingCwds.current[folder];
       const tab: Tab = {
@@ -496,9 +496,9 @@ export default function App() {
         controlId: created.controlId,
         autoCompactTokens: resume?.autoCompactTokens ?? null,
         mcpOverrides: resume?.mcpOverrides || {},
-        contextTokens: resume?.contextTokens ?? null,
-        contextWindow: resume?.contextWindow ?? null,
-        contextStale: resume?.contextTokens != null,
+        contextTokens: created.contextTokens ?? resume?.contextTokens ?? null,
+        contextWindow: created.contextWindow ?? resume?.contextWindow ?? null,
+        contextStale: (created.contextTokens ?? resume?.contextTokens) != null,
         queuedMessages: resume?.queuedMessages?.map((m) => ({ ...m, state: "queued" })) || [],
         queuePaused: !!resume?.queuedMessages?.length,
         archived: resume?.archived === true,
@@ -1560,7 +1560,7 @@ export default function App() {
                 </div>
                 <div>
                   {active.managedBy && <button className="agent-control-badge" title={`${active.managedBy} · Task ${active.controlId}`} onClick={() => { setSettingsSection("control"); setDialog("settings"); }}><Sparkles size={12} />Agent control</button>}
-                  {active.agent !== "shell" && <ContextIndicator tab={active} />}
+                  {!["shell", "google"].includes(active.agent) && <ContextIndicator tab={active} />}
                   {active.agent !== "shell" && <AccountPicker key={active.id} tab={active} onSelect={(id) => {
                     if (id !== (active.accountId || "")) void addTab(active.agent, active.mode, active.projectless ? "" : active.root, undefined, active.cwd, id, active.projectless ? active.scratchId : undefined);
                   }} onManage={() => { setSettingsSection("accounts"); setDialog("settings"); }} onSignIn={() => void signInChat(active.id)} />}
@@ -1945,6 +1945,7 @@ export default function App() {
           <span>One workspace. Every agent. Room to think.</span>
         </div>
         <div>
+          {active && !["shell", "google"].includes(active.agent) && <ContextIndicator tab={active} variant="statusbar" />}
           {updateStatus?.phase === "downloaded" && <button className="update-ready" title={`Lumen ${updateStatus.latest} is ready. Close Lumen to install, or restart now.`} onClick={() => api("updates:install").catch((e) => notify(e.message))}><Download size={12} />Update ready</button>}
           {boot.administrator.supported && <button className={boot.administrator.elevated ? "administrator-active" : ""} title={boot.administrator.elevated ? "Agents and terminals have Windows administrator access" : "Restart Lumen with Windows administrator access"}
             onClick={() => { setSettingsSection("behavior"); setDialog("settings"); }}><ShieldCheck size={12} />{boot.administrator.elevated ? "Administrator" : "Run as administrator"}</button>}

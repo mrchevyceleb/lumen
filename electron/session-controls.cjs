@@ -169,6 +169,8 @@ class Runtime {
     this.serverUiRequests = new Map();
     this.userAcks = new Map();
     this.hadPrompt = !!s.sessionRef;
+    this.context = s.contextTokens ?? null;
+    this.contextWindow = s.contextWindow ?? null;
   }
   write(message, onWritten) {
     if (this.closed || this.child !== this.s.process) throw new Error("The CLI session closed. Try again.");
@@ -283,15 +285,39 @@ class Runtime {
       }
       o.messagesEvent(s, e);
       if (e.type === "system" && e.session_id) { s.sessionStarted = true; o.event(s, { type: "session", sessionRef: s.sessionRef }); }
-      const messageUsage = e.type === "assistant" ? e.message?.usage : e.event?.type === "message_start" ? e.event.message?.usage : null;
-      if (messageUsage) { this.claudeUsage = { ...messageUsage }; this.contextModel = e.message?.model || e.event?.message?.model; this.context = claudeContext(this.claudeUsage); this.reportContext(); }
-      if (e.event?.type === "message_delta" && e.event.usage && this.claudeUsage) { Object.assign(this.claudeUsage, e.event.usage); this.context = claudeContext(this.claudeUsage); this.reportContext(); }
-      if (e.type === "system" && e.subtype === "compact_boundary") this.phase(false);
+      const messageModel = e.message?.model || e.event?.message?.model;
+      const messageUsage = !e.parent_tool_use_id && messageModel !== "<synthetic>" ? (e.type === "assistant" ? e.message?.usage : e.event?.type === "message_start" ? e.event.message?.usage : null) : null;
+      if (messageUsage) {
+        this.claudeUsage = { ...messageUsage };
+        if (messageModel) this.contextModel = messageModel;
+        const used = claudeContext(this.claudeUsage);
+        if (used !== null) { this.context = used; this.reportContext(); }
+      } else if (!e.parent_tool_use_id && messageModel === "<synthetic>") {
+        this.claudeUsage = null;
+      }
+      if (!e.parent_tool_use_id && e.event?.type === "message_delta" && e.event.usage && this.claudeUsage) {
+        Object.assign(this.claudeUsage, e.event.usage);
+        const used = claudeContext(this.claudeUsage);
+        if (used !== null) { this.context = used; this.reportContext(); }
+      }
+      if (e.type === "system" && e.subtype === "compact_boundary") {
+        this.phase(false);
+        const postTokens = e.compactMetadata?.postTokens;
+        if (Number.isFinite(postTokens) && postTokens > 0) {
+          this.claudeUsage = { input_tokens: postTokens };
+          this.context = postTokens;
+          this.reportContext();
+        }
+        void this.contextUsage().catch(() => {});
+      }
       if (e.type === "system" && e.subtype === "status") this.phase(e.status === "compacting");
       if (e.type === "result") {
         if (e.is_error && (e.error_code === "authentication_failed" || /failed to authenticate|OAuth session expired|invalid authentication credentials|OAuth access token (?:has been )?(?:revoked|expired)/i.test([e.result, ...(e.errors || [])].join("\n")))) { this.authFailed = true; s.claudeAuthInvalid = true; }
         const usage = e.modelUsage?.[this.contextModel] || (Object.keys(e.modelUsage || {}).length === 1 ? Object.values(e.modelUsage)[0] : null);
-        this.contextWindow = usage?.contextWindow ?? this.contextWindow; this.reportContext(); o.finish(s, e.is_error ? 1 : 0);
+        if (!this.contextWindow && usage?.contextWindow) this.contextWindow = usage.contextWindow;
+        this.reportContext();
+        void this.contextUsage().catch(() => {});
+        o.finish(s, e.is_error ? 1 : 0);
       }
     } else if (s.agent === "codex") this.codexEvent(e);
     else this.grokEvent(e);
@@ -391,6 +417,7 @@ class Runtime {
       await this.request("session/set_mode", { sessionId: s.sessionRef, modeId: s.workMode === "plan" ? "plan" : "default" });
     }
     if (["claude", "grok"].includes(s.agent)) await this.applyOverrides();
+    void this.contextUsage().catch(() => {});
     return this;
   }
   async servers() {
@@ -481,9 +508,89 @@ class Runtime {
     for (const [name, enabled] of Object.entries(this.s.mcpOverrides)) await this.toggle(name, enabled);
   }
   async contextUsage() {
-    if (this.s.agent === "grok") {
+    if (this.s.agent === "claude") {
+      const info = await this.request("get_context_usage", {}, 5000).catch(() => null);
+      if (info) {
+        if (Number.isFinite(info.totalTokens) && info.totalTokens >= 0) this.context = info.totalTokens;
+        const limit = info.maxTokens ?? info.rawMaxTokens;
+        if (Number.isFinite(limit) && limit > 0) this.contextWindow = limit;
+        this.reportContext();
+      }
+    } else if (this.s.agent === "codex") {
+      if (this.rolloutPath) {
+        if (this.rolloutCachedPath !== this.rolloutPath) {
+          this.rolloutCachedPath = this.rolloutPath;
+          this.rolloutOffset = 0;
+          this.rolloutRemainder = "";
+          this.rolloutUsed = null;
+          this.rolloutLimit = null;
+          this.rolloutModel = null;
+        }
+        const handle = await fs.open(this.rolloutPath, "r").catch(() => null);
+        if (handle) {
+          try {
+            const stat = await handle.stat();
+            if (stat.size < this.rolloutOffset) {
+              this.rolloutOffset = 0;
+              this.rolloutRemainder = "";
+              this.rolloutUsed = null;
+              this.rolloutLimit = null;
+              this.rolloutModel = null;
+            }
+            const length = stat.size - this.rolloutOffset;
+            if (length > 0) {
+              const buffer = Buffer.alloc(length);
+              const { bytesRead } = await handle.read(buffer, 0, length, this.rolloutOffset);
+              this.rolloutOffset += bytesRead;
+              const chunk = this.rolloutRemainder + buffer.subarray(0, bytesRead).toString("utf8");
+              const lines = chunk.split(/\r?\n/);
+              this.rolloutRemainder = lines.pop() || "";
+              for (const line of lines) {
+                if (!line) continue;
+                try {
+                  const row = JSON.parse(line);
+                  if ((row.type === "turn_context" || row.type === "session_meta") && typeof row.payload?.model === "string" && row.payload.model) {
+                    this.rolloutModel = row.payload.model;
+                    if (this.s.model && this.rolloutModel !== this.s.model) this.rolloutLimit = null;
+                  } else if (row.type === "event_msg" && row.payload?.type === "token_count") {
+                    const total = row.payload.info?.last_token_usage?.total_tokens;
+                    const win = row.payload.info?.model_context_window;
+                    if (Number.isFinite(total) && total >= 0) this.rolloutUsed = total;
+                    if (Number.isFinite(win) && win > 0) this.rolloutLimit = win;
+                  } else if (row.type === "token_usage_record") {
+                    const total = row.payload?.usage?.total_tokens;
+                    if (Number.isFinite(total) && total >= 0) this.rolloutUsed = total;
+                  }
+                } catch {}
+              }
+            }
+          } finally {
+            await handle.close().catch(() => {});
+          }
+        }
+      }
+      const used = this.rolloutUsed ?? null;
+      let limit = !this.s.model || !this.rolloutModel || this.rolloutModel === this.s.model ? (this.rolloutLimit ?? null) : null;
+      if (!limit && this.s.model) {
+        const codexHome = this.s.profileEnvironment?.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+        const cache = await jsonFile(path.join(codexHome, "models_cache.json"));
+        const entry = Array.isArray(cache.models) ? cache.models.find((m) => m.slug === this.s.model) : null;
+        if (Number.isFinite(entry?.context_window) && entry.context_window > 0) {
+          limit = Number.isFinite(entry.effective_context_window_percent) && entry.effective_context_window_percent > 0
+            ? Math.floor((entry.context_window * entry.effective_context_window_percent) / 100)
+            : entry.context_window;
+        }
+      }
+      if (used !== null) this.context = used;
+      else if (this.context === null && limit !== null) this.context = 0;
+      if (limit !== null) this.contextWindow = limit;
+      if (this.context !== null || this.contextWindow !== null) this.reportContext();
+    } else if (this.s.agent === "grok") {
       const info = await this.request("_x.ai/session/info", { sessionId: this.s.sessionRef }, 5000), context = info.context || info.data?.context;
-      this.context = context?.used ?? null; this.contextWindow = context?.total ?? context?.limit ?? null; this.reportContext();
+      if (Number.isFinite(context?.used) && context.used >= 0) this.context = context.used;
+      const limit = context?.total ?? context?.limit;
+      if (Number.isFinite(limit) && limit > 0) this.contextWindow = limit;
+      this.reportContext();
     }
     return this.context ?? null;
   }
@@ -585,6 +692,7 @@ class Runtime {
     }
     finally { this.grokPromptActive = false; }
     if (result.stopReason !== "cancelled") await this.grokCompact();
+    else await this.contextUsage().catch(() => {});
     if (result.stopReason && !["end_turn", "cancelled"].includes(result.stopReason)) o.event(s, { type: "diagnostic", text: `Grok finished: ${result.stopReason}.` });
     o.finish(s, result.stopReason === "cancelled" ? 130 : 0);
   }
@@ -708,7 +816,8 @@ class Runtime {
 }
 function claudeContext(usage) {
   if (!usage || !Number.isFinite(usage.input_tokens)) return null;
-  return usage.input_tokens + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.output_tokens || 0);
+  const total = usage.input_tokens + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.output_tokens || 0);
+  return total > 0 ? total : null;
 }
 async function ensureRuntime(owner, s) {
   if (owner.accounts?.signingIn(s)) throw new Error("Finish this account's sign-in, then retry your message.");

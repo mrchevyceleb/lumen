@@ -8,7 +8,7 @@ async function discoverCommands(s, launcher, kill) {
   const model = cliOptions({ ...s, workMode: "" });
   const args = {
     pi: ["--mode", "rpc", "--no-session", ...model],
-    claude: ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...model],
+    claude: ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", ...model, ...(s.agent === "claude" && s.autoCompactTokens ? ["--autocompact", String(s.autoCompactTokens)] : [])],
     codex: ["app-server", "--listen", "stdio://", ...codexAccountOptions(s)],
     grok: [...model, "agent", "--no-leader", "stdio"],
   }[s.agent];
@@ -19,9 +19,9 @@ async function discoverCommands(s, launcher, kill) {
     env: { ...accountEnvironment(s, s.profileEnvironment || process.env), ...(s.agent === "grok" && s.grokHome ? { GROK_HOME: s.grokHome } : {}), NO_COLOR: "1" },
   });
   s.discoveryChild = child;
-  let timer, buffer = "", stderr = "", settled = false, finish, grokCommands, grokReady = false, grokInfo;
+  let timer, fallbackTimer, buffer = "", stderr = "", settled = false, finish, claudeResult, grokCommands, grokReady = false, grokInfo, grokContext, grokContextReady = false;
   let codexCommands, codexWarning, codexConfig, codexModels = [], codexPage = 10;
-  const requestId = crypto.randomUUID();
+  const requestId = crypto.randomUUID(), contextRequestId = crypto.randomUUID();
   const send = (message) => child.stdin.write(JSON.stringify(message) + "\n");
   try {
     return await new Promise((resolve, reject) => {
@@ -29,6 +29,7 @@ async function discoverCommands(s, launcher, kill) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        clearTimeout(fallbackTimer);
         error ? reject(error) : resolve(value);
       };
       child.on("error", (error) => finish(error));
@@ -46,11 +47,19 @@ async function discoverCommands(s, launcher, kill) {
         if (s.agent === "claude" && e.type === "control_response" && e.response?.request_id === requestId) {
           if (e.response.subtype === "error") throw new Error(e.response.error || "Claude could not list commands.");
           const info = e.response.response || {};
-          finish(null, { commands: normalize(info.commands, "claude"), origin: "Claude CLI",
+          claudeResult = { commands: normalize(info.commands, "claude"), origin: "Claude CLI",
             catalog: catalog("claude", info.models, { currentModel: s.model || "default", currentEffort: s.effort || "",
-              currentMode: s.workMode || info.current_permission_mode || "" }) });
+              currentMode: s.workMode || info.current_permission_mode || "" }) };
+          send({ type: "control_request", request_id: contextRequestId, request: { subtype: "get_context_usage" } });
+          fallbackTimer = setTimeout(() => finish(null, claudeResult), 1500);
         }
-        if (["grok", "codex"].includes(s.agent) && e.error) throw new Error(e.error.message || "Command discovery failed.");
+        if (s.agent === "claude" && e.type === "control_response" && e.response?.request_id === contextRequestId && claudeResult) {
+          const ctx = e.response.subtype === "success" ? e.response.response || {} : {};
+          const used = Number.isFinite(ctx.totalTokens) && ctx.totalTokens >= 0 ? ctx.totalTokens : null;
+          const limit = ctx.maxTokens ?? ctx.rawMaxTokens ?? null;
+          finish(null, { ...claudeResult, contextUsage: (used !== null || (Number.isFinite(limit) && limit > 0)) ? { contextTokens: used, contextWindow: Number.isFinite(limit) && limit > 0 ? limit : null } : null });
+        }
+        if (["grok", "codex"].includes(s.agent) && e.error && !(s.agent === "grok" && e.id === 4)) throw new Error(e.error.message || "Command discovery failed.");
         if (s.agent === "codex") {
           if (e.id === 1) {
             send({ method: "initialized" });
@@ -84,10 +93,26 @@ async function discoverCommands(s, launcher, kill) {
           if (e.id === 2) send({ jsonrpc: "2.0", id: 3, method: "session/new", params: { cwd: s.root, mcpServers: [] } });
           if (e.method === "session/update" && e.params?.update?.sessionUpdate === "available_commands_update")
             grokCommands = e.params.update.availableCommands;
-          if (e.id === 3) { grokReady = true; grokInfo = e.result; }
+          if (e.id === 3) {
+            grokReady = true; grokInfo = e.result;
+            if (grokInfo?.sessionId) {
+              send({ jsonrpc: "2.0", id: 4, method: "_x.ai/session/info", params: { sessionId: grokInfo.sessionId } });
+              fallbackTimer = setTimeout(() => { grokContextReady = true; if (grokCommands || s.modelsOnly) finish(null, { commands: normalize(grokCommands || [], "grok"), origin: "Grok ACP",
+                catalog: catalog("grok", grokInfo.models?.availableModels, { currentModel: s.model || grokInfo.models?.currentModelId || "",
+                  currentEffort: s.effort || grokInfo.configOptions?.find((o) => o.id === "reasoning_effort")?.currentValue || "",
+                  currentMode: s.workMode || "" }) }); }, 1500);
+            } else grokContextReady = true;
+          }
+          if (e.id === 4) {
+            const info = e.result?.result !== undefined ? e.result.result : e.result;
+            const ctx = info?.context || info?.data?.context;
+            if (ctx) grokContext = { contextTokens: Number.isFinite(ctx.used) && ctx.used >= 0 ? ctx.used : null, contextWindow: Number.isFinite(ctx.total ?? ctx.limit) && (ctx.total ?? ctx.limit) > 0 ? (ctx.total ?? ctx.limit) : null };
+            grokContextReady = true;
+          }
           // Grok announces a preliminary list before the working folder finishes
           // loading. Use the latest inventory once session/new is complete.
-          if (grokReady && (grokCommands || s.modelsOnly)) finish(null, { commands: normalize(grokCommands || [], "grok"), origin: "Grok ACP",
+          if (grokReady && grokContextReady && (grokCommands || s.modelsOnly)) finish(null, { commands: normalize(grokCommands || [], "grok"), origin: "Grok ACP",
+            contextUsage: grokContext || null,
             catalog: catalog("grok", grokInfo.models?.availableModels, { currentModel: s.model || grokInfo.models?.currentModelId || "",
               currentEffort: s.effort || grokInfo.configOptions?.find((o) => o.id === "reasoning_effort")?.currentValue || "",
               currentMode: s.workMode || "" }) });

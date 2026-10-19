@@ -1410,7 +1410,13 @@ kbd {
   gap: 8px;
   align-items: center;
 }
-.context-indicator { display: flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
+.context-indicator { display: flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); background: transparent; font: inherit; }
+button.context-indicator { cursor: pointer; }
+button.context-indicator:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--text); background: color-mix(in srgb, var(--surface) 70%, transparent); }
+button.context-indicator:disabled { opacity: 0.65; cursor: default; }
+.context-indicator-composer { margin-left: auto; height: 28px; padding: 0 8px; font-size: 11px; border-radius: 7px; }
+.context-indicator-statusbar { padding: 1px 6px; gap: 5px; border-radius: 4px; font-size: 9px; border-color: color-mix(in srgb, var(--border) 70%, transparent); }
+.context-indicator-statusbar .context-meter { width: 24px; height: 2.5px; }
 .context-indicator strong { color: var(--text); font-weight: 500; }
 .context-meter { width: 32px; height: 3px; border-radius: 3px; background: var(--border); overflow: hidden; }
 .context-meter i { display: block; height: 100%; background: var(--accent); }

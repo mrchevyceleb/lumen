@@ -29,7 +29,7 @@ function formatToolDetail(rawContent) {
 }
 async function sessionFile(session) {
   if (!session.sessionRef) return null;
-  if (session.agent === "pi") return session.sessionRef;
+  if (session.agent === "pi") return await fs.stat(session.sessionRef).then((stat) => stat.isFile() ? session.sessionRef : null, () => null);
   const root = session.agent === "claude" ? path.join(session.claudeHome, "projects") : path.join(session.grokHome, "sessions");
   for (const entry of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
     if (!entry.isDirectory()) continue;
@@ -57,8 +57,25 @@ async function readHistory(session) {
     }
   }
   const messages = [], toolsByCallId = new Map();
+  let contextTokens = null;
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
+    if (session.agent === "claude") {
+      if (row.type === "system" && row.subtype === "compact_boundary" && Number.isFinite(row.compactMetadata?.postTokens) && row.compactMetadata.postTokens > 0)
+        contextTokens = row.compactMetadata.postTokens;
+      else if (row.type === "assistant" && !row.parent_tool_use_id && !row.isSidechain && row.message?.model !== "<synthetic>" && row.message?.usage) {
+        const u = row.message.usage;
+        const sum = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0);
+        if (sum > 0) contextTokens = sum;
+      }
+    } else if (session.agent === "pi") {
+      if (row.type === "compaction") contextTokens = null;
+      else if (row.type === "message" && row.message?.role === "assistant" && row.message?.usage && row.message.stopReason !== "aborted" && row.message.stopReason !== "error") {
+        const u = row.message.usage;
+        const sum = Number.isFinite(u.totalTokens) && u.totalTokens > 0 ? u.totalTokens : (u.input || 0) + (u.output || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+        if (sum > 0) contextTokens = sum;
+      }
+    }
     if (session.agent === "claude" && (row.type !== "user" && row.type !== "assistant" || row.isMeta || row.isVisibleInTranscriptOnly || row.isCompactSummary || row.origin?.kind === "task-notification")) continue;
     if (session.agent === "pi" && row.type && row.type !== "message") continue;
     const value = ["claude", "pi"].includes(session.agent) ? row.message : row;
@@ -162,7 +179,7 @@ async function readHistory(session) {
     const identity = row.uuid || row.id || crypto.createHash("sha256").update(`${session.sessionRef}:${index}:${text}`).digest("hex");
     messages.push({ id: row.uuid || `native-${identity}`, providerMessageId: row.uuid || row.id, timestamp, role, text, state: "done" });
   }
-  return { messages, file };
+  return { messages, file, contextTokens };
 }
 function preserveAttachments(messages, saved = []) {
   const previous = saved.filter((message) => message.role === "user");

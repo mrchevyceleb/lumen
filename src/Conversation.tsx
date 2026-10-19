@@ -19,6 +19,7 @@ import {
   LogIn,
 } from "lucide-react";
 import { Busy, CopyButton, IconButton } from "./Components";
+import ContextIndicator from "./ContextIndicator";
 import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand } from "./types";
 import CommandMenu from "./CommandMenu";
 import ModelControls, { type ControlPanel } from "./ModelControls";
@@ -499,6 +500,12 @@ export default function Conversation({
               disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>
               <Shrink size={13} /><span>{tab.autoCompactTokens ? `${(tab.autoCompactTokens / 1000).toLocaleString()}k` : "Auto-compact"}</span>
             </button>
+            <ContextIndicator
+              tab={tab}
+              variant="composer"
+              disabled={tab.busy || submitting || controlPending}
+              onClick={() => setSessionPanel("context")}
+            />
           </>}
           </div>
           {sessionError && <div className="session-control-error" role="alert"><AlertCircle size={14} /><span>{sessionError}</span>{authError(sessionError) && <button className="secondary" disabled={tab.busy} onClick={onSignIn}>Sign in</button>}</div>}

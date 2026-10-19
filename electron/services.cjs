@@ -678,11 +678,13 @@ class Sessions {
       sessionStarted: !!sessionRef,
       savedTab,
       piSessionHeader: savedTab.piSessionHeader,
+      contextTokens: Number.isFinite(savedTab.contextTokens) && savedTab.contextTokens >= 0 ? savedTab.contextTokens : null,
+      contextWindow: Number.isFinite(savedTab.contextWindow) && savedTab.contextWindow > 0 ? savedTab.contextWindow : null,
     };
     s.messageQueue = new MessageQueue(this, s, queuedMessages);
     this.sessions.set(id, s);
     this.recovery?.bind(s, savedTab);
-    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, ...controls, accountId: s.accountId, accountName: s.accountName, ...s.messageQueue.state() };
+    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, contextTokens: s.contextTokens, contextWindow: s.contextWindow, ...controls, accountId: s.accountId, accountName: s.accountName, ...s.messageQueue.state() };
   }
   async sessionControls(id) {
     const s = this.get(id);
@@ -809,6 +811,14 @@ class Sessions {
         result = await discoverCommands(s, (args) => profiledLaunch(s, args, resolveLauncher), (child) => this.kill(child));
       }
       if (!this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Command discovery was canceled.");
+      if (result.contextUsage) {
+        const hasExistingHistory = !!s.sessionStarted || !!s.savedTab?.messages?.some((m) => m.role === "user");
+        this.event(s, {
+          type: "context",
+          contextTokens: s.contextTokens !== null || hasExistingHistory ? s.contextTokens : result.contextUsage.contextTokens,
+          contextWindow: result.contextUsage.contextWindow ?? s.contextWindow,
+        });
+      }
       s.commands = result;
       s.commandsAt = Date.now();
       return withShared(result);
@@ -1075,12 +1085,19 @@ class Sessions {
         s.catalog = { ...info, currentModel: s.model, currentEffort: s.effort,
           currentEfforts: efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) };
       } else s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode };
+      if (s.agent !== "pi" && s.model !== previousModel) {
+        if (s.runtime) s.runtime.contextWindow = null;
+        this.event(s, { type: "context", contextTokens: s.contextTokens, contextWindow: null, resetContextWindow: true });
+      }
       if (s.agent === "codex" && s.runtime) {
         const model = s.model || info.currentModel || info.models[0]?.id;
         await s.runtime.request("thread/settings/update", { threadId: s.sessionRef, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}),
           ...(s.workMode ? { collaborationMode: { mode: s.workMode, settings: { model, reasoning_effort: s.effort || null, developer_instructions: null } } } : {}) });
+        if (s.model !== previousModel) await s.runtime.contextUsage().catch(() => {});
       } else if (s.agent !== "pi" && s.runtime) await this.resetRuntime(s);
-      if (s.model !== previousModel) this.event(s, { type: "context", contextTokens: null, contextWindow: null });
+      if (["claude", "grok"].includes(s.agent) && s.model !== previousModel) {
+        void ensureRuntime(this, s).catch(() => {});
+      }
       this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       return { model: s.model, effort: s.effort, workMode: s.workMode, catalog: s.catalog };
     } finally { s.setting = false; }
@@ -1092,7 +1109,8 @@ class Sessions {
     }
     if (event.type === "context") {
       s.contextTokens = Number.isFinite(event.contextTokens) && event.contextTokens >= 0 ? event.contextTokens : null;
-      if (Object.hasOwn(event, "contextWindow")) s.contextWindow = Number.isFinite(event.contextWindow) && event.contextWindow > 0 ? event.contextWindow : null;
+      if (Object.hasOwn(event, "contextWindow") && ((Number.isFinite(event.contextWindow) && event.contextWindow > 0) || event.resetContextWindow))
+        s.contextWindow = Number.isFinite(event.contextWindow) && event.contextWindow > 0 ? event.contextWindow : null;
       event = { ...event, contextTokens: s.contextTokens, contextWindow: s.contextWindow ?? null };
     }
     this.recovery?.event(s, event);
@@ -1144,6 +1162,7 @@ class Sessions {
         const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId) || s.savedTab;
         if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The saved CLI conversation is unavailable. This chat is retained; restore its original history before continuing.");
         s.sessionStarted = !!history;
+        if (Number.isFinite(history?.contextTokens) && history.contextTokens >= 0) this.event(s, { type: "context", contextTokens: history.contextTokens });
         launch = profiledLaunch(s, [s.sessionStarted ? "--resume" : "--session-id", s.sessionRef, ...cliOptions(s), ...extraOptions(s), ...launchOptions(s)], resolveLauncher);
         s.nativeOwned = true;
       }
@@ -1160,6 +1179,11 @@ class Sessions {
       env: { ...accountEnvironment(s, s.profileEnvironment || process.env), TERM: "xterm-256color", COLORTERM: "truecolor", ...sessionEnv },
     });
     s.pty = terminal;
+    if (s.agent === "claude") {
+      clearInterval(s.nativeHistoryTimer);
+      s.nativeHistoryTimer = setInterval(() => void this.importNativeHistory(s).catch(() => {}), 2000);
+      s.nativeHistoryTimer.unref();
+    }
     this.event(s, { type: "terminal-ready" });
     terminal.onData((data) => {
       if (s.pty !== terminal) return;
@@ -1185,6 +1209,7 @@ class Sessions {
     terminal.onExit(({ exitCode }) => {
       if (s.pty !== terminal) return;
       s.pty = null;
+      clearInterval(s.nativeHistoryTimer); s.nativeHistoryTimer = null;
       s.piBridgeState = "disconnected";
       s.piNativeBridge?.close(); s.piNativeBridge = null;
       this.event(s, { type: "exit", code: exitCode });
@@ -1674,6 +1699,9 @@ class Sessions {
       s.sessionRef = e.data.sessionFile;
       this.event(s, { type: "session", sessionRef: s.sessionRef });
     }
+    if (e.type === "response" && e.command === "get_state" && e.success && e.data?.contextUsage) {
+      this.event(s, { type: "context", contextTokens: e.data.contextUsage.tokens, contextWindow: e.data.contextUsage.contextWindow });
+    }
     if (e.type === "response" && e.command === "get_state" && e.success && e.data?.model) {
       const model = `${e.data.model.provider}/${e.data.model.id}`;
       if (s.model !== model || s.effort !== e.data.thinkingLevel) {
@@ -1772,12 +1800,27 @@ class Sessions {
   }
   async importNativeHistory(s) {
     if (!["claude", "grok", "pi"].includes(s.agent) || !s.sessionRef) return;
-    const history = await require("./session-history.cjs").readHistory(s);
-    if (history) {
-      s.sessionStarted = true;
-      const fingerprint = crypto.createHash("sha256").update(JSON.stringify(history.messages)).digest("hex");
-      if (fingerprint !== s.historyFingerprint) { s.historyFingerprint = fingerprint; this.event(s, { type: "history", messages: history.messages }); }
-    }
+    if (s.importingNativeHistory) return s.importingNativeHistory;
+    s.importingNativeHistory = (async () => {
+      const historyMod = require("./session-history.cjs");
+      const file = await historyMod.sessionFile(s);
+      if (!file) return;
+      const stat = await fsp.stat(file).catch(() => null);
+      const updatesStat = s.agent === "grok" ? await fsp.stat(path.join(path.dirname(file), "updates.jsonl")).catch(() => null) : null;
+      const statKey = stat ? `${file}:${stat.size}:${stat.mtimeMs}:${updatesStat?.size || 0}:${updatesStat?.mtimeMs || 0}` : "";
+      if (statKey && statKey === s.nativeHistoryStatKey) return;
+      const history = await historyMod.readHistory(s);
+      if (history) {
+        s.nativeHistoryStatKey = statKey;
+        s.sessionStarted = true;
+        const fingerprint = crypto.createHash("sha256").update(JSON.stringify(history.messages)).digest("hex");
+        if (fingerprint !== s.historyFingerprint) { s.historyFingerprint = fingerprint; this.event(s, { type: "history", messages: history.messages }); }
+        if (Number.isFinite(history.contextTokens) && history.contextTokens >= 0 && history.contextTokens !== s.contextTokens) {
+          this.event(s, { type: "context", contextTokens: history.contextTokens });
+        }
+      }
+    })().finally(() => { s.importingNativeHistory = null; });
+    return s.importingNativeHistory;
   }
   async reconnect(id) {
     const s = this.get(id);
@@ -1788,6 +1831,9 @@ class Sessions {
       await this.ensurePi(s);
       const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId);
       const history = await require("./session-history.cjs").readHistory(s);
+      if (Number.isFinite(history?.contextTokens) && history.contextTokens >= 0 && s.contextTokens === null) {
+        this.event(s, { type: "context", contextTokens: history.contextTokens });
+      }
       s.messageQueue.reconcile(history?.messages || [], saved?.acceptedMessageIds || []);
       this.event(s, { type: "reconnected" }); return;
     }
@@ -1798,6 +1844,9 @@ class Sessions {
       if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The saved CLI conversation is unavailable. This chat is retained; choose its original session before continuing.");
       s.sessionStarted = !!history;
       if (history?.messages.length) this.event(s, { type: "history", messages: history.messages });
+      if (Number.isFinite(history?.contextTokens) && history.contextTokens >= 0) {
+        this.event(s, { type: "context", contextTokens: history.contextTokens });
+      }
       s.messageQueue.reconcile(history?.messages || [], saved?.acceptedMessageIds || []);
     }
     if (s.agent !== "google") await ensureRuntime(this, s);
@@ -1873,7 +1922,7 @@ class Sessions {
         this.event(s, { type: "terminal-needed", title: "Native CLI · exit when ready to reconnect Readable" });
       }
       s.mode = mode;
-      if (mode === "native") { clearInterval(s.nativeHistoryTimer); s.nativeHistoryTimer = null; }
+      if (mode === "native" && s.agent !== "claude") { clearInterval(s.nativeHistoryTimer); s.nativeHistoryTimer = null; }
       this.event(s, { type: "native-owner", nativeOwned: !!s.nativeOwned && !!s.pty });
       this.event(s, { type: "view", mode, sessionRef: s.sessionRef });
       return { mode, sessionRef: s.sessionRef, nativeOwned: !!s.nativeOwned && !!s.pty };
