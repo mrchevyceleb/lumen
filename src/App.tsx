@@ -66,7 +66,7 @@ import SettingsPanel from "./SettingsPanel";
 import Conversation, { AgentMark } from "./Conversation";
 import NativeTerminal from "./NativeTerminal";
 import AgentForm from "./AgentForm";
-import ProjectSidebar, { restoreProjects, sameProject, type Project } from "./ProjectSidebar";
+import ProjectSidebar, { normalizeProjects, restoreProjects, sameProject, type Project } from "./ProjectSidebar";
 import { useUpdates } from "./UpdatesPanel";
 import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
@@ -613,8 +613,9 @@ export default function App() {
         }
         if (recovered.error) notify(recovered.error);
         if (recovered.projects?.length) {
-          setProjects(recovered.projects);
-          projectsRef.current = recovered.projects;
+          const restoredProjects = normalizeProjects(recovered.projects);
+          setProjects(restoredProjects);
+          projectsRef.current = restoredProjects;
         }
         const persisted: Partial<Tab>[] = current.restoreSessions ? recovered.tabs : [];
         const last = current.restoreSessions ? recovered.root : "";

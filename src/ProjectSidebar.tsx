@@ -8,10 +8,12 @@ export const sameProject = (a: string, b: string) => a.replace(/\\/g, "/").repla
 const projectColors = [["Red", "#f87171"], ["Amber", "#fbbf24"], ["Green", "#4ade80"], ["Cyan", "#22d3ee"], ["Blue", "#60a5fa"], ["Violet", "#c084fc"]];
 
 export function restoreProjects(): Project[] {
-  try {
-    const values = JSON.parse(localStorage.getItem("lumen.projects") || "[]");
-    return Array.isArray(values) ? values.filter((p, i) => p && typeof p.root === "string" && typeof p.name === "string" && !values.slice(0, i).some((q) => q && typeof q.root === "string" && sameProject(p.root, q.root))).map((p) => ({ root: p.root, name: p.name, pinned: p.pinned === true, hidden: p.hidden === true, collapsed: p.collapsed === true, color: typeof p.color === "string" && /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : undefined })) : [];
-  } catch { return []; }
+  try { return normalizeProjects(JSON.parse(localStorage.getItem("lumen.projects") || "[]")); } catch { return []; }
+}
+
+export function normalizeProjects(values: unknown): Project[] {
+  if (!Array.isArray(values)) return [];
+  return values.filter((p, i) => p && typeof p.root === "string" && typeof p.name === "string" && !values.slice(0, i).some((q) => q && typeof q.root === "string" && sameProject(p.root, q.root))).map((p) => ({ root: p.root, name: p.name, pinned: p.pinned === true, hidden: p.hidden === true, collapsed: p.collapsed === true, color: typeof p.color === "string" && /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : undefined }));
 }
 
 export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onTerminal, onScratch, onChange, onArchive, tabs, activeId, settings, onSelect, onCustomize, onRename, onClose, onArchiveChat, onLayout, onNewChat, newChatRoot, onCollapse, showArchived, onToggleArchived, onLeaveHidden }: SessionTabActions & {
@@ -29,7 +31,9 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   const [renaming, setRenaming] = useState("");
   const [name, setName] = useState("");
   const [over, setOver] = useState("");
+  const [dragging, setDragging] = useState("");
   const container = useRef<HTMLDivElement>(null);
+  const dragProject = useRef("");
   useEffect(() => {
     const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node)) { setMenu(""); setAdding(false); } };
     window.addEventListener("pointerdown", close);
@@ -83,11 +87,56 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
     if (target) move(project.root, target, direction > 0);
     setMenu("");
   };
+  const startProjectDrag = (event: React.DragEvent<HTMLElement>, project: Project) => {
+    dragProject.current = project.root;
+    setDragging(project.root);
+    event.dataTransfer.setData("application/x-lumen-project", project.root);
+    event.dataTransfer.setData("text/plain", project.root);
+    event.dataTransfer.effectAllowed = "move";
+  };
+  const finishProjectDrag = () => {
+    dragProject.current = "";
+    setDragging("");
+    setOver("");
+  };
+  const isProjectDrag = (event: React.DragEvent<HTMLElement>) => !!dragProject.current || Array.from(event.dataTransfer.types).some((type) => type.toLowerCase() === "application/x-lumen-project");
+  const dropProject = (event: React.DragEvent<HTMLElement>, project: Project) => {
+    if (!isProjectDrag(event)) return;
+    const source = dragProject.current || event.dataTransfer.getData("application/x-lumen-project");
+    const rect = event.currentTarget.getBoundingClientRect();
+    move(source, project, event.clientY > rect.top + rect.height / 2);
+    finishProjectDrag();
+  };
   return <div className={`project-sidebar ${vertical ? "with-chats" : ""}`} ref={container}>
     <div className="project-heading"><span>PROJECTS <small>{visible.length}</small></span><div><button aria-label={vertical ? "Use horizontal tabs" : "Use vertical chats"} title={vertical ? "Use horizontal tabs" : "Use vertical chats"} onClick={onLayout}>{vertical ? <PanelTop size={14} /> : <ListTree size={14} />}</button><div className="project-add-anchor" onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); setAdding(false); event.currentTarget.querySelector<HTMLButtonElement>("button")?.focus(); } }}><button aria-label="Add project or session" title="Open a folder, terminal, or chat" aria-expanded={adding} onClick={() => setAdding(!adding)} disabled={!ready}><Plus size={15} /></button>{adding && <div className="project-menu project-add-menu"><button autoFocus onClick={() => { setAdding(false); onTerminal(); }}><TerminalSquare size={15} /><span>New terminal<small>No workspace · Ctrl Alt T</small></span></button><button onClick={() => { setAdding(false); onScratch(); }}><Sparkles size={15} /><span>New agent chat<small>No workspace</small></span></button><button onClick={() => { setAdding(false); onAdd(); }}><FolderOpen size={15} /><span>Open project folder<small>Ctrl O</small></span></button></div>}</div><button aria-label="Collapse projects sidebar" title="Collapse projects sidebar" onClick={onCollapse}><PanelLeftClose size={14} /></button></div></div>
     {projects.length > 4 && <input aria-label="Search projects" placeholder="Find a project…" value={query} onChange={(e) => setQuery(e.target.value)} />}
     {!!archiveCount && <button type="button" className="archive-filter" aria-pressed={showArchived} title={showArchived ? "Hide archived projects and chats" : "Show archived projects and chats"} onClick={onToggleArchived}><span>{showArchived ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<Archive size={14} />{showArchived ? "Hide archived" : "Show archived"}</span><small>{archiveCount}</small></button>}
     <div className="project-scroll">
+      {[true, false].map((pinned) => matches.some((p) => !!p.pinned === pinned) && <section key={String(pinned)} className={`project-section ${pinned ? "pinned" : "unpinned"}`} aria-label={pinned ? "Pinned projects" : "Projects"}>
+        <div className="project-group">{pinned ? <><Pin size={10} /> Pinned</> : <><FolderOpen size={10} /> Projects</>}</div>
+        {matches.filter((p) => !!p.pinned === pinned).map((project) => <div key={project.root} className="project-entry"><div className={`project-row ${pinned ? "is-pinned" : "is-unpinned"} ${project.color ? "has-color" : ""} ${sameProject(activeRoot, project.root) ? "selected" : ""} ${over === project.root ? "drop-target" : ""} ${dragging === project.root ? "dragging" : ""}`} style={{ "--project-color": project.color } as CSSProperties}
+          onDragOver={(e) => { if (isProjectDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOver(project.root); } }}
+          onDragEnter={(e) => { if (isProjectDrag(e)) { e.preventDefault(); setOver(project.root); } }}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setOver(""); }}
+          onDrop={(e) => { e.preventDefault(); dropProject(e, project); }}>
+          <span className="project-grip" role="button" tabIndex={0} aria-label={`Drag to reorder ${project.name}`} draggable onDragStart={(e) => startProjectDrag(e, project)} onDragEnd={finishProjectDrag} onKeyDown={(e) => { if (e.key === "ArrowUp") { e.preventDefault(); moveWithin(project, -1); } if (e.key === "ArrowDown") { e.preventDefault(); moveWithin(project, 1); } }} title="Drag to reorder, or use arrow keys"><GripVertical size={12} /></span>
+          {vertical && <button className="project-collapse" aria-label={`${project.collapsed ? "Expand" : "Collapse"} chats for ${project.name}`} aria-expanded={!project.collapsed} aria-controls={`chats-${encodeURIComponent(project.root)}`} onClick={() => onChange(projects.map((p) => p.root === project.root ? { ...p, collapsed: !p.collapsed } : p))}>{project.collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>}
+          {renaming === project.root ? <input autoFocus aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => rename(project)} onKeyDown={(e) => { if (e.key === "Enter") rename(project); if (e.key === "Escape") setRenaming(""); }} /> : <button className="project-open" title={project.root} aria-current={sameProject(activeRoot, project.root) ? "true" : undefined} disabled={!ready} onClick={() => onOpen(project)}><FolderOpen size={16} /><span>{project.name}</span>{pinned && <Pin className="project-pin-mark" size={10} aria-label="Pinned" />}{!!counts[project.root] && <small>{counts[project.root]}</small>}</button>}
+          {vertical && <button className="project-options" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} aria-expanded={newChatRoot !== undefined && sameProject(newChatRoot, project.root)} aria-controls={newChatRoot !== undefined && sameProject(newChatRoot, project.root) ? "new-chat-menu" : undefined} disabled={!ready} onClick={() => onNewChat(project.root)}><Plus size={13} /></button>}
+          <button className="project-options" aria-label={`Options for ${project.name}`} aria-expanded={menu === project.root} onClick={() => setMenu(menu === project.root ? "" : project.root)}><MoreHorizontal size={13} /></button>
+          {menu === project.root && <div className="project-menu"><button onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, pinned: !p.pinned } : p)); setMenu(""); }}>{project.pinned ? "Unpin project" : "Pin project"}</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button><button onClick={() => moveWithin(project, -1)}>Move up</button><button onClick={() => moveWithin(project, 1)}>Move down</button>
+            <span className="project-color-label">Project color</span><div className="project-colors" role="group" aria-label={`Color for ${project.name}`}>
+              {projectColors.map(([label, color]) => <button key={color} aria-label={`${label} project color`} title={label} aria-pressed={project.color === color} style={{ background: color }} onClick={() => colorProject(project, color)} />)}
+              <input type="color" aria-label={`Custom project color for ${project.name}`} title="Custom color" value={project.color || "#60a5fa"} onChange={(e) => colorProject(project, e.target.value)} />
+            </div><button onClick={() => colorProject(project)}>Reset color</button>
+            <button className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>}
+        </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
+          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} />
+        </div>}</div>)}
+      </section>)}
+      {vertical && <div className="scratch-chats"><div className="scratch-heading"><button aria-label={`${scratchCollapsed ? "Expand" : "Collapse"} chats without a workspace`} aria-expanded={!scratchCollapsed} onClick={() => scratch.length ? setScratchCollapsed(!scratchCollapsed) : onScratch()}>{scratchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}<FolderOpen size={15} /><span>No workspace</span><small>{scratch.length}</small></button><button aria-label="New chat without workspace" disabled={!ready} aria-expanded={newChatRoot === ""} aria-controls={newChatRoot === "" ? "new-chat-menu" : undefined} onClick={() => onNewChat("")}><Plus size={13} /></button></div>
+        <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} /></div>
+      </div>}
       {revealArchived && !!archived.length && <section className="archived-projects" aria-label="Archived projects">
         {!!archivedMatches.length && <div className="project-group"><Archive size={10} /> Archived</div>}
         {archivedMatches.map((project) => <div key={project.root} className="project-entry"><div className={`project-row archived ${project.color ? "has-color" : ""} ${sameProject(activeRoot, project.root) ? "selected" : ""}`} style={{ "--project-color": project.color } as CSSProperties}>
@@ -102,29 +151,6 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
         </div>}</div>)}
         {!archivedMatches.length && <p className="project-empty">No matching archived projects.</p>}
       </section>}
-      {[true, false].map((pinned) => <div key={String(pinned)}>
-        {matches.some((p) => !!p.pinned === pinned) && pinned && <div className="project-group"><Pin size={10} /> Pinned</div>}
-        {matches.filter((p) => !!p.pinned === pinned).map((project) => <div key={project.root} className="project-entry"><div className={`project-row ${project.color ? "has-color" : ""} ${sameProject(activeRoot, project.root) ? "selected" : ""} ${over === project.root ? "drop-target" : ""}`} style={{ "--project-color": project.color } as CSSProperties}
-          onDragOver={(e) => { if (e.dataTransfer.types.includes("application/x-lumen-project")) { e.preventDefault(); setOver(project.root); } }}
-          onDragLeave={() => setOver("")} onDrop={(e) => { e.preventDefault(); move(e.dataTransfer.getData("application/x-lumen-project"), project, e.clientY > e.currentTarget.getBoundingClientRect().top + e.currentTarget.getBoundingClientRect().height / 2); setOver(""); }}>
-          <span className="project-grip" draggable onDragStart={(e) => { e.dataTransfer.setData("application/x-lumen-project", project.root); e.dataTransfer.effectAllowed = "move"; }} onDragEnd={() => setOver("")} title="Drag to reorder"><GripVertical size={12} /></span>
-          {vertical && <button className="project-collapse" aria-label={`${project.collapsed ? "Expand" : "Collapse"} chats for ${project.name}`} aria-expanded={!project.collapsed} aria-controls={`chats-${encodeURIComponent(project.root)}`} onClick={() => onChange(projects.map((p) => p.root === project.root ? { ...p, collapsed: !p.collapsed } : p))}>{project.collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>}
-          {renaming === project.root ? <input autoFocus aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => rename(project)} onKeyDown={(e) => { if (e.key === "Enter") rename(project); if (e.key === "Escape") setRenaming(""); }} /> : <button className="project-open" title={project.root} aria-current={sameProject(activeRoot, project.root) ? "true" : undefined} disabled={!ready} onClick={() => onOpen(project)}><FolderOpen size={16} /><span>{project.name}</span>{!!counts[project.root] && <small>{counts[project.root]}</small>}</button>}
-          {vertical && <button className="project-options" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} aria-expanded={newChatRoot !== undefined && sameProject(newChatRoot, project.root)} aria-controls={newChatRoot !== undefined && sameProject(newChatRoot, project.root) ? "new-chat-menu" : undefined} disabled={!ready} onClick={() => onNewChat(project.root)}><Plus size={13} /></button>}
-          <button className="project-options" aria-label={`Options for ${project.name}`} aria-expanded={menu === project.root} onClick={() => setMenu(menu === project.root ? "" : project.root)}><MoreHorizontal size={13} /></button>
-          {menu === project.root && <div className="project-menu"><button onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, pinned: !p.pinned } : p)); setMenu(""); }}>{project.pinned ? "Unpin project" : "Pin project"}</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button><button onClick={() => moveWithin(project, -1)}>Move up</button><button onClick={() => moveWithin(project, 1)}>Move down</button>
-            <span className="project-color-label">Project color</span><div className="project-colors" role="group" aria-label={`Color for ${project.name}`}>
-              {projectColors.map(([label, color]) => <button key={color} aria-label={`${label} project color`} title={label} aria-pressed={project.color === color} style={{ background: color }} onClick={() => colorProject(project, color)} />)}
-              <input type="color" aria-label={`Custom project color for ${project.name}`} title="Custom color" value={project.color || "#60a5fa"} onChange={(e) => colorProject(project, e.target.value)} />
-            </div><button onClick={() => colorProject(project)}>Reset color</button>
-            <button className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>}
-        </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
-          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} />
-        </div>}</div>)}
-      </div>)}
-      {vertical && <div className="scratch-chats"><div className="scratch-heading"><button aria-label={`${scratchCollapsed ? "Expand" : "Collapse"} chats without a workspace`} aria-expanded={!scratchCollapsed} onClick={() => scratch.length ? setScratchCollapsed(!scratchCollapsed) : onScratch()}>{scratchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}<FolderOpen size={15} /><span>No workspace</span><small>{scratch.length}</small></button><button aria-label="New chat without workspace" disabled={!ready} aria-expanded={newChatRoot === ""} aria-controls={newChatRoot === "" ? "new-chat-menu" : undefined} onClick={() => onNewChat("")}><Plus size={13} /></button></div>
-        <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} /></div>
-      </div>}
       {!visible.length && (!vertical || !scratch.length) && !revealArchived && <p className="project-empty">{archived.length ? "All projects are archived. Show archived to open one, or open a folder." : "Add repositories here. Your chats stay open as you switch."}</p>}
       {!!visible.length && !matches.length && <p className="project-empty">No matching projects.</p>}
     </div>
