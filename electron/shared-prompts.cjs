@@ -1,9 +1,26 @@
 const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 
-const directory = () => process.env.LUMEN_PROMPTS_DIR || (process.platform === "win32"
-  ? "C:/GLOBAL-AGENT-CONFIGS/prompts" : path.join(os.homedir(), "GLOBAL-AGENT-CONFIGS", "prompts"));
+// Shared slash commands are Markdown files available to every agent.
+// LUMEN_PROMPTS_DIR wins. Otherwise use the "prompts" folder in Lumen's user
+// data (%APPDATA%\Lumen\prompts when installed), falling back to an existing
+// legacy shared-config folder so older setups keep their commands.
+const userDirectory = () => {
+  try { return path.join(require("electron").app.getPath("userData"), "prompts"); }
+  catch { return ""; }
+};
+const legacyDirectory = () => process.platform === "win32"
+  ? "C:/GLOBAL-AGENT-CONFIGS/prompts" : path.join(os.homedir(), "GLOBAL-AGENT-CONFIGS", "prompts");
+const isDirectory = (dir) => { try { return !!dir && fsSync.statSync(dir).isDirectory(); } catch { return false; } };
+const directory = () => {
+  if (process.env.LUMEN_PROMPTS_DIR) return process.env.LUMEN_PROMPTS_DIR;
+  const preferred = userDirectory();
+  if (isDirectory(preferred)) return preferred;
+  const legacy = legacyDirectory();
+  return isDirectory(legacy) ? legacy : preferred || legacy;
+};
 const scalar = (value) => value.trim().replace(/^(["'])(.*)\1$/, "$2");
 function parse(source) {
   const front = source.replace(/^\uFEFF/, "").match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
