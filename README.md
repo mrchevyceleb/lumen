@@ -1,10 +1,50 @@
 # Lumen
 
-A local Windows terminal workspace with readable agent conversations, real terminal tabs, an offline code editor, Git controls, and worktrees.
+**A Windows terminal workspace for AI coding agents: run Pi, Codex, Claude Code, Grok, and Google Antigravity side by side with real terminals, an editor, Git, worktrees, and a built-in browser.**
+
+[![Latest release](https://img.shields.io/github/v/release/mrchevyceleb/lumen?label=download)](https://github.com/mrchevyceleb/lumen/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078d4)
+
+<!--
+  SCREENSHOTS NEEDED (Ivy): add 2-3 real captures before the announcement.
+  Suggested shots: (1) a readable agent chat with tool activity and the composer toolbar,
+  (2) the native CLI view next to the Monaco editor and Git panel,
+  (3) the built-in browser beside a chat. Save them under docs/ (not public/, which
+  is bundled into the app) and reference them here, e.g. ![Lumen](docs/screenshot-chat.png). Do not ship mockups.
+-->
+
+## Features
+
+- **Agent lanes.** Open chats for Pi, Codex, Claude Code, Grok, or Google Antigravity, each with its own process, working folder, account, and model. Lumen drives the CLIs you already have installed; it does not need its own AI subscription or API key.
+- **Readable or native.** Every agent chat renders as clean Markdown with expandable tool activity, or switches to the full native CLI in a real terminal, on the same conversation.
+- **Terminal tabs.** Real PowerShell terminals (node-pty + xterm) with ANSI colors, full-screen programs, scrollback search, and persistent shells, with or without a workspace.
+- **Code editor.** A bundled Monaco editor opens files beside the conversation, checks for changes on disk before saving, and works offline.
+- **Git and worktrees.** Stage, diff, commit, fetch, pull, and push from the Git panel, see GitHub PRs through the GitHub CLI, and create or switch linked worktrees.
+- **Built-in browser.** A sandboxed Chromium pane with tabs and DevTools for previewing `localhost` dev servers, with links from chats and terminals opening there.
+- **Queue and steer.** Queue follow-up messages while an agent works, or steer the active run. Model, effort, and planning pickers, MCP controls, slash-command discovery, and auto-compaction live in the composer.
+- **Multiple accounts.** Save several Claude Code and Codex logins and pick one per chat.
+- **Local agent-control API.** Another agent or script can start, watch, and manage visible Lumen chats and browser tabs through an authenticated loopback API and a small CLI helper.
+- **Session restore.** Tabs, transcripts, drafts, queues, and agent resume references survive restarts, updates, and crashes.
+- **Auto-update.** The installer keeps itself current from GitHub releases in the background.
+- **Make it yours.** Nine themes, 15 animated backgrounds, custom colors, fonts, and whole-UI zoom.
+
+## Download
+
+Download **Lumen-Setup-<version>.exe** from the [latest GitHub release](https://github.com/mrchevyceleb/lumen/releases/latest) and run it. The installer is unsigned, so Windows SmartScreen may ask you to choose **More info → Run anyway** the first time.
+
+## Requirements
+
+- Windows 10 or 11, x64.
+- Git, for the Git panel and worktrees.
+- At least one agent CLI you want to use, installed and signed in: [Pi](https://github.com/earendil-works/pi), [Codex](https://github.com/openai/codex), [Claude Code](https://code.claude.com/docs), Grok CLI, or Google Antigravity (`agy`, which Lumen can install for you). A plain terminal works with none.
+- Optional: the [GitHub CLI](https://cli.github.com/) for the PR list.
+
+> **Heads up:** Lumen launches agents with their permission prompts bypassed, so they can read and change files, run commands, and use the network with your Windows account's access. See [Agent permissions](#agent-permissions) and [SECURITY.md](SECURITY.md).
 
 ## Start
 
-Download **Lumen-Setup-<version>.exe** from the [latest GitHub release](https://github.com/mrchevyceleb/lumen/releases/latest) and run it on each Windows computer. It installs for your Windows account, adds Start menu and desktop shortcuts, and registers **Open with Lumen**. Choose **Open a workspace** and select your repository, or **Start without a workspace**. Existing Lumen settings and saved chats are retained.
+Run the installer on each Windows computer. It installs for your Windows account, adds Start menu and desktop shortcuts, and registers **Open with Lumen**. Choose **Open a workspace** and select your repository, or **Start without a workspace**. Existing Lumen settings and saved chats are retained.
 
 ## Automatic updates
 
@@ -49,6 +89,8 @@ Authentication errors in **Claude, Codex, Grok, and Pi** offer **Sign in** insid
 
 Pi uses RPC with a local extension bridge for controls, Codex uses its shared app-server, Claude Code uses stream JSON, and Grok uses ACP. Agents run locally with your Windows account’s access. Readable supports common questions, Codex/Claude/Grok planning, MCP elicitation forms, and ACP tool terminals. Pi prompt templates, skills, and extension commands run in Readable, including common extension dialogs. Custom Pi extension pickers and editors render in a focused in-app control with keyboard navigation, without opening the raw terminal panel. MCP list output stays readable. Extensions with nested terminal overlays can still require Native CLI. Windows administrator access remains an explicit restart option below.
 
+### Agent permissions
+
 Claude and Google Antigravity launch with `--dangerously-skip-permissions`, including when planning is selected. Claude also has its shell sandbox disabled. Codex uses `danger-full-access` with no approval prompts; Grok uses permission bypass and `--sandbox off`. Outside plan mode, Lumen approves native tool callbacks automatically. These agents can access files, shell commands, processes, and the network with your Windows account's permissions. Agent questions and plan approvals remain interactive.
 
 Grok may run stop hooks after its reply appears. When its text stream pauses, Lumen shows **Waiting for Grok to finish…**. The next message becomes available when its native prompt completes, preserving CLI history and preventing overlapping operations. Active tool calls continue to show working status.
@@ -71,7 +113,7 @@ Claude uses its native `--autocompact` window (100k–1M tokens). Codex uses its
 
 ## Discover commands
 
-Lumen also reads shared slash commands directly from `C:\GLOBAL-AGENT-CONFIGS\prompts` for every agent, including Google. Set `LUMEN_PROMPTS_DIR` to use another folder. Shared commands take precedence over same-named CLI commands, expand their arguments when sent, and remain available if native discovery fails. Refresh the command menu after changing the folder. For Native CLI, run `node C:\GLOBAL-AGENT-CONFIGS\scripts\wire-command-sources.cjs` to connect the same sources: Claude, Pi, and Grok use `/name`; Codex custom prompts use `/prompts:name`; Gemini uses `/name` with underscores normalized to hyphens and names lowercased. Existing chats may need a new native session to discover newly linked commands.
+Lumen can also share your own slash commands with every agent, including Google. Put Markdown prompt files (`name.md`, with optional `description` and `argument-hint` front matter) in `%APPDATA%\Lumen\prompts`, or set the `LUMEN_PROMPTS_DIR` environment variable to use another folder. In readable view, shared commands take precedence over same-named CLI commands, expand `$ARGUMENTS` and positional arguments when sent, and remain available if native discovery fails. Refresh the command menu after changing the folder. Native CLI views use each CLI's own command folders.
 
 Type **/** at the start of an agent message, or click the **/** button in the composer. Lumen asks your installed CLI for the commands loaded in that working folder, including personal, project, extension, and plugin resources. Filter by command name or description, use **↑ / ↓** to navigate, and **Tab / Enter** to insert. Add arguments, then send. **Escape** dismisses the menu. The refresh button scans again after you add a command or skill. Discovery sends no model prompt and works in scratch chats too.
 
@@ -89,7 +131,7 @@ Every agent chat shows **Context** beside its account/view controls: the latest 
 
 Use the model, effort, and mode pickers in the composer toolbar. Models come from your installed CLI: Pi's authenticated model registry, Codex's paginated model catalog, Claude's initialization metadata, and Grok's ACP session configuration. Effort choices follow the selected model's native capabilities. Changes apply to the current chat without sending a message or losing its history or draft, and restore with that tab on restart.
 
-Pi changes its running RPC session directly. **Ctrl L** opens models, **Ctrl P** cycles forward, and **Shift Tab** cycles thinking. Lumen reads your Pi keybinding overrides; on this machine **Ctrl Alt P** cycles backward. Scoped models from Pi's settings or `--models` appear as favorites and retain their order and per-model thinking levels. When no scope is configured, Pi cycles its full available catalog. The bundled Lumen extension supplies scope metadata and backward cycling; it does not write Pi's global settings. Manage the scope using Pi's native `/models` UI or Lumen's advanced `--models` arguments.
+Pi changes its running RPC session directly. **Ctrl L** opens models, **Ctrl P** cycles forward, and **Shift Tab** cycles thinking. **Alt P** cycles backward by default on Windows, and Lumen follows your Pi keybinding overrides for all of these. Scoped models from Pi's settings or `--models` appear as favorites and retain their order and per-model thinking levels. When no scope is configured, Pi cycles its full available catalog. The bundled Lumen extension supplies scope metadata and backward cycling; it does not write Pi's global settings. Manage the scope using Pi's native `/models` UI or Lumen's advanced `--models` arguments.
 
 Claude's **Alt P** opens models, **Alt T** opens effort, and **Shift Tab** opens planning controls in readable view. **Ctrl Alt M** and **Ctrl Alt R** open the model and effort pickers for any agent. Bare `/model`, `/thinking`, and `/effort` open those controls. **Ctrl Shift P** opens planning controls, unless your Pi binding assigns it to another model action.
 
@@ -123,11 +165,11 @@ Open **Worktrees** to create a branch and checkout, or switch to an existing che
 
 ## Personalize
 
-Choose Graphite, Midnight, Evergreen, Ember, Lilac, or Paper. Adjust canvas, panels, text, borders, code blocks, user bubbles, and accent colors individually. Set per-agent colors or individual tab colors. Change conversation fonts, type size, line spacing, and native terminal text size.
+Choose Graphite, Midnight, Synthwave, Cyber, Evergreen, Ember, Solar, Lilac, or Paper. Adjust canvas, panels, text, borders, code blocks, user bubbles, and accent colors individually. Set per-agent colors or individual tab colors. Change conversation fonts, type size, line spacing, and native terminal text size.
 
 Press **Ctrl +** (or **Ctrl =**) to enlarge the whole UI, **Ctrl -** to shrink it, and **Ctrl 0** to reset. Numpad plus, minus, and zero also work. Zoom changes in 10% steps between 50% and 200%, works in the terminal, editor, and dialogs, and stays saved when you reopen Lumen.
 
-Aurora, Orbital, Rain, **Star field**, and **Nebula** have visible motion and live animated previews in Settings → Backgrounds. Star field slowly drifts through layered stars at different depths. Nebula blends moving violet, rose, and blue gas clouds with distant stars. Cards label these as **Animated**; grid, contours, grain, solid colors, and custom images are **Static**. Backgrounds show behind readable chats and native terminals. You can use your own PNG/JPEG/WebP image up to 5 MB. Adjust background intensity or turn animation off. **Background blur** runs from **0–100**: zero keeps the design sharp; 100 gives maximum softness. It updates the background and previews live, saves across restarts, and keeps text and controls sharp. The app respects the system's reduced-motion preference, which also disables previews. Optional playful details add click sparks and a moving status strip.
+Settings → Backgrounds offers 15 animated backgrounds (including Aurora, **Star field**, **Nebula**, Rain, Fireflies, Meteor shower, Ocean waves, and Spiral galaxy) with live previews and an animation speed control. Cards label these as **Animated**; blueprint grid, contours, grain, solid colors, and custom images are **Static**. Backgrounds show behind readable chats and native terminals. You can use your own PNG/JPEG/WebP image up to 5 MB. Adjust background intensity or turn animation off. **Background blur** runs from **0–100**: zero keeps the design sharp; 100 gives maximum softness. It updates the background and previews live, saves across restarts, and keeps text and controls sharp. The app respects the system's reduced-motion preference, which also disables previews. Optional playful details add click sparks and a moving status strip.
 
 ## Shortcuts
 
@@ -165,11 +207,13 @@ Use **Settings → Agent control → Copy instructions for an agent** to let ano
 
 The API is on by default, stays on loopback, requires a private per-launch token, and rejects browser origins. Turn it off in Settings to disconnect clients while chats keep running. The helper discovers `%APPDATA%\Lumen\agent-control.json`, or a copied connection path/`LUMEN_CONTROL_FILE` for portable profiles. Lumen agents inherit the connection path. Task IDs persist with saved chats; messages queue by default. See the [full CLI and HTTP guide](electron/agent-control-guide.md) for retry-safe IDs, output monitoring, and PowerShell examples that don't require Node.js.
 
-## Develop
+## Build from source
 
-Requires Node.js 22.12+ or 24+, Git, and whichever agent CLIs you want to use.
+You need Windows x64, Node.js 22.12+ or 24+ (CI uses 24), and Git. The terminal runtime (`node-pty`) ships prebuilt binaries for Windows, so no extra build tools are needed for a normal install.
 
 ```powershell
+git clone https://github.com/mrchevyceleb/lumen.git
+cd lumen
 npm install
 npm run build
 npm start
@@ -177,8 +221,16 @@ npm start
 
 For hot reload, run `npm run dev` in one terminal, then `$env:LUMEN_DEV='1'; npm start` in another. Build the Windows installer with `npm run package`, then run `npm run verify:release` to check its update metadata, checksum, and packaged terminal runtime. `npm run package:portable` produces an optional portable executable. The file editor and its workers are bundled locally; no CDN is needed.
 
-Every push to `main` runs the Windows release workflow. It chooses a version above existing stable release numbers (using the source version as a minimum), builds and verifies the installer, then uploads all assets to a draft before publishing. No personal access token is needed for CI. Build version changes stay on the runner, so releases do not create extra source commits. Failed builds remain unpublished. The repository and releases are public; source is licensed under MIT.
+Every push to `main` runs the Windows release workflow. It chooses a version above existing stable release numbers (using the source version as a minimum), builds and verifies the installer, then uploads all assets to a draft before publishing. No personal access token is needed for CI. Build version changes stay on the runner, so releases do not create extra source commits. Failed builds remain unpublished. Pull requests get a separate build check (type check and production build) and never publish anything.
 
-The Windows release is unsigned. SmartScreen may require **More info → Run anyway** on a downloaded copy. Linux/macOS packaging is not included in this release.
+The Windows release is unsigned. SmartScreen may require **More info → Run anyway** on a downloaded copy. Linux/macOS packaging is not included.
 
 Reference protocols: [Pi RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md), [Claude commands](https://code.claude.com/docs/en/agent-sdk/slash-commands), [Grok ACP](https://docs.x.ai/build/cli/headless-scripting). Codex discovery was checked against its locally generated app-server schema and installed CLI.
+
+## Contributing
+
+Bug reports, ideas, and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code layout, and how releases work, and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Please report security issues privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE) © 2026 Matt Johnston
