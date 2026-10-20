@@ -67,14 +67,14 @@ const MARK_COLORS = { red: "#ef4444", orange: "#f59e0b", blue: "#3b82f6", green:
 // screenshot) so a pin means the same thing at any capture resolution. The
 // main process maps them onto the exact bitmap it composes.
 const normalizeMarks = (marks) => {
-  if (!Array.isArray(marks) || marks.length > MAX_MARKS) throw new Error(`Mark up to ${MAX_MARKS} things on a screenshot.`);
+  if (!Array.isArray(marks) || marks.length > MAX_MARKS) throw bad(`Mark up to ${MAX_MARKS} things on a screenshot.`);
   return marks.map((mark) => {
-    if (!mark || typeof mark !== "object" || Array.isArray(mark)) throw new Error("Invalid screenshot markup.");
+    if (!mark || typeof mark !== "object" || Array.isArray(mark)) throw bad("Invalid screenshot markup.");
     const label = typeof mark.label === "string" ? mark.label.trim().slice(0, 80) : "";
-    if (!label) throw new Error("Every markup pin needs a short label.");
+    if (!label) throw bad("Every markup pin needs a short label.");
     const x = Number(mark.x), y = Number(mark.y);
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1)
-      throw new Error("Markup pins must sit inside the screenshot.");
+      throw bad("Markup pins must sit inside the screenshot.");
     const color = typeof mark.color === "string" && MARK_COLORS[mark.color] ? mark.color : "red";
     return { label, x, y, color };
   });
@@ -98,7 +98,9 @@ const buildMarkupHTML = (imageDataURL, marks, width, height) => {
     `let left=x+r+GAP;if(left+w>W-4)left=x-r-GAP-w;` +
     `if(left<4)left=Math.min(Math.max(4,W-4-w),Math.max(4,x-w/2));` +
     `const top=Math.min(Math.max(4,y-h/2),Math.max(4,H-4-h));` +
-    `em.style.left=Math.round(left)+'px';em.style.top=Math.round(top)+'px';}};window.__layoutPins();`;
+    `em.style.left=Math.round(left)+'px';em.style.top=Math.round(top)+'px';` +
+    `const dx=Math.min(Math.max(x,r+2),W-r-2),dy=Math.min(Math.max(y,r+2),H-r-2);` +
+    `dot.style.left=Math.round(dx-x)+'px';dot.style.top=Math.round(dy-y)+'px';}};window.__layoutPins();`;
   return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
     `.pin{position:absolute;width:0;height:0;pointer-events:none}` +
     `.dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center}` +

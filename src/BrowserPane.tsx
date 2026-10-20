@@ -82,7 +82,12 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const viewMode: BrowserViewMode = current?.view || { mode: "desktop" };
   const mobile = viewMode.mode === "mobile";
   useEffect(() => () => browserStateCache.clear(), []);
-  useEffect(() => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false; }, [current?.id, current?.url]);
+  // Reset the marking view when the page underneath changes, but never while marking is open:
+  // a tab switch or navigation must not throw away pins the user has already placed.
+  useEffect(() => {
+    if (markupMode) return;
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false;
+  }, [current?.id, current?.url, markupMode]);
   useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
   // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
   // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
@@ -114,6 +119,12 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     try { window.lumen.switchBrowserNow(chatId, workspace, box, open && !markupMode); }
     catch { /* app is closing */ }
   }, [scope]);
+  // Closing the pane or opening markup has to retract the composited page in this same commit
+  // too, for the same reason: the async layout(null) below is a few frames late.
+  useLayoutEffect(() => {
+    if (open && !markupMode) return;
+    try { window.lumen.hideBrowserNow(); } catch { /* app is closing */ }
+  }, [open, markupMode]);
   useLayoutEffect(() => {
     if (!open || markupMode) { void api("browser:layout", null).catch(onError); return; }
     let frame = 0, previous = "", failed = false;
@@ -187,6 +198,9 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       if (left < 4) left = Math.min(Math.max(4, width - 4 - w), Math.max(4, x - w / 2));
       const top = Math.min(Math.max(4, y - h / 2), Math.max(4, height - 4 - h));
       label.style.left = `${Math.round(left)}px`; label.style.top = `${Math.round(top)}px`;
+      // Keep the whole dot visible when the click lands on the very edge of the picture.
+      const dotX = Math.min(Math.max(x, radius + 2), width - radius - 2), dotY = Math.min(Math.max(y, radius + 2), height - radius - 2);
+      dot.style.left = `${Math.round(dotX - x)}px`; dot.style.top = `${Math.round(dotY - y)}px`;
     });
   };
   useLayoutEffect(() => { clampPinLabels(); }, [marks, pendingNorm, stageBox, markupMode]);
