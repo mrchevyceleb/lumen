@@ -274,8 +274,8 @@ startup.then(async (start) => {
   window = new BrowserWindow({
     width: 1440,
     height: 960,
-    minWidth: 900,
-    minHeight: 650,
+    minWidth: 420,
+    minHeight: 520,
     show: false,
     frame: false,
     backgroundColor: "#17191e",

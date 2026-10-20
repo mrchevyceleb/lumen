@@ -43,6 +43,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const host = useRef<HTMLDivElement>(null);
   const markupLayerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const markInputRef = useRef<HTMLInputElement>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   // Frozen screenshots and their pins, kept per chat so a switch never costs the user their marks.
   // A capture token lives 15 minutes, so a stash older than that can no longer be sent.
@@ -223,6 +224,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     const box = stageRef.current; if (!box) return;
     const width = box.clientWidth, height = box.clientHeight;
     if (!width || !height) return;
+    // Labels are placed one at a time and remembered, so a second label can never be dropped on
+    // top of the first. Two pins close together used to render as one unreadable smear.
+    const taken: { left: number; top: number; right: number; bottom: number }[] = [];
+    const clear = (left: number, top: number, w: number, h: number) =>
+      !taken.some((r) => left < r.right + 4 && left + w > r.left - 4 && top < r.bottom + 4 && top + h > r.top - 4);
     box.querySelectorAll<HTMLElement>(".browser-mark-pin").forEach((pin) => {
       const label = pin.querySelector("em"), dot = pin.querySelector("span");
       if (!label || !dot) return;
@@ -236,16 +242,44 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       let left = x + radius + gap;
       if (left + w > width - 4) left = x - radius - gap - w;
       if (left < 4) left = Math.min(Math.max(4, width - 4 - w), Math.max(4, x - w / 2));
-      const top = Math.min(Math.max(4, y - h / 2), Math.max(4, height - 4 - h));
+      let top = Math.min(Math.max(4, y - h / 2), Math.max(4, height - 4 - h));
+      // Walk down in label-height steps until this label has a clear patch of picture, then back up
+      // towards the pin if it fell off the bottom.
+      if (!clear(left, top, w, h)) {
+        for (let attempt = 0; attempt < 24; attempt += 1) {
+          const next = top + h + 6;
+          if (next + h > height - 4) break;
+          if (clear(left, next, w, h)) { top = next; break; }
+        }
+        if (!clear(left, top, w, h)) {
+          for (let attempt = 0; attempt < 24; attempt += 1) {
+            const next = top - h - 6;
+            if (next < 4) break;
+            if (clear(left, next, w, h)) { top = next; break; }
+          }
+        }
+      }
+      taken.push({ left, top, right: left + w, bottom: top + h });
       // The pin is a zero-size anchor at (x, y), and the label is positioned inside it,
       // so offsets have to be relative to the pin, not to the stage.
       label.style.left = `${Math.round(left - x)}px`; label.style.top = `${Math.round(top - y)}px`;
-      // Keep the whole dot visible when the click lands on the very edge of the picture.
-      const dotX = Math.min(Math.max(x, radius + 2), width - radius - 2), dotY = Math.min(Math.max(y, radius + 2), height - radius - 2);
+      // Keep the whole dot, ring and number badge inside the picture on edge clicks.
+      const inset = radius + 3;
+      const dotX = Math.min(Math.max(x, inset), width - inset), dotY = Math.min(Math.max(y, inset), height - inset);
       dot.style.left = `${Math.round(dotX - x)}px`; dot.style.top = `${Math.round(dotY - y)}px`;
     });
   };
   useLayoutEffect(() => { clampPinLabels(); }, [marks, pendingNorm, stageBox, markupMode]);
+  // The picture used to jump a few pixels when markup opened: the first fit measured the layer
+  // before the toolbar had finished wrapping. Stay hidden until the size has settled for two
+  // frames, so the screenshot appears where it will stay.
+  const [stageReady, setStageReady] = useState(false);
+  useEffect(() => {
+    if (!markupMode) { setStageReady(false); return; }
+    let inner = 0;
+    const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setStageReady(true)); });
+    return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
+  }, [markupMode, stageBox]);
   useEffect(() => { setConfirmDiscard(false); }, [marks.length]);
   // An armed "Discard N pins?" must not sit there waiting for a stray click minutes later.
   useEffect(() => {
@@ -331,7 +365,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       {markupMode && current && <div className="browser-markup-bar">
         <strong>Mark up the screenshot</strong>
         <span className="browser-markup-hint">Click the picture to drop a pin, type what it means, then Add. Pins are numbered for the chat.</span>
-        <input aria-label="What this pin means" placeholder="e.g. This button is broken" value={markDraft} maxLength={80}
+        <input ref={markInputRef} aria-label="What this pin means" placeholder="e.g. This button is broken" value={markDraft} maxLength={80}
           onChange={(e) => setMarkDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); document.querySelector<HTMLButtonElement>(".browser-mark-add")?.click(); } }} />
         <button className="browser-mark-add" disabled={!markDraft.trim() || marks.length >= 10} onClick={() => {
@@ -346,7 +380,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       </div>}
       <div ref={host} className={mobile || markupMode ? "browser-viewport browser-viewport-device" : "browser-viewport"}>
         {markupMode && current ? <div className="browser-markup-layer" ref={markupLayerRef}>
-          <div ref={stageRef} className="browser-markup-stage" style={stageBox ? { width: stageBox.width, height: stageBox.height } : { visibility: "hidden" }}>
+          <div ref={stageRef} className="browser-markup-stage" style={{ ...(stageBox ? { width: stageBox.width, height: stageBox.height } : {}), visibility: stageBox && stageReady ? undefined : "hidden" }}>
             <img alt="Screenshot to mark up" src={markupImage} draggable={false}
               onClick={(e) => {
                 const box = e.currentTarget.getBoundingClientRect();
@@ -355,6 +389,8 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
                 const y = Math.min(1, Math.max(0, (e.clientY - box.top) / box.height));
                 setPendingNorm({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 });
                 setError("");
+                // Dropping a pin arms the note field: whatever the user types next belongs to it.
+                requestAnimationFrame(() => markInputRef.current?.focus());
               }} />
             {marks.map((mark, index) => <div className="browser-mark-pin" key={index} data-x={mark.x} data-y={mark.y} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
               <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
