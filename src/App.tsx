@@ -71,8 +71,9 @@ const uniqueChatName = (base: string, tabs: { id: string; name: string }[], exce
   const taken = new Set(tabs.filter((tab) => tab.id !== exceptId).map((tab) => tab.name));
   if (!taken.has(base)) return base;
   const stem = base.replace(/ \d+$/, "");
-  for (let n = 2; n < 500; n += 1) if (!taken.has(`${stem} ${n}`)) return `${stem} ${n}`;
-  return base;
+  // No upper bound: giving up would hand back a name that is already taken, which is the exact
+  // thing this exists to prevent.
+  for (let n = 2; ; n += 1) if (!taken.has(`${stem} ${n}`)) return `${stem} ${n}`;
 };
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
 import SettingsPanel from "./SettingsPanel";
