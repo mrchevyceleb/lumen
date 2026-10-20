@@ -29,11 +29,13 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const [markDraft, setMarkDraft] = useState("");
   const [marksSending, setMarksSending] = useState(false);
   const [pendingNorm, setPendingNorm] = useState<{ x: number; y: number } | null>(null);
+  const [stageBox, setStageBox] = useState<{ width: number; height: number } | null>(null);
   const marksLock = useRef(false);
   const captureLock = useRef(false);
   const [dragging, setDragging] = useState(false);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const host = useRef<HTMLDivElement>(null);
+  const markupLayerRef = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -80,30 +82,51 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   useEffect(() => () => browserStateCache.clear(), []);
   useEffect(() => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false; }, [current?.id, current?.url]);
   useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
+  // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
+  // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
+  // max-height resolves differently in a grid cell (it clipped the bottom of the capture and left
+  // the letterbox area swallowing clicks), so the stage gets explicit pixels from this measurement.
   useLayoutEffect(() => {
-    if (!open || markupMode) return;
+    if (!markupMode || !markupSize) { setStageBox(null); return; }
+    const fit = () => {
+      const layer = markupLayerRef.current;
+      if (!layer) return;
+      const box = layer.getBoundingClientRect();
+      const pad = 14;
+      const scale = Math.min((box.width - pad * 2) / markupSize.width, (box.height - pad * 2) / markupSize.height);
+      if (!Number.isFinite(scale) || scale <= 0) return;
+      const width = Math.max(1, Math.round(markupSize.width * scale)), height = Math.max(1, Math.round(markupSize.height * scale));
+      setStageBox((old) => old && old.width === width && old.height === height ? old : { width, height });
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    if (markupLayerRef.current) observer.observe(markupLayerRef.current);
+    return () => observer.disconnect();
+  }, [markupMode, markupSize]);
+  // Launching a new chat must blank the native page in the same commit. Without this the previous
+  // chat's Chromium view stays composited over the new chat's pane until the layout round-trip.
+  useLayoutEffect(() => { void api("browser:layout", null).catch(() => {}); }, [scope]);
+  useLayoutEffect(() => {
+    if (!open || markupMode) { void api("browser:layout", null).catch(onError); return; }
     let frame = 0, previous = "", failed = false;
-    const visible = open && !blocked && !dragging && !!current && current.url !== "about:blank" && !current.error;
-    if (!visible) void api("browser:layout", null).catch(onError);
-    else {
-      // Native views use device-independent pixels; the main process applies Lumen's UI zoom.
-      // Measuring each frame also catches sidebar moves, editor changes, and maximization.
-      const measure = () => {
-        const rect = host.current?.getBoundingClientRect();
-        if (rect && !failed) {
-          const next = document.querySelector('[aria-modal="true"]') ? null : { scope, id: current.id, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-          const serialized = JSON.stringify([next, window.devicePixelRatio]);
-          if (serialized !== previous) {
-            previous = serialized;
-            void api("browser:layout", next).catch((e) => { failed = true; onError(e.message); });
-          }
+    // Re-measure every frame so resizing the pane, dragging the splitter, and maximizing all move
+    // the native page with the panel. Nothing is detached on teardown: a navigation or a dep change
+    // used to blank and re-add the view (a visible flicker), and the next measure corrects the bounds.
+    const measure = () => {
+      const rect = host.current?.getBoundingClientRect();
+      if (rect && !failed) {
+        const next = document.querySelector('[aria-modal="true"]') ? null : { scope, id: current?.id, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        const serialized = JSON.stringify([next, window.devicePixelRatio]);
+        if (serialized !== previous) {
+          previous = serialized;
+          void api("browser:layout", next).catch((e) => { failed = true; onError(e.message); });
         }
-        frame = requestAnimationFrame(measure);
-      };
-      measure();
-    }
-    return () => { cancelAnimationFrame(frame); void api("browser:layout", null).catch(() => {}); };
-  }, [open, blocked, dragging, markupMode, current?.id, current?.url, current?.error, scope, onError]);
+      }
+      frame = requestAnimationFrame(measure);
+    };
+    measure();
+    return () => cancelAnimationFrame(frame);
+  }, [open, blocked, markupMode, current?.id, current?.url, current?.error, scope, onError]);
   const enterMarkup = async () => {
     if (!current || captureLock.current) return; captureLock.current = true; setCapturing(true);
     try {
@@ -165,7 +188,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       onPointerDown={resize} onKeyDown={(e) => {
         if (["ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); onWidth(width + (e.key === "ArrowLeft" ? 20 : -20)); }
       }} />
-    <aside id="browser-panel" className="browser-pane" style={{ width }} aria-label="Chromium browser">
+    <aside id="browser-panel" className={dragging ? "browser-pane browser-resizing" : "browser-pane"} style={{ width }} aria-label="Chromium browser">
       <div className="browser-heading"><Globe size={14} /><strong>Browser</strong><span title={chatName && chatName !== "Terminal" ? `${chatName}'s browser` : workspace ? `This chat's browser in ${workspace}` : "This chat's browser"}>{chatName && chatName !== "Terminal" ? `${chatName}'s browser` : "This chat's browser"}</span>
         <IconButton label="Hide browser (Ctrl Shift B)" onClick={onClose}><X size={16} /></IconButton>
       </div>
@@ -223,20 +246,24 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         <button disabled={marksSending} onClick={cancelMarkup}>Cancel</button>
       </div>}
       <div ref={host} className={mobile || markupMode ? "browser-viewport browser-viewport-device" : "browser-viewport"}>
-        {markupMode && current ? <div className="browser-markup-layer">
-          <div className="browser-markup-stage" style={markupSize ? { aspectRatio: `${markupSize.width} / ${markupSize.height}` } : undefined}>
+        {markupMode && current ? <div className="browser-markup-layer" ref={markupLayerRef}>
+          <div className="browser-markup-stage" style={stageBox ? { width: stageBox.width, height: stageBox.height } : { visibility: "hidden" }}>
             <img alt="Screenshot to mark up" src={markupImage} draggable={false}
               onClick={(e) => {
                 const box = e.currentTarget.getBoundingClientRect();
+                if (box.width < 1 || box.height < 1) return;
                 const x = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
                 const y = Math.min(1, Math.max(0, (e.clientY - box.top) / box.height));
                 setPendingNorm({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 });
                 setError("");
               }} />
-            {marks.map((mark, index) => <div className="browser-mark-pin" key={index} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
-              <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
-            </div>)}
-            {pendingNorm && <div className="browser-mark-pin browser-mark-pending" style={{ left: `${pendingNorm.x * 100}%`, top: `${pendingNorm.y * 100}%` }}>
+            {marks.map((mark, index) => {
+              const flip = mark.x > 0.55, high = mark.y > 0.92, low = mark.y < 0.08;
+              return <div className={`browser-mark-pin${flip ? " browser-mark-flip" : ""}${high ? " browser-mark-high" : ""}${low ? " browser-mark-low" : ""}`} key={index} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
+                <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
+              </div>;
+            })}
+            {pendingNorm && <div className={`browser-mark-pin browser-mark-pending${pendingNorm.x > 0.55 ? " browser-mark-flip" : ""}`} style={{ left: `${pendingNorm.x * 100}%`, top: `${pendingNorm.y * 100}%` }}>
               <span>?</span><em>New pin: type what it means, then Add</em>
             </div>}
           </div>

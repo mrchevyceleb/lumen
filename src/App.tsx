@@ -8,6 +8,7 @@ import {
   Suspense,
   type CSSProperties,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   FolderOpen,
   Files,
@@ -170,7 +171,8 @@ export default function App() {
   }, [accounts]);
   const projectTabsRef = useRef<Record<string, string>>({});
   const MIN_PANEL = 48;
-  const MIN_MAIN = 240;
+  // A conversation needs real room to be readable; panels wrap and shrink instead of eating it.
+  const MIN_MAIN = 340;
   const RAIL_WIDTH = 44;
   const [panelPreferences] = useState(() => { try { return JSON.parse(localStorage.getItem("lumen.panels") || "{}") || {}; } catch { return {}; } });
   const [panel, setPanel] = useState<"files" | "git">(panelPreferences.panel === "git" ? "git" : "files");
@@ -187,6 +189,8 @@ export default function App() {
   const [resizing, setResizing] = useState(false);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const resizeTargetRef = useRef<HTMLElement | null>(null);
+  const explorerAutoHid = useRef(false);
+  const explorerPinned = useRef(false);
   const [mainElement, setMainElement] = useState<HTMLElement | null>(null);
   const [mainHeight, setMainHeight] = useState(() => Math.max(120, window.innerHeight - 52));
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
@@ -257,6 +261,20 @@ export default function App() {
       setExplorerWidth(nextWidths.explorer);
     }
   }, [viewportWidth, visibleSidebar, browserOpen, visibleExplorer]);
+  // Three panes beside a usable conversation do not fit on a small window, and squeezing all of
+  // them to slivers is what made a 900px window feel broken. The file explorer is the least
+  // essential of the three: hide it (only when we are the ones hiding it) and bring it back when
+  // the browser closes or the window has room again.
+  useEffect(() => {
+    if (!visibleExplorer || explorerPinned.current) return;
+    const room = viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? sidebarWidth : 0) - (browserOpen ? browserWidth : 0);
+    if (room < 0) { explorerAutoHid.current = true; setExplorer(false); }
+  }, [browserOpen, viewportWidth, visibleExplorer, visibleSidebar, sidebarWidth, browserWidth]);
+  useEffect(() => {
+    if (!explorerAutoHid.current) return;
+    if (browserOpen && viewportWidth < 1180) return;
+    explorerAutoHid.current = false; explorerPinned.current = false; setExplorer(true);
+  }, [browserOpen, viewportWidth]);
   const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
   useLayoutEffect(() => {
     const element = contextBar.current;
@@ -269,7 +287,7 @@ export default function App() {
     try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browserWidth, split, terminalHeight })); } catch {}
   }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserWidth, split, terminalHeight]);
   const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
-  const hideExplorer = () => { setExplorer(false); explorerToggle.current?.focus(); };
+  const hideExplorer = () => { explorerAutoHid.current = false; setExplorer(false); explorerToggle.current?.focus(); };
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocKey, setActiveDocKey] = useState("");
   const [editorExpanded, setEditorExpanded] = useState(false);
@@ -281,12 +299,50 @@ export default function App() {
   const [agentMenu, setAgentMenu] = useState(false);
   const [agentMenuRoot, setAgentMenuRoot] = useState<string | undefined>();
   const agentMenuRef = useRef<HTMLDivElement>(null);
+  const agentMenuAnchorRef = useRef<HTMLDivElement>(null);
   const agentMenuTrigger = useRef<HTMLElement | null>(null);
+  const [agentMenuPos, setAgentMenuPos] = useState<{ top: number; right: number } | null>(null);
+  // Position from the anchor's real rect AFTER mount (a render-time read is stale by a layout pass),
+  // and keep it correct on resize. The menu itself is portaled to <body> so no ancestor stacking
+  // context can trap it under the chat column.
+  useLayoutEffect(() => {
+    if (!agentMenu) { setAgentMenuPos(null); return; }
+    const place = () => {
+      const r = agentMenuAnchorRef.current?.getBoundingClientRect();
+      if (r) setAgentMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [agentMenu, agentMenuRoot, verticalChats]);
   useEffect(() => {
     if (!agentMenu) return;
     if (!agentMenuRef.current?.contains(document.activeElement)) agentMenuTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     agentMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, [agentMenu, agentMenuRoot, verticalChats]);
+  useEffect(() => {
+    if (!agentMenu) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!agentMenuRef.current?.contains(target) && !(target instanceof Element && target.closest(".agent-menu-anchor"))) {
+        setAgentMenu(false);
+        setAgentMenuRoot(undefined);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setAgentMenu(false);
+      setAgentMenuRoot(undefined);
+      if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus();
+    };
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [agentMenu]);
   const [notice, setNotice] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
@@ -1367,13 +1423,13 @@ export default function App() {
   const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
   const sessionActions = <div className="tab-actions">
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
-    <div className="agent-menu-anchor">
-      <IconButton label="New agent session" active={agentMenu} onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}><Plus size={18} /></IconButton>
-      {agentMenu && <div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
-        {agents.map((agent) => <button key={agent} onClick={() => addTab(agent, "rich", agentMenuRoot ?? root)}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
-        <div className="menu-divider" /><button onClick={() => void addTab("shell", "rich", "")}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={startWithoutWorkspace}><Sparkles size={17} /><span>New chat without workspace</span></button>
+    <div className="agent-menu-anchor" ref={agentMenuAnchorRef}>
+      <IconButton label="New agent session" active={agentMenu} aria-expanded={agentMenu} aria-controls={agentMenu ? "new-chat-menu" : undefined} onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}><Plus size={18} /></IconButton>
+      {agentMenu && createPortal(<div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" style={agentMenuPos ? { top: agentMenuPos.top, right: agentMenuPos.right } : { visibility: "hidden" }} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
+        {agents.map((agent) => <button key={agent} onClick={() => { setAgentMenu(false); setAgentMenuRoot(undefined); void addTab(agent, "rich", agentMenuRoot ?? root); }}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
+        <div className="menu-divider" /><button onClick={() => { setAgentMenu(false); void addTab("shell", "rich", ""); }}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={() => { setAgentMenu(false); startWithoutWorkspace(); }}><Sparkles size={17} /><span>New chat without workspace</span></button>
         <button onClick={() => { setAgentMenu(false); setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
-      </div>}
+      </div>, document.body)}
     </div>
     <IconButton label="Settings" onClick={() => setDialog("settings")}><MoreHorizontal size={18} /></IconButton>
   </div>;
@@ -1435,7 +1491,7 @@ export default function App() {
         <span className="titlebar-caption">a little more room to think</span>
         <div className="titlebar-right">
           <button className={`icon-button ${browserOpen ? "active" : ""}`} aria-label={browserOpen ? "Hide browser" : "Show browser"} title="Browser (Ctrl Shift B)" aria-expanded={browserOpen} aria-controls="browser-panel" onClick={() => setBrowserOpen(!browserOpen)}><Globe size={17} /></button>
-          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); setExplorer(!(visibleExplorer && panel === "files")); }}>
+          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); const next = !(visibleExplorer && panel === "files"); explorerPinned.current = next; explorerAutoHid.current = false; setExplorer(next); }}>
             {visibleExplorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
           </button>
           <button className="command-hint" onClick={() => setDialog("palette")}>

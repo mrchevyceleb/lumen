@@ -20,6 +20,7 @@ export function IconButton({
   active = false,
   disabled = false,
   className = "",
+  ...rest
 }: {
   label: string;
   children: ReactNode;
@@ -27,7 +28,7 @@ export function IconButton({
   active?: boolean;
   disabled?: boolean;
   className?: string;
-}) {
+} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "onClick" | "className" | "disabled">) {
   return (
     <button
       type="button"
@@ -36,6 +37,7 @@ export function IconButton({
       title={label}
       onClick={onClick}
       disabled={disabled}
+      {...rest}
     >
       {children}
     </button>

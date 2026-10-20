@@ -11,7 +11,7 @@ function browserURL(value) {
   const hostWithPort = /^(?:\[[\da-f:]+\]|[^/?#:\s]+):\d+(?:[/?#]|$)/i.test(input);
   const bareHost = /^[^\s/?#]+(?:\.[^\s/?#]+)+(?::\d+)?(?:[/?#]|$)/i.test(input);
   if (!/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort && !bareHost)
-    throw new Error("Try a full address like localhost:3000, or a site like example.com.");
+    throw bad("Try a full address like localhost:3000, or a site like example.com.");
   const url = new URL(/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort ? input : `${local ? "http" : "https"}://${input}`);
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
     throw new Error("Use an HTTP or HTTPS address without embedded credentials.");
@@ -32,12 +32,14 @@ function localOrigin(value) {
 }
 const MAX_TABS = 32;
 const CHAT_SCOPE_PREFIX = "chat:";
+// Errors the caller caused carry a status so the local agent API answers 4xx, not a blanket 500.
+const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 const validScope = (scope) => typeof scope === "string"
   && (scope === "" || (scope.startsWith(CHAT_SCOPE_PREFIX)
     && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(scope.slice(CHAT_SCOPE_PREFIX.length))));
 const chatScope = (chatId) => {
   if (typeof chatId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(chatId))
-    throw new Error("Choose a chat before using its browser.");
+    throw bad("Choose a chat before using its browser.");
   return CHAT_SCOPE_PREFIX + chatId.toLowerCase();
 };
 // Built-in phone widths (CSS px at devicePixelRatio 3, Chrome mobile user agents).
@@ -78,13 +80,23 @@ const buildMarkupHTML = (imageDataURL, marks, width, height) => {
   const scale = Math.max(1, Math.min(2, Math.min(width, height) / 700));
   const radius = 15 * scale, font = 12 * scale;
   const pins = marks.map((mark, index) => {
+    // Clamp by the dot radius so the circle stays fully inside the capture; the label itself is
+    // allowed to sit close to the edge, and flips to the other side when there is no room right.
     const x = Math.min(Math.max(mark.x, radius / width), 1 - radius / width);
     const y = Math.min(Math.max(mark.y, radius / height), 1 - radius / height);
     const label = `#${index + 1} ${mark.label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`;
-    const flip = x * width > width - 180 * scale;
-    return `<div class="pin" style="left:${x * 100}%;top:${y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px;flex-direction:${flip ? "row-reverse" : "row"};text-align:${flip ? "right" : "left"}"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
+    const flip = x * width > width - 190 * scale;
+    const high = y * height > height - font * 2, low = y * height < font * 2;
+    return `<div class="pin${flip ? " flip" : ""}${high ? " high" : ""}${low ? " low" : ""}" style="left:${x * 100}%;top:${y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
   }).join("");
-  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}.pin{position:absolute;transform:translate(-50%,-50%);display:flex;align-items:center;gap:${7 * scale}px;pointer-events:none}.dot{width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}.pin em{font-style:normal;font-size:var(--font);font-weight:600;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95);max-width:280px}</style><img src="${imageDataURL}">${pins}`;
+  const gap = 7 * scale;
+  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
+    `.pin{position:absolute;width:0;height:0;pointer-events:none}` +
+    `.dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center}` +
+    `.pin em{position:absolute;left:calc(var(--r) + ${gap}px);top:0;transform:translateY(-50%);font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95);max-width:290px}` +
+    `.pin.flip em{left:auto;right:calc(var(--r) + ${gap}px);text-align:right}` +
+    `.pin.high em{top:-15px}.pin.low em{top:15px}` +
+    `</style><img src="${imageDataURL}">${pins}`;
 };
 const MARK_TOKEN_TTL_MS = 15 * 60 * 1000;
 class BrowserService {
@@ -98,6 +110,7 @@ class BrowserService {
     this.scope = "";
     this.visible = false;
     this.bounds = null;
+    this.pendingLayout = null;
     this.attached = null;
     this.popups = new Set();
     this.profile = session.fromPartition("persist:lumen-browser");
@@ -164,7 +177,7 @@ class BrowserService {
     } catch { return tab.history || null; }
   }
   group(scope = this.scope) {
-    if (!validScope(scope) || scope.length > 8192) throw new Error("Invalid browser scope.");
+    if (!validScope(scope) || scope.length > 8192) throw bad("Invalid browser scope.");
     if (!this.groups.has(scope)) {
       for (const [key, group] of this.groups) if (key !== this.scope && !group.tabs.length) this.groups.delete(key);
       if (this.groups.size >= 512) throw new Error("The browser has reached its saved-chat limit.");
@@ -220,12 +233,17 @@ class BrowserService {
   }
   activate(chatId, workspace = "") {
     const scope = chatId ? chatScope(chatId) : "";
+    const pending = this.pendingLayout;
     this.layout(null);
     if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
     this.adoptLegacy(scope, workspace);
     this.scope = scope;
     this.group();
+    this.pendingLayout = null;
     this.emit();
+    // The renderer measured this chat's pane while the switch was still in flight; use it instead
+    // of waiting for the next distinct measurement, which may never come.
+    if (pending && pending.scope === scope && pending.id === this.group().activeId) this.layout(pending);
     return this.state();
   }
   discard(chatId) {
@@ -245,7 +263,7 @@ class BrowserService {
       const tab = group.tabs.find((tab) => tab.id === id);
       if (tab) return { scope, group, tab };
     }
-    throw new Error("This browser tab is closed.");
+    throw bad("This browser tab is closed.", 404);
   }
   guard(contents) {
     const prevent = (event, url) => { if (!webURL(url)) event.preventDefault(); };
@@ -340,6 +358,13 @@ class BrowserService {
     tab.history = null;
     return view;
   }
+  // A phone profile is a fixed pixel box. If the pane is smaller than the device, emulating at
+  // scale 1 crops the bottom of the page and leaves the rest unreachable (the viewport believes it
+  // is 844 tall while only part of it is on screen), so scale the whole device down to fit instead.
+  fitScale(size) {
+    if (!size || !this.bounds?.width || !this.bounds?.height) return 1;
+    return Math.min(1, this.bounds.width / size.width, this.bounds.height / size.height);
+  }
   deviceSize(view) {
     const normalized = normalizeView(view);
     if (normalized.mode !== "mobile") return null;
@@ -376,6 +401,7 @@ class BrowserService {
     }
 
     if (!size) {
+      tab.appliedScale = 1;
       try { contents.disableDeviceEmulation(); } catch { /* Already desktop. */ }
       contents.setUserAgent(this.desktopUserAgent || contents.getUserAgent().replace(/\s(?:Electron|lumen-workspace|Lumen)\/\S+/g, ""));
       return;
@@ -384,8 +410,10 @@ class BrowserService {
     try {
       // No userAgent option on this Electron: set it on the contents itself.
       contents.setUserAgent(profile.userAgent);
+      const scale = this.fitScale(size);
       contents.enableDeviceEmulation({ screenPosition: "mobile", screenSize: size, viewPosition: { x: 0, y: 0 }, viewSize: size,
-        deviceScaleFactor: 3, scale: 1 });
+        deviceScaleFactor: 3, scale });
+      tab.appliedScale = scale;
     } catch { try { contents.disableDeviceEmulation(); } catch { /* Keep desktop rendering. */ } }
   }
   load(tab, url, history = null) {
@@ -400,7 +428,7 @@ class BrowserService {
     });
   }
   create(scope = this.scope, url = "about:blank") {
-    if (!validScope(scope)) throw new Error("Invalid browser scope.");
+    if (!validScope(scope)) throw bad("Invalid browser scope.");
     if (this.knownChat && scope && !this.knownChat(scope.slice(CHAT_SCOPE_PREFIX.length)))
       throw new Error("That chat is closed, so its browser cannot open new tabs.");
     if ([...this.groups.values(), ...this.legacy.values()].reduce((sum, group) => sum + group.tabs.length, 0) >= MAX_TABS)
@@ -450,7 +478,14 @@ class BrowserService {
     this.attached = null;
   }
   layout(value) {
-    if (value && (value.scope !== this.scope || value.id !== this.group().activeId)) return;
+    if (value && (value.scope !== this.scope || value.id !== this.group().activeId)) {
+      // A layout can arrive one round-trip before the chat switch lands here. Dropping it left the
+      // new chat's pane blank until something else moved, so keep the intent and apply it when that
+      // scope activates. Either way the previous chat's page must stop being painted right now.
+      if (value.scope !== this.scope) { this.pendingLayout = value; this.visible = false; this.detach(); }
+      return;
+    }
+    this.pendingLayout = null;
     this.visible = !!value;
     if (value) {
       if (![value.x, value.y, value.width, value.height].every(Number.isFinite)) throw new Error("Invalid browser bounds.");
@@ -468,14 +503,17 @@ class BrowserService {
     if (this.attached !== view) {
       this.detach(); this.window.contentView.removeChildView(view); this.window.contentView.addChildView(view); this.attached = view;
     }
-    // Mobile view: the page is centered at device size inside the panel with a
-    // styled backdrop, so a narrow phone never gets squished into a wide pane.
+    // Mobile view: the phone is centered in the panel at whatever scale fits, so a narrow pane
+    // shows the whole device rather than a cropped slice of it.
     const device = this.deviceSize(tab.view);
-    if (device && this.bounds.width >= device.width && this.bounds.height >= device.height) {
-      view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - device.width) / 2), y: this.bounds.y, width: device.width, height: Math.min(device.height, this.bounds.height) });
-    } else if (device && this.bounds.width >= device.width) {
-      view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - device.width) / 2), y: this.bounds.y, width: device.width, height: this.bounds.height });
-    } else view.setBounds(this.bounds);
+    if (!device) { view.setBounds(this.bounds); }
+    else {
+      const scale = this.fitScale(device);
+      if (tab.appliedScale !== scale) this.applyEmulation(tab);
+      const width = Math.max(1, Math.round(device.width * scale));
+      const height = Math.min(this.bounds.height, Math.max(1, Math.round(device.height * scale)));
+      view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - width) / 2), y: this.bounds.y + Math.max(0, Math.floor((this.bounds.height - height) / 2)), width, height });
+    }
     view.setVisible(true);
   }
   async capture(id) {
@@ -489,8 +527,13 @@ class BrowserService {
     const image = await this.capture(id);
     const size = image.getSize();
     if (!size.width || !size.height) throw new Error("The screenshot was empty. Reload the page and try again.");
+    // Read the page text at the same moment as the pixels. Reading it later let an app that keeps
+    // rendering (a live dashboard, a chat) send text describing a page the screenshot no longer showed.
+    const generation = tab.generation;
+    const page = await this.inspect(id).catch(() => null);
+    if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again once it finishes loading.");
     const token = crypto.randomUUID();
-    this.markCaptures.set(token, { tabId: tab.id, generation: tab.generation, image, createdAt: Date.now() });
+    this.markCaptures.set(token, { tabId: tab.id, generation: tab.generation, image, page, createdAt: Date.now() });
     for (const [key, capture] of this.markCaptures) if (Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) this.markCaptures.delete(key);
     while (this.markCaptures.size > 8) this.markCaptures.delete(this.markCaptures.keys().next().value);
     return { token, image: image.toDataURL(), width: size.width, height: size.height };
@@ -582,18 +625,17 @@ class BrowserService {
     const { tab } = this.find(id);
     if (captureToken) {
       const frozen = this.takeCapture(captureToken, id);
-      const generation = tab.generation;
-      const page = await this.inspect(id);
-      if (tab.generation !== generation) throw new Error("The page changed since that screenshot. Capture it again.");
+      // Use the text frozen with the pixels; a re-read here could describe a different page than the
+      // marked-up image the chat is about to show.
+      const page = frozen.page || await this.inspect(id);
       return { image: await this.composeMarkedImageFor(frozen.image, marks || []), page };
     }
     if (marks !== undefined) {
       const begun = await this.beginCapture(id);
       try {
-        const generation = tab.generation;
-        const page = await this.inspect(id);
-        if (tab.generation !== generation) throw new Error("The page changed since that screenshot. Capture it again.");
-        return { image: await this.composeMarkedImageFor(this.takeCapture(begun.token, id).image, marks), page };
+        const frozen = this.takeCapture(begun.token, id);
+        const page = frozen.page || await this.inspect(id);
+        return { image: await this.composeMarkedImageFor(frozen.image, marks), page };
       } catch (error) { this.markCaptures.delete(begun.token); throw error; }
     }
     await this.pageOperation(tab, () => undefined);
@@ -603,18 +645,18 @@ class BrowserService {
     return { image, page };
   }
   async control(body) {
-    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Send a browser action object.");
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw bad("Send a browser action object.");
     const { action, id } = body;
     if (action === "list") return { chats: [...this.groups].map(([scope, group]) => ({ scope, chatId: scope.startsWith(CHAT_SCOPE_PREFIX) ? scope.slice(CHAT_SCOPE_PREFIX.length) : "", activeId: group.activeId, tabs: group.tabs.map((tab) => this.metadata(tab)) })) };
     if (action === "open") {
       let scope;
       if (Object.hasOwn(body, "chatId")) scope = chatScope(body.chatId);
       else if (Object.hasOwn(body, "scope")) {
-        if (!validScope(body.scope) || !body.scope) throw new Error("Choose a chat before using its browser.");
+        if (!validScope(body.scope) || !body.scope) throw bad("Choose a chat before using its browser.");
         scope = body.scope.toLowerCase();
       } else scope = this.scope;
-      if (!scope) throw new Error("Choose a chat before using its browser.");
-      if (Object.hasOwn(body, "workspace") && typeof body.workspace !== "string") throw new Error("Invalid browser workspace.");
+      if (!scope) throw bad("Choose a chat before using its browser.");
+      if (Object.hasOwn(body, "workspace") && typeof body.workspace !== "string") throw bad("Invalid browser workspace.");
       this.adoptLegacy(scope, typeof body.workspace === "string" ? body.workspace : "");
       return this.create(scope, body.url ?? "about:blank");
     }
@@ -633,9 +675,9 @@ class BrowserService {
     else if (action === "stop") contents.stop();
     else if (action === "devtools") contents.openDevTools({ mode: "detach" });
     else if (action === "evaluate") {
-      if (typeof body.script !== "string" || body.script.length > 100000) throw new Error("Provide a script under 100,000 characters.");
+      if (typeof body.script !== "string" || body.script.length > 100000) throw bad("Provide a script under 100,000 characters.");
       return contents.executeJavaScript(body.script, true);
-    } else throw new Error("Unsupported browser action.");
+    } else throw bad("Unsupported browser action.");
     return this.metadata(tab);
   }
   dispose() {

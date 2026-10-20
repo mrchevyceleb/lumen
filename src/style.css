@@ -1328,10 +1328,10 @@ kbd {
   position: relative;
 }
 .agent-menu {
-  position: absolute;
+  position: fixed;
   right: 0;
   top: calc(100% + 6px);
-  z-index: 30;
+  z-index: 40;
   background: var(--surface);
   padding: 8px;
   border: 1px solid var(--border);
