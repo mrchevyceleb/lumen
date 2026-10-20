@@ -22,6 +22,58 @@ function accountEnvironment(s, base = process.env) {
   else env.CODEX_HOME = s.accountHome;
   return env;
 }
+// Codex reads its MCP servers from config.toml, and an account's private home gets a one-time copy
+// of that table when the account is created. A server the user later removed, or one that never
+// answered, therefore lived on in every account home and Codex retried it on every prompt. Re-read
+// the source table before each launch so account copies follow the user's config instead of
+// freezing whatever was there the day the account was made.
+const ordered = (value) => Array.isArray(value) ? value.map(ordered) :
+  value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, ordered(value[key])])) : value;
+const same = (a, b) => JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
+const atomicWrite = async (file, text) => {
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  await fsp.writeFile(temporary, text, { mode: 0o600 });
+  await fsp.rename(temporary, file);
+};
+async function syncCodexServers(accountHome) {
+  if (!accountHome) return;
+  const source = path.join(sourceHome("codex"), "config.toml"), target = path.join(accountHome, "config.toml");
+  // Only a distinct regular file may be rewritten. A symlink or junction here would carry the write
+  // into the user's own config, so refuse anything that is not what it looks like.
+  const [sourceStat, targetStat] = await Promise.all([fsp.lstat(source).catch(() => null), fsp.lstat(target).catch(() => null)]);
+  if (!sourceStat?.isFile() || !targetStat?.isFile()) return;
+  if (Number.isInteger(sourceStat.ino) && sourceStat.ino === targetStat.ino && sourceStat.dev === targetStat.dev) return;
+  const real = (file) => fsp.realpath(file).catch(() => path.resolve(file));
+  const [sourceReal, targetReal] = await Promise.all([real(source), real(target)]);
+  // Windows casing and drive-letter aliases point at the same file without matching as strings.
+  if (sourceReal.toLowerCase() === targetReal.toLowerCase()) return;
+  const read = (file) => fsp.readFile(file, "utf8").catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+  const [sourceText, targetText] = await Promise.all([read(source), read(target)]);
+  // Never create an account's config here: it carries the sign-in and provider settings.
+  if (sourceText === null || targetText === null) return;
+  let from, to;
+  try { from = TOML.parse(sourceText); to = TOML.parse(targetText); } catch { return; }
+  const wanted = from.mcp_servers && typeof from.mcp_servers === "object" ? from.mcp_servers : {};
+  const current = to.mcp_servers && typeof to.mcp_servers === "object" ? to.mcp_servers : {};
+  // Lumen only owns the entries it mirrored in. A server added straight into this account's own
+  // config is the user's and stays put. Accounts made before this shipped have no record yet, so
+  // their existing table counts as mirrored once, which is what removes an entry that went stale.
+  const recordFile = path.join(accountHome, ".lumen-mcp-servers.json");
+  const record = await fsp.readFile(recordFile, "utf8").then(JSON.parse, () => null);
+  const mirrored = new Set(Array.isArray(record?.names) ? record.names : Object.keys(current));
+  const next = { ...current };
+  for (const name of mirrored) if (!Object.hasOwn(wanted, name)) delete next[name];
+  for (const [name, server] of Object.entries(wanted)) next[name] = server;
+  if (!same(current, next)) {
+    if (Object.keys(next).length) to.mcp_servers = next; else delete to.mcp_servers;
+    // Atomic: another chat can be launching against this same account at the same time, and Codex
+    // must never read a half-written config.
+    await atomicWrite(target, TOML.stringify(to));
+  }
+  const names = Object.keys(wanted);
+  if (!record || !same([...record.names || []].sort(), [...names].sort()))
+    await atomicWrite(recordFile, JSON.stringify({ names })).catch(() => {});
+}
 function claudeAccountSettings(s, settings) {
   if (!s.accountId) return settings;
   const env = { ...settings.env };
@@ -354,4 +406,4 @@ class Accounts {
   }
   dispose() { for (const id of this.logins.keys()) this.cancel(id); }
 }
-module.exports = { Accounts, accountEnvironment, claudeAccountSettings, codexAccountOptions, sourceHome };
+module.exports = { Accounts, accountEnvironment, claudeAccountSettings, codexAccountOptions, sourceHome, syncCodexServers };
