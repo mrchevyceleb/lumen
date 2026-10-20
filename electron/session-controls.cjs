@@ -357,6 +357,10 @@ class Runtime {
       }
       args.push(s.sessionStarted ? "--resume" : "--session-id", s.sessionRef);
     } else if (s.agent === "codex") {
+      // MCP servers come from the user's Codex config, and an account's private home only copies
+      // them once, at creation. Without this, a server the user deleted (or one that never
+      // answered) stays in the account copy forever and Codex retries it on every prompt.
+      await require("./accounts.cjs").syncCodexServers(s.profileEnvironment?.CODEX_HOME).catch(() => {});
       const port = await new Promise((resolve, reject) => { const listener = net.createServer(); listener.once("error", reject); listener.listen(0, "127.0.0.1", () => { const port = listener.address().port; listener.close(() => resolve(port)); }); });
       this.remoteAddress = `ws://127.0.0.1:${port}`;
       this.remoteToken = crypto.randomBytes(32).toString("hex");

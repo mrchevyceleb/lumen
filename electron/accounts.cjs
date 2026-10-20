@@ -22,6 +22,27 @@ function accountEnvironment(s, base = process.env) {
   else env.CODEX_HOME = s.accountHome;
   return env;
 }
+// Codex reads its MCP servers from config.toml, and an account's private home gets a one-time copy
+// of that table when the account is created. A server the user later removed, or one that never
+// answered, therefore lived on in every account home and Codex retried it on every prompt. Re-read
+// the source table before each launch so account copies follow the user's config instead of
+// freezing whatever was there the day the account was made.
+async function syncCodexServers(accountHome) {
+  if (!accountHome) return;
+  const source = path.join(sourceHome("codex"), "config.toml"), target = path.join(accountHome, "config.toml");
+  if (path.resolve(source) === path.resolve(target)) return;
+  const read = (file) => fsp.readFile(file, "utf8").catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+  const [sourceText, targetText] = await Promise.all([read(source), read(target)]);
+  // Never create an account's config here: it carries the sign-in and provider settings.
+  if (targetText === null || sourceText === null) return;
+  let from, to;
+  try { from = TOML.parse(sourceText); to = TOML.parse(targetText); } catch { return; }
+  const wanted = from.mcp_servers && typeof from.mcp_servers === "object" ? from.mcp_servers : {};
+  const current = to.mcp_servers && typeof to.mcp_servers === "object" ? to.mcp_servers : {};
+  if (signature(current) === signature(wanted)) return;
+  if (Object.keys(wanted).length) to.mcp_servers = wanted; else delete to.mcp_servers;
+  await fsp.writeFile(target, TOML.stringify(to), { mode: 0o600 });
+}
 function claudeAccountSettings(s, settings) {
   if (!s.accountId) return settings;
   const env = { ...settings.env };
@@ -354,4 +375,4 @@ class Accounts {
   }
   dispose() { for (const id of this.logins.keys()) this.cancel(id); }
 }
-module.exports = { Accounts, accountEnvironment, claudeAccountSettings, codexAccountOptions, sourceHome };
+module.exports = { Accounts, accountEnvironment, claudeAccountSettings, codexAccountOptions, sourceHome, syncCodexServers };
