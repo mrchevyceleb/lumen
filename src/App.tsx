@@ -305,6 +305,7 @@ export default function App() {
   const [agentMenuRoot, setAgentMenuRoot] = useState<string | undefined>();
   const agentMenuRef = useRef<HTMLDivElement>(null);
   const agentMenuAnchorRef = useRef<HTMLDivElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
   const agentMenuTrigger = useRef<HTMLElement | null>(null);
   const [agentMenuPos, setAgentMenuPos] = useState<{ top: number; right: number } | null>(null);
   // Position from the anchor's real rect AFTER mount (a render-time read is stale by a layout pass),
@@ -1434,12 +1435,13 @@ export default function App() {
         {agents.map((agent) => <button key={agent} onClick={() => { setAgentMenu(false); setAgentMenuRoot(undefined); void addTab(agent, "rich", agentMenuRoot ?? root); }}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
         <div className="menu-divider" /><button onClick={() => { setAgentMenu(false); void addTab("shell", "rich", ""); }}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={() => { setAgentMenu(false); startWithoutWorkspace(); }}><Sparkles size={17} /><span>New chat without workspace</span></button>
         <button onClick={() => { setAgentMenu(false); setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
-      </div>, document.body)}
+      </div>, appRootRef.current || document.body)}
     </div>
     <IconButton label="Settings" onClick={() => setDialog("settings")}><MoreHorizontal size={18} /></IconButton>
   </div>;
   return (
     <div
+      ref={appRootRef}
       className={`app ${verticalChats ? "vertical-layout" : "horizontal-layout"} ${settings.motion ? "" : "motion-off"} ${settings.theme === "Paper" ? "light" : ""} ${resizing ? "resizing" : ""}`}
       style={styleVars(settings) as CSSProperties}
       onClick={(e) => {

@@ -514,7 +514,9 @@ class BrowserService {
     if (!device) { view.setBounds(this.bounds); }
     else {
       const scale = this.fitScale(device);
-      if (tab.appliedScale !== scale) this.applyEmulation(tab);
+      // Only re-emulate once the tab is past its first navigation; before that applyEmulation()
+      // queues the change itself, and sync() runs on every renderer frame.
+      if (tab.appliedScale !== scale && tab.emulationReady) this.applyEmulation(tab);
       const width = Math.max(1, Math.round(device.width * scale));
       const height = Math.min(this.bounds.height, Math.max(1, Math.round(device.height * scale)));
       view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - width) / 2), y: this.bounds.y + Math.max(0, Math.floor((this.bounds.height - height) / 2)), width, height });
