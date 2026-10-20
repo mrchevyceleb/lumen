@@ -189,8 +189,10 @@ export default function App() {
   const [resizing, setResizing] = useState(false);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const resizeTargetRef = useRef<HTMLElement | null>(null);
-  const explorerAutoHid = useRef(false);
   const explorerPinned = useRef(false);
+  // Responsive hiding is a view concern, not a preference: it must never be written to disk or it
+  // comes back after a restart with the user's explorer silently turned off.
+  const [explorerHidden, setExplorerHidden] = useState(false);
   const [mainElement, setMainElement] = useState<HTMLElement | null>(null);
   const [mainHeight, setMainHeight] = useState(() => Math.max(120, window.innerHeight - 52));
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
@@ -219,7 +221,7 @@ export default function App() {
   useEffect(() => {
     if (terminalHeight > maxTerminalHeight) setTerminalHeight(maxTerminalHeight);
   }, [maxTerminalHeight, terminalHeight]);
-  const visibleExplorer = explorer;
+  const visibleExplorer = explorer && !explorerHidden;
   const visibleSidebar = sidebar;
   const panelWidthsRef = useRef({ sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen });
   panelWidthsRef.current = { sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen };
@@ -268,13 +270,13 @@ export default function App() {
   useEffect(() => {
     if (!visibleExplorer || explorerPinned.current) return;
     const room = viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? sidebarWidth : 0) - (browserOpen ? browserWidth : 0);
-    if (room < 0) { explorerAutoHid.current = true; setExplorer(false); }
+    if (room < 0) setExplorerHidden(true);
   }, [browserOpen, viewportWidth, visibleExplorer, visibleSidebar, sidebarWidth, browserWidth]);
   useEffect(() => {
-    if (!explorerAutoHid.current) return;
+    if (!explorerHidden) return;
     if (browserOpen && viewportWidth < 1180) return;
-    explorerAutoHid.current = false; explorerPinned.current = false; setExplorer(true);
-  }, [browserOpen, viewportWidth]);
+    setExplorerHidden(false); explorerPinned.current = false;
+  }, [browserOpen, viewportWidth, explorerHidden]);
   const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
   useLayoutEffect(() => {
     const element = contextBar.current;
@@ -287,7 +289,10 @@ export default function App() {
     try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browserWidth, split, terminalHeight })); } catch {}
   }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserWidth, split, terminalHeight]);
   const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
-  const hideExplorer = () => { explorerAutoHid.current = false; setExplorer(false); explorerToggle.current?.focus(); };
+  const hideExplorer = () => { explorerPinned.current = false; setExplorer(false); explorerToggle.current?.focus(); };
+  // Every manual open goes through here so the responsive auto-hide can never swallow it.
+  const showExplorer = () => { explorerPinned.current = true; setExplorer(true); setExplorerHidden(false); };
+  const toggleExplorer = (next: boolean) => { if (next) showExplorer(); else hideExplorer(); };
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocKey, setActiveDocKey] = useState("");
   const [editorExpanded, setEditorExpanded] = useState(false);
@@ -1491,7 +1496,7 @@ export default function App() {
         <span className="titlebar-caption">a little more room to think</span>
         <div className="titlebar-right">
           <button className={`icon-button ${browserOpen ? "active" : ""}`} aria-label={browserOpen ? "Hide browser" : "Show browser"} title="Browser (Ctrl Shift B)" aria-expanded={browserOpen} aria-controls="browser-panel" onClick={() => setBrowserOpen(!browserOpen)}><Globe size={17} /></button>
-          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); const next = !(visibleExplorer && panel === "files"); explorerPinned.current = next; explorerAutoHid.current = false; setExplorer(next); }}>
+          <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); toggleExplorer(!(visibleExplorer && panel === "files")); }}>
             {visibleExplorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
           </button>
           <button className="command-hint" onClick={() => setDialog("palette")}>
@@ -1533,7 +1538,7 @@ export default function App() {
               aria-controls="workspace-panel"
               onClick={() => {
                 setPanel("git");
-                setExplorer(!(visibleExplorer && panel === "git"));
+                toggleExplorer(!(visibleExplorer && panel === "git"));
               }}
             >
               <GitBranch size={21} />
@@ -2013,7 +2018,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setPanel("git");
-                  setExplorer(true);
+                  showExplorer();
                 }}
               >
                 {statusWorkspace.git.ahead} ↑ {statusWorkspace.git.behind} ↓

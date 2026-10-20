@@ -3,8 +3,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
+// Errors the caller caused carry a status so the local agent API answers 4xx, not a blanket 500.
+const bad = (message, status = 400) => Object.assign(new Error(message), { status });
+
 function browserURL(value) {
-  if (typeof value !== "string" || value.length > 8192) throw new Error("Enter a web address.");
+  if (typeof value !== "string" || value.length > 8192) throw bad("Enter a web address.");
   const input = value.trim();
   if (!input || input === "about:blank") return "about:blank";
   const local = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(input);
@@ -12,9 +15,11 @@ function browserURL(value) {
   const bareHost = /^[^\s/?#]+(?:\.[^\s/?#]+)+(?::\d+)?(?:[/?#]|$)/i.test(input);
   if (!/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort && !bareHost)
     throw bad("Try a full address like localhost:3000, or a site like example.com.");
-  const url = new URL(/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort ? input : `${local ? "http" : "https"}://${input}`);
+  let url;
+  try { url = new URL(/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort ? input : `${local ? "http" : "https"}://${input}`); }
+  catch { throw bad("Try a full address like localhost:3000, or a site like example.com."); }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
-    throw new Error("Use an HTTP or HTTPS address without embedded credentials.");
+    throw bad("Use an HTTP or HTTPS address without embedded credentials.");
   return url.href;
 }
 function friendlyLoadError(description, url) {
@@ -32,8 +37,8 @@ function localOrigin(value) {
 }
 const MAX_TABS = 32;
 const CHAT_SCOPE_PREFIX = "chat:";
+
 // Errors the caller caused carry a status so the local agent API answers 4xx, not a blanket 500.
-const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 const validScope = (scope) => typeof scope === "string"
   && (scope === "" || (scope.startsWith(CHAT_SCOPE_PREFIX)
     && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(scope.slice(CHAT_SCOPE_PREFIX.length))));
@@ -524,12 +529,13 @@ class BrowserService {
   async beginCapture(id) {
     const { tab } = this.find(id);
     if (tab.url === "about:blank") throw new Error("Open a page before capturing it.");
+    const generation = tab.generation;
     const image = await this.capture(id);
     const size = image.getSize();
     if (!size.width || !size.height) throw new Error("The screenshot was empty. Reload the page and try again.");
     // Read the page text at the same moment as the pixels. Reading it later let an app that keeps
     // rendering (a live dashboard, a chat) send text describing a page the screenshot no longer showed.
-    const generation = tab.generation;
+    if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again once it finishes loading.");
     const page = await this.inspect(id).catch(() => null);
     if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again once it finishes loading.");
     const token = crypto.randomUUID();
@@ -547,7 +553,7 @@ class BrowserService {
       throw new Error("The page changed since that screenshot. Capture it again.");
     const size = capture.image.getSize();
     if (!size.width || !size.height) throw new Error("The screenshot was empty. Capture it again.");
-    return { tab, image: capture.image, size };
+    return { tab, image: capture.image, size, page: capture.page || null };
   }
   async composeMarkedImageFor(frozen, marks) {
     const clean = normalizeMarks(marks);
