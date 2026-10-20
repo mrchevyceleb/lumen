@@ -424,6 +424,11 @@ class BrowserService {
         const ready = () => this.markEmulationReady(tab, contents);
         contents.once("did-navigate", ready);
         contents.once("dom-ready", ready);
+        // Chromium drops a device override when the document is replaced, so every later
+        // navigation re-applies it before the page paints. Without this, Reload or following a
+        // link silently turned the phone view back into a full-size desktop page.
+        contents.on("did-navigate", () => { if (tab.emulationReady && !contents.isDestroyed()) this.applyEmulation(tab); });
+        contents.on("dom-ready", () => { if (tab.emulationReady && !contents.isDestroyed()) this.applyEmulation(tab); });
       }
       // Setting the UA before the initial request is safe and lets restored
       // phone tabs receive mobile HTML on their very first navigation.
@@ -774,7 +779,13 @@ class BrowserService {
     if (action === "navigate") return this.navigate(id, body.url);
     if (action === "select") return this.select(id);
     if (action === "close") return this.close(id);
-    if (action === "view") return this.setView(id, body.view);
+    if (action === "view") {
+      const requested = body.view;
+      if (requested && typeof requested === "object" && requested.mode === "mobile"
+        && !Object.hasOwn(DEVICE_PROFILES, requested.device))
+        throw bad(`Unknown phone size: ${String(requested.device).slice(0, 40)}. Choose iphone, pixel or ipad.`);
+      return this.setView(id, body.view);
+    }
     if (action === "inspect") return this.inspect(id);
     if (action === "screenshot") return { image: (await this.capture(id)).toDataURL() };
     if (action === "markup-begin") { const begun = await this.beginCapture(id); return { token: begun.token, image: begun.image }; }
@@ -787,7 +798,10 @@ class BrowserService {
     else if (action === "devtools") contents.openDevTools({ mode: "detach" });
     else if (action === "evaluate") {
       if (typeof body.script !== "string" || body.script.length > 100000) throw bad("Provide a script under 100,000 characters.");
-      return contents.executeJavaScript(body.script, true);
+      // A script that throws is a problem with the script, not a broken app, so say so with a
+      // 4xx instead of letting it surface as an internal 500.
+      try { return await contents.executeJavaScript(body.script, true); }
+      catch (e) { throw bad(`The page script failed: ${String((e && e.message) || e).slice(0, 300)}`, 422); }
     }
     return this.metadata(tab);
   }

@@ -11,6 +11,8 @@ const DEVICE_OPTIONS: { id: string; label: string; width: number; height: number
   { id: "ipad", label: "iPad 820×1180", width: 820, height: 1180 },
 ];
 const MARK_PALETTE = ["red", "orange", "blue", "green", "purple"];
+// Main keeps a markup capture alive for 15 minutes; a stashed set of pins past that cannot send.
+const MARKUP_TTL_MS = 15 * 60 * 1000;
 // While a screenshot is being marked, the page under the pins must stay the page that was
 // captured: swapping tabs, navigating, or reloading would make the frozen shot (and the
 // token bound to its generation) stale, so those actions wait until marking ends.
@@ -42,6 +44,9 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const markupLayerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Frozen screenshots and their pins, kept per chat so a switch never costs the user their marks.
+  // A capture token lives 15 minutes, so a stash older than that can no longer be sent.
+  const markupStash = useRef(new Map<string, { image: string; token: string; size: { width: number; height: number } | null; marks: BrowserMark[]; draft: string; at: number }>());
   const input = useRef<HTMLInputElement>(null);
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -100,13 +105,22 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const markupScopeRef = useRef(scope);
   useEffect(() => {
     if (markupScopeRef.current === scope) return;
+    const left = markupScopeRef.current;
     markupScopeRef.current = scope;
-    if (!markupMode) return;
-    // The frozen shot belongs to the chat it was taken in, so it cannot follow the user into a
-    // different chat. Say so instead of dropping it silently.
-    if (marks.length || markupImage) onError("Marking closed: that screenshot belongs to the chat you left, so its pins were discarded.");
-    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); setConfirmDiscard(false); marksLock.current = false;
-  }, [scope, markupMode, marks.length, markupImage, onError]);
+    // Marks belong to the chat they were drawn in, so they never follow the pane into another
+    // chat. They are kept with that chat rather than thrown away: coming back brings the frozen
+    // screenshot and every pin back exactly as they were, until the capture token expires.
+    if (markupMode && (marks.length || markupImage)) {
+      markupStash.current.set(left, { image: markupImage, token: markupToken, size: markupSize, marks, draft: markDraft, at: Date.now() });
+    }
+    const kept = markupStash.current.get(scope);
+    const fresh = kept && Date.now() - kept.at < MARKUP_TTL_MS ? kept : undefined;
+    if (kept && !fresh) markupStash.current.delete(scope);
+    setMarkupMode(!!fresh); setMarkupImage(fresh?.image || ""); setMarkupToken(fresh?.token || "");
+    setMarkupSize(fresh?.size || null); setMarks(fresh?.marks || []); setMarkDraft(fresh?.draft || "");
+    setPendingNorm(null); setMarksSending(false); setConfirmDiscard(false); marksLock.current = false;
+    if (fresh?.marks.length) onError(`Your ${fresh.marks.length} mark${fresh.marks.length === 1 ? " is" : "s are"} still on this chat's screenshot. Carry on when you are ready.`);
+  }, [scope, markupMode, marks, markupImage, markupToken, markupSize, markDraft, onError]);
   useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
   // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
   // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
@@ -232,6 +246,12 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   };
   useLayoutEffect(() => { clampPinLabels(); }, [marks, pendingNorm, stageBox, markupMode]);
   useEffect(() => { setConfirmDiscard(false); }, [marks.length]);
+  // An armed "Discard N pins?" must not sit there waiting for a stray click minutes later.
+  useEffect(() => {
+    if (!confirmDiscard) return;
+    const timer = setTimeout(() => setConfirmDiscard(false), 4000);
+    return () => clearTimeout(timer);
+  }, [confirmDiscard]);
   const navigate = async (url: string) => {
     if (current) await action({ action: "navigate", id: current.id, url });
     else await action({ action: "open", chatId, workspace, url });
@@ -288,7 +308,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         <IconButton label="Back" disabled={!current?.canGoBack} onClick={() => void action({ action: "back", id: current?.id })}><ArrowLeft size={15} /></IconButton>
         <IconButton label="Forward" disabled={!current?.canGoForward} onClick={() => void action({ action: "forward", id: current?.id })}><ArrowRight size={15} /></IconButton>
         <IconButton label={current?.loading ? "Stop loading" : "Reload page"} disabled={!current || current.url === "about:blank"} onClick={() => void action({ action: current?.loading ? "stop" : "reload", id: current?.id })}>{current?.loading ? <X size={15} /> : <RefreshCw size={15} />}</IconButton>
-        <input ref={input} aria-label="Browser address" placeholder="localhost:3000 or any website" value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} autoComplete="off" />
+        <input ref={input} aria-label="Browser address" placeholder={state.scope === scope ? "localhost:3000 or any website" : ""} value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} autoComplete="off" />
         <button type="submit" className="icon-button" aria-label="Go to address"><ArrowRight size={15} /></button>
       </form>
       <div className="browser-tools">
