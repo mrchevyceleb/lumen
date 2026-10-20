@@ -83,27 +83,31 @@ const normalizeMarks = (marks) => {
 // window (Electron has no image-compositing API). Marks stay normalized.
 const buildMarkupHTML = (imageDataURL, marks, width, height) => {
   const scale = Math.max(1, Math.min(2, Math.min(width, height) / 700));
-  const radius = 15 * scale, font = 12 * scale;
+  const radius = 15 * scale, font = 12 * scale, gap = 7 * scale;
   const pins = marks.map((mark, index) => {
-    // Clamp by the dot radius so the circle stays fully inside the capture; the label itself is
-    // allowed to sit close to the edge, and flips to the other side when there is no room right.
-    const x = Math.min(Math.max(mark.x, radius / width), 1 - radius / width);
-    const y = Math.min(Math.max(mark.y, radius / height), 1 - radius / height);
     const label = `#${index + 1} ${mark.label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`;
-    const flip = x * width > width - 190 * scale;
-    const high = y * height > height - font * 2, low = y * height < font * 2;
-    return `<div class="pin${flip ? " flip" : ""}${high ? " high" : ""}${low ? " low" : ""}" style="left:${x * 100}%;top:${y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
+    return `<div class="pin" data-x="${mark.x}" data-y="${mark.y}" style="left:${mark.x * 100}%;top:${mark.y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
   }).join("");
-  const gap = 7 * scale;
+  // The dot stays exactly on the mark. The label is placed in measured pixels by this script:
+  // beside the dot when it fits, flipped when it does not, and always fully inside the image,
+  // so no label is clipped or wrapped one letter per line.
+  const layout = `window.__layoutPins=()=>{const W=${width},H=${height},GAP=${gap};for(const pin of document.querySelectorAll('.pin')){` +
+    `const dot=pin.querySelector('.dot'),em=pin.querySelector('em');` +
+    `const x=parseFloat(pin.dataset.x)*W,y=parseFloat(pin.dataset.y)*H,r=dot.offsetWidth/2||${radius};` +
+    `let w=em.offsetWidth,h=em.offsetHeight;if(w>W-8){em.style.width=(W-8)+'px';w=em.offsetWidth;h=em.offsetHeight;}` +
+    `let left=x+r+GAP;if(left+w>W-4)left=x-r-GAP-w;` +
+    `if(left<4)left=Math.min(Math.max(4,W-4-w),Math.max(4,x-w/2));` +
+    `const top=Math.min(Math.max(4,y-h/2),Math.max(4,H-4-h));` +
+    `em.style.left=Math.round(left)+'px';em.style.top=Math.round(top)+'px';}};window.__layoutPins();`;
   return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
     `.pin{position:absolute;width:0;height:0;pointer-events:none}` +
     `.dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center}` +
-    `.pin em{position:absolute;left:calc(var(--r) + ${gap}px);top:0;transform:translateY(-50%);width:max-content;font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95);max-width:290px}` +
-    `.pin.flip em{left:auto;right:calc(var(--r) + ${gap}px);text-align:right}` +
-    // Anchor the label box inside the image at the edges so it is never clipped.
-    `.pin.high em{top:auto;bottom:${Math.round(radius + gap)}px;transform:none}.pin.low em{top:${Math.round(radius + gap)}px;transform:none}` +
-    `</style><img src="${imageDataURL}">${pins}`;
+    `.pin em{position:absolute;left:0;top:0;width:max-content;max-width:290px;font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95)}` +
+    `</style><img src="${imageDataURL}">${pins}<script>${layout}<\/script>`;
 };
+// Actions that need an existing tab. Anything outside this set is a client error.
+const TAB_ACTIONS = new Set(["navigate", "select", "close", "view", "inspect", "screenshot", "markup-begin",
+  "screenshot-markup", "back", "forward", "reload", "stop", "devtools", "evaluate"]);
 const MARK_TOKEN_TTL_MS = 15 * 60 * 1000;
 class BrowserService {
   constructor(window, directory, knownChat = null) {
@@ -244,10 +248,9 @@ class BrowserService {
     const scope = chatId ? chatScope(chatId) : "";
     if (chatId && this.knownChats.size < 2000) this.knownChats.add(chatId.toLowerCase());
     const pending = this.pendingLayout;
-    // The pane geometry is the same for every chat, so a chat that already has a page can be
-    // painted in the same turn as the outgoing chat is retracted instead of leaving the pane
-    // blank until the renderer re-measures it.
-    const wasVisible = this.visible, bounds = this.bounds;
+    // Retract the outgoing page now. The new chat's own page is attached by the layout the
+    // renderer sends in the same commit that paints it, never before, so one chat's page can
+    // never sit over the other chat's screen.
     this.layout(null);
     if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
     this.adoptLegacy(scope, workspace);
@@ -258,7 +261,6 @@ class BrowserService {
     // The renderer measured this chat's pane while the switch was still in flight; use it instead
     // of waiting for the next distinct measurement, which may never come.
     if (pending && pending.scope === scope && pending.id === this.group().activeId) this.layout(pending);
-    else if (wasVisible && bounds) { this.bounds = bounds; this.visible = true; this.sync(); }
     return this.state();
   }
   discard(chatId) {
@@ -398,14 +400,12 @@ class BrowserService {
       tab.pendingEmulationView = tab.view;
       if (!tab.emulationNavigationHooked) {
         tab.emulationNavigationHooked = true;
-        contents.once("did-navigate", () => {
-          tab.emulationReady = true;
-          if (contents.isDestroyed()) return;
-          const pendingView = tab.pendingEmulationView;
-          tab.pendingEmulationView = undefined;
-          if (pendingView && !sameView(pendingView, tab.view)) tab.view = pendingView;
-          this.applyEmulation(tab);
-        });
+        // A restored tab comes back through navigationHistory.restore, which does not always
+        // fire did-navigate, so readiness also fires when the document is ready and when the
+        // load/restore promise settles. Whichever lands first wins.
+        const ready = () => this.markEmulationReady(tab, contents);
+        contents.once("did-navigate", ready);
+        contents.once("dom-ready", ready);
       }
       // Setting the UA before the initial request is safe and lets restored
       // phone tabs receive mobile HTML on their very first navigation.
@@ -431,12 +431,23 @@ class BrowserService {
       tab.appliedScale = scale;
     } catch { try { contents.disableDeviceEmulation(); } catch { /* Keep desktop rendering. */ } }
   }
+  markEmulationReady(tab, contents) {
+    if (tab.emulationReady || contents.isDestroyed()) return;
+    tab.emulationReady = true;
+    const pendingView = tab.pendingEmulationView;
+    tab.pendingEmulationView = undefined;
+    if (pendingView && !sameView(pendingView, tab.view)) tab.view = pendingView;
+    this.applyEmulation(tab);
+  }
   load(tab, url, history = null) {
     tab.url = url; tab.pendingURL = url; tab.error = ""; tab.console = [];
     const generation = tab.generation = (tab.generation || 0) + 1, contents = tab.nativeView.webContents;
     tab.ready = history?.entries?.length > 1
       ? Promise.resolve(contents.navigationHistory.restore({ entries: history.entries, index: history.index }))
       : contents.loadURL(url);
+    // The document is committed once the load (or history restore) settles, which is the
+    // first moment device emulation is safe on Electron 44.
+    tab.ready.then(() => this.markEmulationReady(tab, contents), () => {});
     tab.ready.catch((error) => {
       if (error.code === "ERR_ABORTED" || contents.isDestroyed() || tab.generation !== generation) return;
       tab.error = error.message; this.sync(); this.emit();
@@ -491,6 +502,13 @@ class BrowserService {
   detach() {
     if (this.attached && !this.window.isDestroyed()) this.attached.setVisible(false);
     this.attached = null;
+  }
+  // Called synchronously from the renderer while it commits a chat switch, so the outgoing
+  // page is gone before the new chat paints. The async layout(null) can land a few frames
+  // late, which is exactly what showed the other chat's page over the new one.
+  hideNow() {
+    this.visible = false; this.bounds = null;
+    this.detach();
   }
   layout(value) {
     if (value && (value.scope !== this.scope || value.id !== this.group().activeId)) {
@@ -684,6 +702,9 @@ class BrowserService {
       this.adoptLegacy(scope, typeof body.workspace === "string" ? body.workspace : "");
       return this.create(scope, body.url ?? "about:blank");
     }
+    // Validate the action before looking the tab up, so an unknown action names itself instead
+    // of borrowing the misleading "That browser tab is closed" message.
+    if (!TAB_ACTIONS.has(action)) throw bad(action ? `Unsupported browser action: ${action}.` : "Choose a browser action.");
     if (action === "navigate") return this.navigate(id, body.url);
     if (action === "select") return this.select(id);
     if (action === "close") return this.close(id);
@@ -701,7 +722,7 @@ class BrowserService {
     else if (action === "evaluate") {
       if (typeof body.script !== "string" || body.script.length > 100000) throw bad("Provide a script under 100,000 characters.");
       return contents.executeJavaScript(body.script, true);
-    } else throw bad("Unsupported browser action.");
+    }
     return this.metadata(tab);
   }
   dispose() {

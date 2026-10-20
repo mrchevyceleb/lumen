@@ -309,6 +309,14 @@ startup.then(async (start) => {
     });
   });
   handle("browser:layout", (bounds) => browser.layout(bounds));
+  // Synchronous hide: the renderer calls this while committing a chat or tab switch so
+  // the previous page is gone before the next frame paints, not a few frames later.
+  ipcMain.on("browser:hide-now", (event) => {
+    const trusted = event.sender === window?.webContents && event.senderFrame === window?.webContents.mainFrame
+      && (event.senderFrame?.url === fileURL || (devURL && event.senderFrame?.url.startsWith(`${devURL}/`)));
+    if (trusted) browser.hideNow();
+    event.returnValue = trusted;
+  });
   handle("browser:action", (body) => {
     if (body?.action === "evaluate") throw new Error("Page scripts use the authenticated local agent API.");
     return browser.control(body);

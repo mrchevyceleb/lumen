@@ -36,6 +36,8 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const host = useRef<HTMLDivElement>(null);
   const markupLayerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -103,9 +105,13 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     if (markupLayerRef.current) observer.observe(markupLayerRef.current);
     return () => observer.disconnect();
   }, [markupMode, markupSize]);
-  // The switch itself retracts the outgoing page (App announces the new chat to the main process
-  // before this pane mounts, which paints this chat's own page in the same turn), so nothing here
-  // blanks the pane; only a closed or marking pane detaches its own page.
+  // Hide the composited page synchronously, before a different chat paints. The async
+  // layout(null) below can land a few frames late, and that gap is exactly what showed
+  // the previous chat's page over the new one.
+  useLayoutEffect(() => {
+    try { window.lumen.hideBrowserNow(); } catch { /* app is closing */ }
+    void api("browser:layout", null).catch(() => {});
+  }, [scope]);
   useLayoutEffect(() => {
     if (!open || markupMode) { void api("browser:layout", null).catch(onError); return; }
     let frame = 0, previous = "", failed = false;
@@ -153,12 +159,34 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     catch (e: any) { setError(e.message); }
     finally { marksLock.current = false; setMarksSending(false); }
   };
-  const cancelMarkup = () => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setExitArmed(false); };
-  // Leaving markup throws away every pin, so a click with pins on the shot arms a confirm first
-  // instead of silently discarding the work.
-  const [exitArmed, setExitArmed] = useState(false);
-  useEffect(() => { setExitArmed(false); }, [marks.length]);
-  const closeMarkup = () => { if (marks.length > 0 && !exitArmed) { setExitArmed(true); return; } cancelMarkup(); };
+  // Leaving markup throws the pins away, so ask first when there is work to lose.
+  const cancelMarkup = () => {
+    if (marks.length && !confirmDiscard) { setConfirmDiscard(true); setError(""); return; }
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setConfirmDiscard(false);
+  };
+  // Place every label in measured pixels: beside its dot when there is room, flipped to the
+  // other side near the right edge, and kept fully inside the picture top and bottom.
+  const clampPinLabels = () => {
+    const box = stageRef.current; if (!box) return;
+    const width = box.clientWidth, height = box.clientHeight;
+    if (!width || !height) return;
+    box.querySelectorAll<HTMLElement>(".browser-mark-pin").forEach((pin) => {
+      const label = pin.querySelector("em"), dot = pin.querySelector("span");
+      if (!label || !dot) return;
+      const x = Number(pin.dataset.x || 0) * width, y = Number(pin.dataset.y || 0) * height;
+      const radius = dot.offsetWidth / 2 || 13, gap = 6;
+      label.style.transform = "none";
+      let w = label.offsetWidth, h = label.offsetHeight;
+      if (w > width - 8) { label.style.width = `${width - 8}px`; w = label.offsetWidth; h = label.offsetHeight; }
+      let left = x + radius + gap;
+      if (left + w > width - 4) left = x - radius - gap - w;
+      if (left < 4) left = Math.min(Math.max(4, width - 4 - w), Math.max(4, x - w / 2));
+      const top = Math.min(Math.max(4, y - h / 2), Math.max(4, height - 4 - h));
+      label.style.left = `${Math.round(left)}px`; label.style.top = `${Math.round(top)}px`;
+    });
+  };
+  useLayoutEffect(() => { clampPinLabels(); }, [marks, pendingNorm, stageBox, markupMode]);
+  useEffect(() => { setConfirmDiscard(false); }, [marks.length]);
   const navigate = async (url: string) => {
     if (current) await action({ action: "navigate", id: current.id, url });
     else await action({ action: "open", chatId, workspace, url });
@@ -248,13 +276,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         }}>Add</button>
         {marks.length > 0 && <button onClick={() => setMarks((old) => old.slice(0, -1))}>Remove last</button>}
         {marks.length > 0 && <button disabled={marksSending} onClick={() => void sendMarkup()}><Send size={12} />{marksSending ? "Sending…" : `Send ${marks.length} pin${marks.length === 1 ? "" : "s"} to chat`}</button>}
-        <button disabled={marksSending} className={exitArmed ? "armed" : ""} onClick={closeMarkup}>
-          <X size={12} />{exitArmed ? `Discard ${marks.length} pin${marks.length === 1 ? "" : "s"}?` : "Done marking"}
-        </button>
+        <button disabled={marksSending} onClick={cancelMarkup}>{confirmDiscard ? `Discard ${marks.length} pin${marks.length === 1 ? "" : "s"}?` : "Done marking"}</button>
       </div>}
       <div ref={host} className={mobile || markupMode ? "browser-viewport browser-viewport-device" : "browser-viewport"}>
         {markupMode && current ? <div className="browser-markup-layer" ref={markupLayerRef}>
-          <div className="browser-markup-stage" style={stageBox ? { width: stageBox.width, height: stageBox.height } : { visibility: "hidden" }}>
+          <div ref={stageRef} className="browser-markup-stage" style={stageBox ? { width: stageBox.width, height: stageBox.height } : { visibility: "hidden" }}>
             <img alt="Screenshot to mark up" src={markupImage} draggable={false}
               onClick={(e) => {
                 const box = e.currentTarget.getBoundingClientRect();
@@ -264,13 +290,10 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
                 setPendingNorm({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 });
                 setError("");
               }} />
-            {marks.map((mark, index) => {
-              const flip = mark.x > 0.55, high = mark.y > 0.92, low = mark.y < 0.08;
-              return <div className={`browser-mark-pin${flip ? " browser-mark-flip" : ""}${high ? " browser-mark-high" : ""}${low ? " browser-mark-low" : ""}`} key={index} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
-                <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
-              </div>;
-            })}
-            {pendingNorm && <div className={`browser-mark-pin browser-mark-pending${pendingNorm.x > 0.55 ? " browser-mark-flip" : ""}`} style={{ left: `${pendingNorm.x * 100}%`, top: `${pendingNorm.y * 100}%` }}>
+            {marks.map((mark, index) => <div className="browser-mark-pin" key={index} data-x={mark.x} data-y={mark.y} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
+              <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
+            </div>)}
+            {pendingNorm && <div className="browser-mark-pin browser-mark-pending" data-x={pendingNorm.x} data-y={pendingNorm.y} style={{ left: `${pendingNorm.x * 100}%`, top: `${pendingNorm.y * 100}%` }}>
               <span>?</span><em>New pin: type what it means, then Add</em>
             </div>}
           </div>
