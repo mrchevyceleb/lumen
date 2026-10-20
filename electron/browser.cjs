@@ -3,18 +3,25 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
+// Errors the caller caused carry a status so the local agent API answers 4xx, not a blanket 500.
+const bad = (message, status = 400) => Object.assign(new Error(message), { status });
+
 function browserURL(value) {
-  if (typeof value !== "string" || value.length > 8192) throw new Error("Enter a web address.");
+  if (typeof value !== "string" || value.length > 8192) throw bad("Enter a web address.");
   const input = value.trim();
   if (!input || input === "about:blank") return "about:blank";
   const local = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(input);
   const hostWithPort = /^(?:\[[\da-f:]+\]|[^/?#:\s]+):\d+(?:[/?#]|$)/i.test(input);
   const bareHost = /^[^\s/?#]+(?:\.[^\s/?#]+)+(?::\d+)?(?:[/?#]|$)/i.test(input);
   if (!/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort && !bareHost)
-    throw new Error("Try a full address like localhost:3000, or a site like example.com.");
-  const url = new URL(/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort ? input : `${local ? "http" : "https"}://${input}`);
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
-    throw new Error("Use an HTTP or HTTPS address without embedded credentials.");
+    throw bad("Try a full address like localhost:3000, or a site like example.com.");
+  let url;
+  try { url = new URL(/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort ? input : `${local ? "http" : "https"}://${input}`); }
+  catch { throw bad("Try a full address like localhost:3000, or a site like example.com."); }
+  if (url.username || url.password)
+    throw bad("Leave the username and password out of the address. Sign in on the page itself.");
+  if (!["http:", "https:"].includes(url.protocol))
+    throw bad("That is not a web page. Try a site like example.com, or a local address like localhost:3000.");
   return url.href;
 }
 function friendlyLoadError(description, url) {
@@ -32,12 +39,14 @@ function localOrigin(value) {
 }
 const MAX_TABS = 32;
 const CHAT_SCOPE_PREFIX = "chat:";
+
+// Errors the caller caused carry a status so the local agent API answers 4xx, not a blanket 500.
 const validScope = (scope) => typeof scope === "string"
   && (scope === "" || (scope.startsWith(CHAT_SCOPE_PREFIX)
     && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(scope.slice(CHAT_SCOPE_PREFIX.length))));
 const chatScope = (chatId) => {
   if (typeof chatId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(chatId))
-    throw new Error("Choose a chat before using its browser.");
+    throw bad("Choose a chat before using its browser.");
   return CHAT_SCOPE_PREFIX + chatId.toLowerCase();
 };
 // Built-in phone widths (CSS px at devicePixelRatio 3, Chrome mobile user agents).
@@ -60,14 +69,14 @@ const MARK_COLORS = { red: "#ef4444", orange: "#f59e0b", blue: "#3b82f6", green:
 // screenshot) so a pin means the same thing at any capture resolution. The
 // main process maps them onto the exact bitmap it composes.
 const normalizeMarks = (marks) => {
-  if (!Array.isArray(marks) || marks.length > MAX_MARKS) throw new Error(`Mark up to ${MAX_MARKS} things on a screenshot.`);
+  if (!Array.isArray(marks) || marks.length > MAX_MARKS) throw bad(`Mark up to ${MAX_MARKS} things on a screenshot.`);
   return marks.map((mark) => {
-    if (!mark || typeof mark !== "object" || Array.isArray(mark)) throw new Error("Invalid screenshot markup.");
+    if (!mark || typeof mark !== "object" || Array.isArray(mark)) throw bad("Invalid screenshot markup.");
     const label = typeof mark.label === "string" ? mark.label.trim().slice(0, 80) : "";
-    if (!label) throw new Error("Every markup pin needs a short label.");
+    if (!label) throw bad("Every markup pin needs a short label.");
     const x = Number(mark.x), y = Number(mark.y);
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1)
-      throw new Error("Markup pins must sit inside the screenshot.");
+      throw bad("Markup pins must sit inside the screenshot.");
     const color = typeof mark.color === "string" && MARK_COLORS[mark.color] ? mark.color : "red";
     return { label, x, y, color };
   });
@@ -76,16 +85,33 @@ const normalizeMarks = (marks) => {
 // window (Electron has no image-compositing API). Marks stay normalized.
 const buildMarkupHTML = (imageDataURL, marks, width, height) => {
   const scale = Math.max(1, Math.min(2, Math.min(width, height) / 700));
-  const radius = 15 * scale, font = 12 * scale;
+  const radius = 15 * scale, font = 12 * scale, gap = 7 * scale;
   const pins = marks.map((mark, index) => {
-    const x = Math.min(Math.max(mark.x, radius / width), 1 - radius / width);
-    const y = Math.min(Math.max(mark.y, radius / height), 1 - radius / height);
     const label = `#${index + 1} ${mark.label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`;
-    const flip = x * width > width - 180 * scale;
-    return `<div class="pin" style="left:${x * 100}%;top:${y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px;flex-direction:${flip ? "row-reverse" : "row"};text-align:${flip ? "right" : "left"}"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
+    return `<div class="pin" data-x="${mark.x}" data-y="${mark.y}" style="left:${mark.x * 100}%;top:${mark.y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
   }).join("");
-  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}.pin{position:absolute;transform:translate(-50%,-50%);display:flex;align-items:center;gap:${7 * scale}px;pointer-events:none}.dot{width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}.pin em{font-style:normal;font-size:var(--font);font-weight:600;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95);max-width:280px}</style><img src="${imageDataURL}">${pins}`;
+  // The dot stays exactly on the mark. The label is placed in measured pixels by this script:
+  // beside the dot when it fits, flipped when it does not, and always fully inside the image,
+  // so no label is clipped or wrapped one letter per line.
+  const layout = `window.__layoutPins=()=>{const W=${width},H=${height},GAP=${gap};for(const pin of document.querySelectorAll('.pin')){` +
+    `const dot=pin.querySelector('.dot'),em=pin.querySelector('em');` +
+    `const x=parseFloat(pin.dataset.x)*W,y=parseFloat(pin.dataset.y)*H,r=dot.offsetWidth/2||${radius};` +
+    `let w=em.offsetWidth,h=em.offsetHeight;if(w>W-8){em.style.width=(W-8)+'px';w=em.offsetWidth;h=em.offsetHeight;}` +
+    `let left=x+r+GAP;if(left+w>W-4)left=x-r-GAP-w;` +
+    `if(left<4)left=Math.min(Math.max(4,W-4-w),Math.max(4,x-w/2));` +
+    `const top=Math.min(Math.max(4,y-h/2),Math.max(4,H-4-h));` +
+    `em.style.left=Math.round(left-x)+'px';em.style.top=Math.round(top-y)+'px';` +
+    `const dx=Math.min(Math.max(x,r+2),W-r-2),dy=Math.min(Math.max(y,r+2),H-r-2);` +
+    `dot.style.left=Math.round(dx-x)+'px';dot.style.top=Math.round(dy-y)+'px';}};window.__layoutPins();`;
+  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
+    `.pin{position:absolute;width:0;height:0;pointer-events:none}` +
+    `.dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center}` +
+    `.pin em{position:absolute;left:0;top:0;width:max-content;max-width:290px;font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95)}` +
+    `</style><img src="${imageDataURL}">${pins}<script>${layout}<\/script>`;
 };
+// Actions that need an existing tab. Anything outside this set is a client error.
+const TAB_ACTIONS = new Set(["navigate", "select", "close", "view", "inspect", "screenshot", "markup-begin",
+  "screenshot-markup", "back", "forward", "reload", "stop", "devtools", "evaluate"]);
 const MARK_TOKEN_TTL_MS = 15 * 60 * 1000;
 class BrowserService {
   constructor(window, directory, knownChat = null) {
@@ -98,7 +124,11 @@ class BrowserService {
     this.scope = "";
     this.visible = false;
     this.bounds = null;
+    this.pendingLayout = null;
     this.attached = null;
+    // Chat ids the app has actually opened a chat for. The local agent API may only target these,
+    // so a client cannot invent a chat that does not exist in Lumen.
+    this.knownChats = new Set();
     this.popups = new Set();
     this.profile = session.fromPartition("persist:lumen-browser");
     const networks = new Set(["local-network", "local-network-access", "loopback-network"]);
@@ -122,7 +152,7 @@ class BrowserService {
         if (legacy && typeof group.workspace !== "string") continue;
         const tabs = group.tabs.slice(0, Math.min(24, remaining)).flatMap((tab) => {
           try {
-            return [{ id: crypto.randomUUID(), url: browserURL(tab.url), title: String(tab.title || "New tab").slice(0, 200), error: "", console: [], view: normalizeView(tab.view), history: this.cleanHistory(tab.history) }];
+            return [{ id: crypto.randomUUID(), url: browserURL(tab.url), title: String(tab.title || "New tab").slice(0, 200), error: "", console: [], view: normalizeView(tab.view), history: this.cleanHistory(tab.history), restored: true }];
           } catch { return []; }
         });
         remaining -= tabs.length;
@@ -164,10 +194,10 @@ class BrowserService {
     } catch { return tab.history || null; }
   }
   group(scope = this.scope) {
-    if (!validScope(scope) || scope.length > 8192) throw new Error("Invalid browser scope.");
+    if (!validScope(scope) || scope.length > 8192) throw bad("Invalid browser scope.");
     if (!this.groups.has(scope)) {
       for (const [key, group] of this.groups) if (key !== this.scope && !group.tabs.length) this.groups.delete(key);
-      if (this.groups.size >= 512) throw new Error("The browser has reached its saved-chat limit.");
+      if (this.groups.size >= 512) throw bad("The browser has reached its saved-chat limit.", 409);
       this.groups.set(scope, { tabs: [], activeId: "" });
     }
     return this.groups.get(scope);
@@ -220,12 +250,21 @@ class BrowserService {
   }
   activate(chatId, workspace = "") {
     const scope = chatId ? chatScope(chatId) : "";
-    this.layout(null);
-    if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
+    if (chatId && this.knownChats.size < 2000) this.knownChats.add(chatId.toLowerCase());
+    const pending = this.pendingLayout, switching = scope !== this.scope;
+    // Retract the outgoing page only when the chat really changes. Re-announcing the chat that is
+    // already active (clicking its own row, or a snapshot on the active chat) must not blank a page
+    // that is already correct, because nothing re-measures until something else moves.
+    if (switching) this.layout(null);
+    if (switching && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
     this.adoptLegacy(scope, workspace);
     this.scope = scope;
     this.group();
+    this.pendingLayout = null;
     this.emit();
+    // The renderer measured this chat's pane while the switch was still in flight; use it instead
+    // of waiting for the next distinct measurement, which may never come.
+    if (pending && pending.scope === scope && pending.id === this.group().activeId) this.layout(pending);
     return this.state();
   }
   discard(chatId) {
@@ -245,7 +284,7 @@ class BrowserService {
       const tab = group.tabs.find((tab) => tab.id === id);
       if (tab) return { scope, group, tab };
     }
-    throw new Error("This browser tab is closed.");
+    throw bad("This browser tab is closed.", 404);
   }
   guard(contents) {
     const prevent = (event, url) => { if (!webURL(url)) event.preventDefault(); };
@@ -274,6 +313,11 @@ class BrowserService {
     // renders the right (mobile) page, not just the right-sized one.
     this.applyEmulation(tab);
     this.guard(contents);
+    // A click inside the native page never reaches the app's own document, so report the page
+    // taking focus and let the renderer close any menu that was open over it.
+    contents.on("focus", () => {
+      if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) this.window.webContents.send("browser:command", "page-focus");
+    });
     contents.setWindowOpenHandler(({ url }) => webURL(url) ? { action: "allow", overrideBrowserWindowOptions: {
       parent: this.window, width: 1000, height: 760, autoHideMenuBar: true, webPreferences: this.preferences,
     } } : { action: "deny" });
@@ -340,12 +384,28 @@ class BrowserService {
     tab.history = null;
     return view;
   }
+  // A phone profile is a fixed pixel box. If the pane is smaller than the device, emulating at
+  // scale 1 crops the bottom of the page and leaves the rest unreachable (the viewport believes it
+  // is 844 tall while only part of it is on screen), so scale the whole device down to fit instead.
+  fitScale(size) {
+    if (!size || !this.bounds?.width || !this.bounds?.height) return 1;
+    return Math.min(1, this.bounds.width / size.width, this.bounds.height / size.height);
+  }
   deviceSize(view) {
     const normalized = normalizeView(view);
     if (normalized.mode !== "mobile") return null;
     const profile = DEVICE_PROFILES[normalized.device];
     return normalized.orientation === "landscape"
       ? { width: profile.height, height: profile.width } : { width: profile.width, height: profile.height };
+  }
+  // Emulation is only honoured when it is applied against the view's real size, so the key
+  // folds in the fitted scale: a rotate, a device change, a restore or a pane resize all
+  // produce a new key and sync() re-applies it once the new bounds have landed.
+  emulationKey(tab) {
+    const size = this.deviceSize(tab.view);
+    if (!size) return "desktop";
+    const view = normalizeView(tab.view);
+    return `${view.device}:${view.orientation}:${Math.round(this.fitScale(size) * 1000)}`;
   }
   applyEmulation(tab) {
     if (!tab.nativeView || tab.nativeView.webContents.isDestroyed()) return;
@@ -358,14 +418,17 @@ class BrowserService {
       tab.pendingEmulationView = tab.view;
       if (!tab.emulationNavigationHooked) {
         tab.emulationNavigationHooked = true;
-        contents.once("did-navigate", () => {
-          tab.emulationReady = true;
-          if (contents.isDestroyed()) return;
-          const pendingView = tab.pendingEmulationView;
-          tab.pendingEmulationView = undefined;
-          if (pendingView && !sameView(pendingView, tab.view)) tab.view = pendingView;
-          this.applyEmulation(tab);
-        });
+        // A restored tab comes back through navigationHistory.restore, which does not always
+        // fire did-navigate, so readiness also fires when the document is ready and when the
+        // load/restore promise settles. Whichever lands first wins.
+        const ready = () => this.markEmulationReady(tab, contents);
+        contents.once("did-navigate", ready);
+        contents.once("dom-ready", ready);
+        // Chromium drops a device override when the document is replaced, so every later
+        // navigation re-applies it before the page paints. Without this, Reload or following a
+        // link silently turned the phone view back into a full-size desktop page.
+        contents.on("did-navigate", () => { if (tab.emulationReady && !contents.isDestroyed()) this.applyEmulation(tab); });
+        contents.on("dom-ready", () => { if (tab.emulationReady && !contents.isDestroyed()) this.applyEmulation(tab); });
       }
       // Setting the UA before the initial request is safe and lets restored
       // phone tabs receive mobile HTML on their very first navigation.
@@ -376,17 +439,41 @@ class BrowserService {
     }
 
     if (!size) {
+      tab.appliedScale = 1;
+      tab.emulationKey = "desktop";
       try { contents.disableDeviceEmulation(); } catch { /* Already desktop. */ }
       contents.setUserAgent(this.desktopUserAgent || contents.getUserAgent().replace(/\s(?:Electron|lumen-workspace|Lumen)\/\S+/g, ""));
       return;
     }
     const profile = DEVICE_PROFILES[normalizeView(tab.view).device];
+    // Record the attempt either way: a headless retry on every frame would be worse than a
+    // single failed override, and the next layout change or view switch tries again.
+    tab.emulationKey = this.emulationKey(tab);
     try {
       // No userAgent option on this Electron: set it on the contents itself.
       contents.setUserAgent(profile.userAgent);
+      const scale = this.fitScale(size);
       contents.enableDeviceEmulation({ screenPosition: "mobile", screenSize: size, viewPosition: { x: 0, y: 0 }, viewSize: size,
-        deviceScaleFactor: 3, scale: 1 });
+        deviceScaleFactor: 3, scale });
+      tab.appliedScale = scale;
     } catch { try { contents.disableDeviceEmulation(); } catch { /* Keep desktop rendering. */ } }
+  }
+  markEmulationReady(tab, contents) {
+    if (tab.emulationReady || contents.isDestroyed()) return;
+    tab.emulationReady = true;
+    const pendingView = tab.pendingEmulationView;
+    tab.pendingEmulationView = undefined;
+    if (pendingView && !sameView(pendingView, tab.view)) tab.view = pendingView;
+    this.applyEmulation(tab);
+    // Emulation applied after a restored document has already laid out is not honoured by the
+    // compositor (the live view switch reloads for the same reason), so a restored phone tab
+    // lays out once more. Readiness is one-shot, so this cannot loop, and a new tab never takes
+    // this branch because it only ever emulates before its first request.
+    if (tab.restored) {
+      tab.restored = false;
+      if (this.deviceSize(tab.view)) { contents.reload(); return; }
+    }
+    this.sync();
   }
   load(tab, url, history = null) {
     tab.url = url; tab.pendingURL = url; tab.error = ""; tab.console = [];
@@ -394,19 +481,22 @@ class BrowserService {
     tab.ready = history?.entries?.length > 1
       ? Promise.resolve(contents.navigationHistory.restore({ entries: history.entries, index: history.index }))
       : contents.loadURL(url);
+    // The document is committed once the load (or history restore) settles, which is the
+    // first moment device emulation is safe on Electron 44.
+    tab.ready.then(() => this.markEmulationReady(tab, contents), () => {});
     tab.ready.catch((error) => {
       if (error.code === "ERR_ABORTED" || contents.isDestroyed() || tab.generation !== generation) return;
       tab.error = error.message; this.sync(); this.emit();
     });
   }
   create(scope = this.scope, url = "about:blank") {
-    if (!validScope(scope)) throw new Error("Invalid browser scope.");
+    if (!validScope(scope)) throw bad("Invalid browser scope.");
     if (this.knownChat && scope && !this.knownChat(scope.slice(CHAT_SCOPE_PREFIX.length)))
-      throw new Error("That chat is closed, so its browser cannot open new tabs.");
+      throw bad("That chat is closed, so its browser cannot open new tabs.", 404);
     if ([...this.groups.values(), ...this.legacy.values()].reduce((sum, group) => sum + group.tabs.length, 0) >= MAX_TABS)
-      throw new Error(`Close a browser tab before opening another (${MAX_TABS} across all chats).`);
+      throw bad(`Close a browser tab before opening another (${MAX_TABS} across all chats).`);
     const normalized = browserURL(url), group = this.group(scope);
-    if (group.tabs.length >= 24) throw new Error("Close a browser tab before opening another (24 per chat).");
+    if (group.tabs.length >= 24) throw bad("Close a browser tab before opening another (24 per chat).");
     const tab = { id: crypto.randomUUID(), url: normalized, title: "New tab", error: "", console: [], view: { mode: "desktop" } };
     group.tabs.push(tab); group.activeId = tab.id;
     if (normalized !== "about:blank") this.ensure(tab);
@@ -427,7 +517,11 @@ class BrowserService {
     if (sameView(tab.view, next)) return this.state();
     tab.view = next;
     this.ensure(tab);
-    this.applyEmulation(tab);
+    // Let sync() apply the emulation once the view has its final size for this view; applying
+    // it against the previous bounds is dropped and left the phone view rendering unemulated
+    // until the next manual resize. Before the first navigation only the UA matters.
+    tab.emulationKey = null;
+    if (!tab.emulationReady) this.applyEmulation(tab);
     if (tab.url !== "about:blank") {
       const contents = tab.nativeView.webContents;
       this.load(tab, tab.url);
@@ -449,8 +543,45 @@ class BrowserService {
     if (this.attached && !this.window.isDestroyed()) this.attached.setVisible(false);
     this.attached = null;
   }
+  // Called synchronously from the renderer while it commits a chat switch, so the outgoing
+  // page is gone before the new chat paints. The async layout(null) can land a few frames
+  // late, which is exactly what showed the other chat's page over the new one.
+  hideNow() {
+    this.visible = false; this.bounds = null;
+    this.detach();
+  }
+  // The chat switch runs synchronously from the renderer's layout effect, so the outgoing page is
+  // retracted AND the incoming chat's own page is put on screen in the same turn. Without the
+  // second half the pane sat blank for the round trip it takes the renderer to re-measure.
+  switchNow(chatId, workspace = "", box = null, paint = false) {
+    const scope = chatId ? chatScope(chatId) : "";
+    const rect = box && [box.x, box.y, box.width, box.height].every(Number.isFinite) ? box : null;
+    this.visible = false;
+    this.detach();
+    if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
+    this.adoptLegacy(scope, typeof workspace === "string" ? workspace : "");
+    this.scope = scope;
+    this.group();
+    this.pendingLayout = null;
+    if (paint && rect) {
+      const zoom = this.window.webContents.getZoomFactor(), [width, height] = this.window.getContentSize();
+      const x = Math.max(0, Math.min(width, Math.round(rect.x * zoom))), y = Math.max(0, Math.min(height, Math.round(rect.y * zoom)));
+      this.bounds = { x, y, width: Math.max(0, Math.min(width - x, Math.round(rect.width * zoom))), height: Math.max(0, Math.min(height - y, Math.round(rect.height * zoom))) };
+      this.visible = true;
+      this.sync();
+    }
+    this.emit();
+    return this.state();
+  }
   layout(value) {
-    if (value && (value.scope !== this.scope || value.id !== this.group().activeId)) return;
+    if (value && (value.scope !== this.scope || value.id !== this.group().activeId)) {
+      // A layout can arrive one round-trip before the chat switch lands here. Dropping it left the
+      // new chat's pane blank until something else moved, so keep the intent and apply it when that
+      // scope activates. Either way the previous chat's page must stop being painted right now.
+      if (value.scope !== this.scope) { this.pendingLayout = value; this.visible = false; this.detach(); }
+      return;
+    }
+    this.pendingLayout = null;
     this.visible = !!value;
     if (value) {
       if (![value.x, value.y, value.width, value.height].every(Number.isFinite)) throw new Error("Invalid browser bounds.");
@@ -468,43 +599,55 @@ class BrowserService {
     if (this.attached !== view) {
       this.detach(); this.window.contentView.removeChildView(view); this.window.contentView.addChildView(view); this.attached = view;
     }
-    // Mobile view: the page is centered at device size inside the panel with a
-    // styled backdrop, so a narrow phone never gets squished into a wide pane.
+    // Mobile view: the phone is centered in the panel at whatever scale fits, so a narrow pane
+    // shows the whole device rather than a cropped slice of it.
     const device = this.deviceSize(tab.view);
-    if (device && this.bounds.width >= device.width && this.bounds.height >= device.height) {
-      view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - device.width) / 2), y: this.bounds.y, width: device.width, height: Math.min(device.height, this.bounds.height) });
-    } else if (device && this.bounds.width >= device.width) {
-      view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - device.width) / 2), y: this.bounds.y, width: device.width, height: this.bounds.height });
-    } else view.setBounds(this.bounds);
+    if (!device) { view.setBounds(this.bounds); }
+    else {
+      const scale = this.fitScale(device);
+      const width = Math.max(1, Math.round(device.width * scale));
+      const height = Math.min(this.bounds.height, Math.max(1, Math.round(device.height * scale)));
+      view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - width) / 2), y: this.bounds.y + Math.max(0, Math.floor((this.bounds.height - height) / 2)), width, height });
+    }
+    // Emulation has to land after the view holds its final size: Chromium drops an override
+    // applied against the previous bounds, which is what left the phone view rendering at 1x
+    // after a rotate, a device change or a restore until something else resized the pane.
+    if (tab.emulationReady && tab.emulationKey !== this.emulationKey(tab)) this.applyEmulation(tab);
     view.setVisible(true);
   }
   async capture(id) {
     const { tab } = this.find(id);
-    if (tab.url === "about:blank") throw new Error("Open a page before capturing it.");
+    if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
     return this.pageOperation(tab, (contents) => contents.capturePage(undefined, { stayHidden: true, stayAwake: true }));
   }
   async beginCapture(id) {
     const { tab } = this.find(id);
-    if (tab.url === "about:blank") throw new Error("Open a page before capturing it.");
+    if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
+    const generation = tab.generation;
     const image = await this.capture(id);
     const size = image.getSize();
-    if (!size.width || !size.height) throw new Error("The screenshot was empty. Reload the page and try again.");
+    if (!size.width || !size.height) throw bad("The screenshot was empty. Reload the page and try again.", 409);
+    // Read the page text at the same moment as the pixels. Reading it later let an app that keeps
+    // rendering (a live dashboard, a chat) send text describing a page the screenshot no longer showed.
+    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
+    const page = await this.inspect(id).catch(() => null);
+    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
     const token = crypto.randomUUID();
-    this.markCaptures.set(token, { tabId: tab.id, generation: tab.generation, image, createdAt: Date.now() });
+    this.markCaptures.set(token, { tabId: tab.id, generation: tab.generation, image, page, createdAt: Date.now() });
     for (const [key, capture] of this.markCaptures) if (Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) this.markCaptures.delete(key);
     while (this.markCaptures.size > 8) this.markCaptures.delete(this.markCaptures.keys().next().value);
     return { token, image: image.toDataURL(), width: size.width, height: size.height };
   }
   takeCapture(token, id) {
     const capture = typeof token === "string" ? this.markCaptures.get(token) : undefined;
-    if (!capture) throw new Error("That screenshot expired. Capture it again.");
+    if (!capture) throw bad("That screenshot expired. Capture it again.", 409);
     this.markCaptures.delete(token);
     const { tab } = this.find(id);
     if (capture.tabId !== tab.id || capture.generation !== tab.generation)
-      throw new Error("The page changed since that screenshot. Capture it again.");
+      throw bad("The page changed since that screenshot. Capture it again.", 409);
     const size = capture.image.getSize();
-    if (!size.width || !size.height) throw new Error("The screenshot was empty. Capture it again.");
-    return { tab, image: capture.image, size };
+    if (!size.width || !size.height) throw bad("The screenshot was empty. Capture it again.", 409);
+    return { tab, image: capture.image, size, page: capture.page || null };
   }
   async composeMarkedImageFor(frozen, marks) {
     const clean = normalizeMarks(marks);
@@ -546,18 +689,23 @@ class BrowserService {
           contents.removeListener("did-stop-loading", stopped); contents.removeListener("destroyed", destroyed);
           error ? reject(error) : resolve();
         };
-        const destroyed = () => finish(new Error("The browser tab was closed."));
+        const destroyed = () => finish(bad("The browser tab was closed.", 404));
         const stopped = () => {
           if (contents.isDestroyed()) destroyed();
           else if (!contents.isLoadingMainFrame()) finish(tab.error ? new Error(tab.error) : null);
         };
-        const timer = setTimeout(() => finish(new Error("The page took too long to load.")), 15000);
+        const timer = setTimeout(() => finish(bad("The page took too long to load.", 504)), 15000);
         contents.on("did-stop-loading", stopped); contents.once("destroyed", destroyed);
-        Promise.resolve(tab.ready).then(stopped, finish);
+        Promise.resolve(tab.ready).then(stopped, (error) => {
+          // A restored phone tab reloads to apply emulation, which aborts the original load.
+          // That is not a failure: the reload's own did-stop-loading resolves this wait.
+          if (error?.code === "ERR_ABORTED" && !contents.isDestroyed() && contents.isLoadingMainFrame()) return;
+          finish(error);
+        });
       });
     }
-    if (contents.isDestroyed()) throw new Error("The browser tab was closed.");
-    if (contents.isLoadingMainFrame()) throw new Error("Wait for the page to finish loading and try again.");
+    if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
+    if (contents.isLoadingMainFrame()) throw bad("Wait for the page to finish loading and try again.", 409);
     if (tab.error) throw new Error(tab.error);
     return new Promise((resolve, reject) => {
       let done = false;
@@ -566,9 +714,9 @@ class BrowserService {
         contents.removeListener("destroyed", destroyed); contents.removeListener("did-start-navigation", navigating);
         error ? reject(error) : resolve(result);
       };
-      const destroyed = () => finish(new Error("The browser tab was closed."));
-      const navigating = (details) => { if (details.isMainFrame) finish(new Error("The page changed while capturing it. Try again once it finishes loading.")); };
-      const timer = setTimeout(() => finish(new Error("The page took too long. Reload it and try again.")), 15000);
+      const destroyed = () => finish(bad("The browser tab was closed.", 404));
+      const navigating = (details) => { if (details.isMainFrame) finish(bad("The page changed while capturing it. Try again once it finishes loading.", 409)); };
+      const timer = setTimeout(() => finish(bad("The page took too long. Reload it and try again.", 504)), 15000);
       contents.once("destroyed", destroyed); contents.on("did-start-navigation", navigating);
       Promise.resolve().then(() => operation(contents)).then((result) => finish(null, result), (error) => finish(error));
     });
@@ -576,52 +724,68 @@ class BrowserService {
   async inspect(id) {
     const { tab } = this.find(id);
     const text = await this.pageOperation(tab, (contents) => contents.executeJavaScript("document.body?.innerText.slice(0, 16000) || ''"));
-    return { url: tab.url, title: tab.title, text, console: tab.console };
+    return { url: tab.url, title: tab.title, text, console: [...tab.console] };
   }
   async captureContext(id, marks, captureToken = "") {
     const { tab } = this.find(id);
     if (captureToken) {
       const frozen = this.takeCapture(captureToken, id);
-      const generation = tab.generation;
-      const page = await this.inspect(id);
-      if (tab.generation !== generation) throw new Error("The page changed since that screenshot. Capture it again.");
+      // Use the text frozen with the pixels; a re-read here could describe a different page than the
+      // marked-up image the chat is about to show.
+      const page = frozen.page || await this.inspect(id);
       return { image: await this.composeMarkedImageFor(frozen.image, marks || []), page };
     }
     if (marks !== undefined) {
       const begun = await this.beginCapture(id);
       try {
-        const generation = tab.generation;
-        const page = await this.inspect(id);
-        if (tab.generation !== generation) throw new Error("The page changed since that screenshot. Capture it again.");
-        return { image: await this.composeMarkedImageFor(this.takeCapture(begun.token, id).image, marks), page };
+        const frozen = this.takeCapture(begun.token, id);
+        const page = frozen.page || await this.inspect(id);
+        return { image: await this.composeMarkedImageFor(frozen.image, marks), page };
       } catch (error) { this.markCaptures.delete(begun.token); throw error; }
     }
     await this.pageOperation(tab, () => undefined);
     const generation = tab.generation;
     const [image, page] = await Promise.all([this.capture(id), this.inspect(id)]);
-    if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again.");
+    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again.", 409);
     return { image, page };
   }
   async control(body) {
-    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Send a browser action object.");
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw bad("Send a browser action object.");
     const { action, id } = body;
     if (action === "list") return { chats: [...this.groups].map(([scope, group]) => ({ scope, chatId: scope.startsWith(CHAT_SCOPE_PREFIX) ? scope.slice(CHAT_SCOPE_PREFIX.length) : "", activeId: group.activeId, tabs: group.tabs.map((tab) => this.metadata(tab)) })) };
     if (action === "open") {
       let scope;
-      if (Object.hasOwn(body, "chatId")) scope = chatScope(body.chatId);
+      if (Object.hasOwn(body, "chatId")) {
+        scope = chatScope(body.chatId);
+        // Refuse a chat Lumen has never opened: it would leave an orphan tab group and hides a
+        // client bug behind a 200. A restored or background chat is known through the live
+        // session callback even when the renderer has not activated it this session.
+        const chatIdLower = String(body.chatId).toLowerCase();
+        if (!this.knownChats.has(chatIdLower) && !(this.knownChat && this.knownChat(chatIdLower)) && !this.groups.has(scope))
+          throw bad("That chat is not open in Lumen.", 404);
+      }
       else if (Object.hasOwn(body, "scope")) {
-        if (!validScope(body.scope) || !body.scope) throw new Error("Choose a chat before using its browser.");
+        if (!validScope(body.scope) || !body.scope) throw bad("Choose a chat before using its browser.");
         scope = body.scope.toLowerCase();
       } else scope = this.scope;
-      if (!scope) throw new Error("Choose a chat before using its browser.");
-      if (Object.hasOwn(body, "workspace") && typeof body.workspace !== "string") throw new Error("Invalid browser workspace.");
+      if (!scope) throw bad("Choose a chat before using its browser.");
+      if (Object.hasOwn(body, "workspace") && typeof body.workspace !== "string") throw bad("Invalid browser workspace.");
       this.adoptLegacy(scope, typeof body.workspace === "string" ? body.workspace : "");
       return this.create(scope, body.url ?? "about:blank");
     }
+    // Validate the action before looking the tab up, so an unknown action names itself instead
+    // of borrowing the misleading "That browser tab is closed" message.
+    if (!TAB_ACTIONS.has(action)) throw bad(action ? `Unsupported browser action: ${action}.` : "Choose a browser action.");
     if (action === "navigate") return this.navigate(id, body.url);
     if (action === "select") return this.select(id);
     if (action === "close") return this.close(id);
-    if (action === "view") return this.setView(id, body.view);
+    if (action === "view") {
+      const requested = body.view;
+      if (requested && typeof requested === "object" && requested.mode === "mobile"
+        && !Object.hasOwn(DEVICE_PROFILES, requested.device))
+        throw bad(`Unknown phone size: ${String(requested.device).slice(0, 40)}. Choose iphone, pixel or ipad.`);
+      return this.setView(id, body.view);
+    }
     if (action === "inspect") return this.inspect(id);
     if (action === "screenshot") return { image: (await this.capture(id)).toDataURL() };
     if (action === "markup-begin") { const begun = await this.beginCapture(id); return { token: begun.token, image: begun.image }; }
@@ -633,9 +797,12 @@ class BrowserService {
     else if (action === "stop") contents.stop();
     else if (action === "devtools") contents.openDevTools({ mode: "detach" });
     else if (action === "evaluate") {
-      if (typeof body.script !== "string" || body.script.length > 100000) throw new Error("Provide a script under 100,000 characters.");
-      return contents.executeJavaScript(body.script, true);
-    } else throw new Error("Unsupported browser action.");
+      if (typeof body.script !== "string" || body.script.length > 100000) throw bad("Provide a script under 100,000 characters.");
+      // A script that throws is a problem with the script, not a broken app, so say so with a
+      // 4xx instead of letting it surface as an internal 500.
+      try { return await contents.executeJavaScript(body.script, true); }
+      catch (e) { throw bad(`The page script failed: ${String((e && e.message) || e).slice(0, 300)}`, 422); }
+    }
     return this.metadata(tab);
   }
   dispose() {

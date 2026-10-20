@@ -274,8 +274,8 @@ startup.then(async (start) => {
   window = new BrowserWindow({
     width: 1440,
     height: 960,
-    minWidth: 900,
-    minHeight: 650,
+    minWidth: 420,
+    minHeight: 520,
     show: false,
     frame: false,
     backgroundColor: "#17191e",
@@ -309,6 +309,22 @@ startup.then(async (start) => {
     });
   });
   handle("browser:layout", (bounds) => browser.layout(bounds));
+  // Synchronous hide: the renderer calls this while committing a chat or tab switch so
+  // the previous page is gone before the next frame paints, not a few frames later.
+  ipcMain.on("browser:hide-now", (event) => {
+    const trusted = event.sender === window?.webContents && event.senderFrame === window?.webContents.mainFrame
+      && (event.senderFrame?.url === fileURL || (devURL && event.senderFrame?.url.startsWith(`${devURL}/`)));
+    // This call blocks the renderer until returnValue is set: never leave it hanging, even if
+    // the browser throws.
+    try { if (trusted) browser.hideNow(); } catch { /* keep the renderer moving */ }
+    event.returnValue = trusted;
+  });
+  ipcMain.on("browser:switch-now", (event, chatId, workspace, box, paint) => {
+    const trusted = event.sender === window?.webContents && event.senderFrame === window?.webContents.mainFrame
+      && (event.senderFrame?.url === fileURL || (devURL && event.senderFrame?.url.startsWith(`${devURL}/`)));
+    try { if (trusted) browser.switchNow(chatId, workspace, box, paint === true); } catch { /* keep the renderer moving */ }
+    event.returnValue = trusted;
+  });
   handle("browser:action", (body) => {
     if (body?.action === "evaluate") throw new Error("Page scripts use the authenticated local agent API.");
     return browser.control(body);

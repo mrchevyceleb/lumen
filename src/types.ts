@@ -271,6 +271,8 @@ declare global {
       filePath: (file: File) => string;
       invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
       onSession: (callback: (event: SessionEvent) => void) => () => void;
+      hideBrowserNow: () => boolean;
+      switchBrowserNow: (chatId: string, workspace: string, box: { x: number; y: number; width: number; height: number } | null, paint: boolean) => boolean;
       onBrowser: (callback: (state: BrowserState) => void) => () => void;
       onBrowserCommand: (callback: (command: string) => void) => () => void;
       onAgentControl: (callback: (event: AgentControlRequest) => void) => () => void;

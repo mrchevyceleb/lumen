@@ -156,7 +156,12 @@ class AgentControl {
       if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close", "browser"] });
       if (url.pathname === "/v1/browser" && ["GET", "POST"].includes(req.method)) {
         if (!this.ready || !this.browser) throw new ControlError("Lumen's browser is starting. Try again shortly.", 503);
-        return send(200, await this.browser(req.method === "GET" ? { action: "list" } : body));
+        try { return send(200, await this.browser(req.method === "GET" ? { action: "list" } : body)); }
+        catch (error) {
+          // Browser validation failures are client errors, not server faults.
+          const status = error.status || (/chat is closed|browser (?:tab )?(?:is|was) closed/i.test(error.message || "") ? 404 : 500);
+          throw new ControlError(error.message, status);
+        }
       }
       if (url.pathname === "/v1/tasks" && ["GET", "POST"].includes(req.method)) {
         const action = req.method === "GET" ? "list" : "create";

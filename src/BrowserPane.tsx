@@ -11,6 +11,12 @@ const DEVICE_OPTIONS: { id: string; label: string; width: number; height: number
   { id: "ipad", label: "iPad 820×1180", width: 820, height: 1180 },
 ];
 const MARK_PALETTE = ["red", "orange", "blue", "green", "purple"];
+// Main keeps a markup capture alive for 15 minutes; a stashed set of pins past that cannot send.
+const MARKUP_TTL_MS = 15 * 60 * 1000;
+// While a screenshot is being marked, the page under the pins must stay the page that was
+// captured: swapping tabs, navigating, or reloading would make the frozen shot (and the
+// token bound to its generation) stale, so those actions wait until marking ends.
+const PAGE_CHANGING = new Set(["select", "close", "open", "navigate", "back", "forward", "reload", "stop", "view"]);
 
 export default function BrowserPane({ chatId, chatName, workspace, open, blocked, width, maxWidth, onWidth, onClose, onAttach, canAttach, onError }: {
   chatId: string; chatName: string; workspace: string; open: boolean; blocked: boolean; width: number; maxWidth: number; onWidth: (width: number) => void;
@@ -29,18 +35,29 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const [markDraft, setMarkDraft] = useState("");
   const [marksSending, setMarksSending] = useState(false);
   const [pendingNorm, setPendingNorm] = useState<{ x: number; y: number } | null>(null);
+  const [stageBox, setStageBox] = useState<{ width: number; height: number } | null>(null);
   const marksLock = useRef(false);
   const captureLock = useRef(false);
   const [dragging, setDragging] = useState(false);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const host = useRef<HTMLDivElement>(null);
+  const markupLayerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const markInputRef = useRef<HTMLInputElement>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Frozen screenshots and their pins, kept per chat so a switch never costs the user their marks.
+  // A capture token lives 15 minutes, so a stash older than that can no longer be sent.
+  const markupStash = useRef(new Map<string, { image: string; token: string; size: { width: number; height: number } | null; marks: BrowserMark[]; draft: string; at: number }>());
   const input = useRef<HTMLInputElement>(null);
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const onWidthRef = useRef(onWidth);
   onWidthRef.current = onWidth;
   const current = state.scope === scope ? state.tabs.find((tab) => tab.id === state.activeId) : undefined;
+  const currentIdRef = useRef<string | undefined>(current?.id);
+  currentIdRef.current = current?.id;
   const action = async (body: object) => {
+    if (markupMode && PAGE_CHANGING.has((body as { action?: string }).action || "")) return null;
     try { setError(""); return await api("browser:action", body); }
     catch (e: any) { setError(e.message); return null; }
   };
@@ -78,36 +95,98 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const viewMode: BrowserViewMode = current?.view || { mode: "desktop" };
   const mobile = viewMode.mode === "mobile";
   useEffect(() => () => browserStateCache.clear(), []);
-  useEffect(() => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false; }, [current?.id, current?.url]);
-  useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
-  useLayoutEffect(() => {
-    if (!open || markupMode) return;
-    let frame = 0, previous = "", failed = false;
-    const visible = open && !blocked && !dragging && !!current && current.url !== "about:blank" && !current.error;
-    if (!visible) void api("browser:layout", null).catch(onError);
-    else {
-      // Native views use device-independent pixels; the main process applies Lumen's UI zoom.
-      // Measuring each frame also catches sidebar moves, editor changes, and maximization.
-      const measure = () => {
-        const rect = host.current?.getBoundingClientRect();
-        if (rect && !failed) {
-          const next = document.querySelector('[aria-modal="true"]') ? null : { scope, id: current.id, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-          const serialized = JSON.stringify([next, window.devicePixelRatio]);
-          if (serialized !== previous) {
-            previous = serialized;
-            void api("browser:layout", next).catch((e) => { failed = true; onError(e.message); });
-          }
-        }
-        frame = requestAnimationFrame(measure);
-      };
-      measure();
+  // Reset the marking view when the page underneath changes, but never while marking is open:
+  // a tab switch or navigation must not throw away pins the user has already placed.
+  useEffect(() => {
+    if (markupMode) return;
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false;
+  }, [current?.id, current?.url, markupMode]);
+  // A frozen screenshot belongs to the chat it was taken in. Leaving that chat ends marking
+  // rather than carrying chat A's pins and image into chat B's pane.
+  const markupScopeRef = useRef(scope);
+  useEffect(() => {
+    if (markupScopeRef.current === scope) return;
+    const left = markupScopeRef.current;
+    markupScopeRef.current = scope;
+    // Marks belong to the chat they were drawn in, so they never follow the pane into another
+    // chat. They are kept with that chat rather than thrown away: coming back brings the frozen
+    // screenshot and every pin back exactly as they were, until the capture token expires.
+    if (markupMode && (marks.length || markupImage)) {
+      markupStash.current.set(left, { image: markupImage, token: markupToken, size: markupSize, marks, draft: markDraft, at: Date.now() });
+      onError(`Marks kept with this chat. They will be here when you come back.`);
     }
-    return () => { cancelAnimationFrame(frame); void api("browser:layout", null).catch(() => {}); };
-  }, [open, blocked, dragging, markupMode, current?.id, current?.url, current?.error, scope, onError]);
+    const kept = markupStash.current.get(scope);
+    const fresh = kept && Date.now() - kept.at < MARKUP_TTL_MS ? kept : undefined;
+    if (kept && !fresh) markupStash.current.delete(scope);
+    setMarkupMode(!!fresh); setMarkupImage(fresh?.image || ""); setMarkupToken(fresh?.token || "");
+    setMarkupSize(fresh?.size || null); setMarks(fresh?.marks || []); setMarkDraft(fresh?.draft || "");
+    setPendingNorm(null); setMarksSending(false); setConfirmDiscard(false); marksLock.current = false;
+    if (fresh?.marks.length) onError(`Your ${fresh.marks.length} mark${fresh.marks.length === 1 ? " is" : "s are"} still on this chat's screenshot. Carry on when you are ready.`);
+  }, [scope, markupMode, marks, markupImage, markupToken, markupSize, markDraft, onError]);
+  useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
+  // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
+  // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
+  // max-height resolves differently in a grid cell (it clipped the bottom of the capture and left
+  // the letterbox area swallowing clicks), so the stage gets explicit pixels from this measurement.
+  useLayoutEffect(() => {
+    if (!markupMode || !markupSize) { setStageBox(null); return; }
+    const fit = () => {
+      const layer = markupLayerRef.current;
+      if (!layer) return;
+      const box = layer.getBoundingClientRect();
+      const pad = 14;
+      const scale = Math.min((box.width - pad * 2) / markupSize.width, (box.height - pad * 2) / markupSize.height);
+      if (!Number.isFinite(scale) || scale <= 0) return;
+      const width = Math.max(1, Math.round(markupSize.width * scale)), height = Math.max(1, Math.round(markupSize.height * scale));
+      setStageBox((old) => old && old.width === width && old.height === height ? old : { width, height });
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    if (markupLayerRef.current) observer.observe(markupLayerRef.current);
+    return () => observer.disconnect();
+  }, [markupMode, markupSize]);
+  // Switch synchronously, before a different chat paints. The async path below lands a few frames
+  // late, and that gap is exactly what showed the previous chat's page over the new one. The same
+  // call puts this chat's own page up when it has one, so the pane is never left blank either.
+  useLayoutEffect(() => {
+    const rect = host.current?.getBoundingClientRect();
+    const box = rect && rect.width > 1 && rect.height > 1 ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
+    try { window.lumen.switchBrowserNow(chatId, workspace, box, open && !markupMode); }
+    catch { /* app is closing */ }
+  }, [scope]);
+  // Closing the pane or opening markup has to retract the composited page in this same commit
+  // too, for the same reason: the async layout(null) below is a few frames late.
+  useLayoutEffect(() => {
+    if (open && !markupMode) return;
+    try { window.lumen.hideBrowserNow(); } catch { /* app is closing */ }
+  }, [open, markupMode]);
+  useLayoutEffect(() => {
+    if (!open || markupMode) { void api("browser:layout", null).catch(onError); return; }
+    let frame = 0, previous = "", failed = false;
+    // Re-measure every frame so resizing the pane, dragging the splitter, and maximizing all move
+    // the native page with the panel. Nothing is detached on teardown: a navigation or a dep change
+    // used to blank and re-add the view (a visible flicker), and the next measure corrects the bounds.
+    const measure = () => {
+      const rect = host.current?.getBoundingClientRect();
+      if (rect && !failed) {
+        const next = document.querySelector('[aria-modal="true"]') ? null : { scope, id: current?.id, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        const serialized = JSON.stringify([next, window.devicePixelRatio]);
+        if (serialized !== previous) {
+          previous = serialized;
+          void api("browser:layout", next).catch((e) => { failed = true; onError(e.message); });
+        }
+      }
+      frame = requestAnimationFrame(measure);
+    };
+    measure();
+    return () => cancelAnimationFrame(frame);
+  }, [open, blocked, markupMode, current?.id, current?.url, current?.error, scope, onError]);
   const enterMarkup = async () => {
-    if (!current || captureLock.current) return; captureLock.current = true; setCapturing(true);
+    if (!current || captureLock.current || markupMode) return;
+    const startScope = scopeRef.current, startTab = current.id;
+    captureLock.current = true; setCapturing(true);
     try {
-      const frozen = await api<{ token: string; image: string }>("browser:action", { action: "markup-begin", id: current.id });
+      const frozen = await api<{ token: string; image: string }>("browser:action", { action: "markup-begin", id: startTab });
       if (!frozen.token || !frozen.image) throw new Error("The screenshot came back empty.");
       const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
         const probe = new Image();
@@ -115,6 +194,10 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         probe.onerror = () => reject(new Error("The screenshot could not be read."));
         probe.src = frozen.image;
       });
+      // A capture can take a while. If the user moved to another chat or tab meanwhile, this
+      // picture no longer belongs to what is on screen, so drop it instead of opening markup
+      // over the wrong page.
+      if (scopeRef.current !== startScope || currentIdRef.current !== startTab) return;
       setMarkupToken(frozen.token);
       setMarkupImage(frozen.image);
       setMarkupSize(dimensions);
@@ -130,7 +213,80 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     catch (e: any) { setError(e.message); }
     finally { marksLock.current = false; setMarksSending(false); }
   };
-  const cancelMarkup = () => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); };
+  // Leaving markup throws the pins away, so ask first when there is work to lose.
+  const cancelMarkup = () => {
+    if (marks.length && !confirmDiscard) { setConfirmDiscard(true); setError(""); return; }
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setConfirmDiscard(false);
+  };
+  // Place every label in measured pixels: beside its dot when there is room, flipped to the
+  // other side near the right edge, and kept fully inside the picture top and bottom.
+  const clampPinLabels = () => {
+    const box = stageRef.current; if (!box) return;
+    const width = box.clientWidth, height = box.clientHeight;
+    if (!width || !height) return;
+    // Labels are placed one at a time and remembered, so a second label can never be dropped on
+    // top of the first. Two pins close together used to render as one unreadable smear.
+    const taken: { left: number; top: number; right: number; bottom: number }[] = [];
+    const clear = (left: number, top: number, w: number, h: number) =>
+      !taken.some((r) => left < r.right + 4 && left + w > r.left - 4 && top < r.bottom + 4 && top + h > r.top - 4);
+    box.querySelectorAll<HTMLElement>(".browser-mark-pin").forEach((pin) => {
+      const label = pin.querySelector("em"), dot = pin.querySelector("span");
+      if (!label || !dot) return;
+      const x = Number(pin.dataset.x || 0) * width, y = Number(pin.dataset.y || 0) * height;
+      const radius = dot.offsetWidth / 2 || 13, gap = 6;
+      label.style.transform = "none";
+      // Measure at natural width each time, so a label widens again when the stage grows.
+      label.style.width = "";
+      let w = label.offsetWidth, h = label.offsetHeight;
+      if (w > width - 8) { label.style.width = `${width - 8}px`; w = label.offsetWidth; h = label.offsetHeight; }
+      let left = x + radius + gap;
+      if (left + w > width - 4) left = x - radius - gap - w;
+      if (left < 4) left = Math.min(Math.max(4, width - 4 - w), Math.max(4, x - w / 2));
+      let top = Math.min(Math.max(4, y - h / 2), Math.max(4, height - 4 - h));
+      // Walk down in label-height steps until this label has a clear patch of picture, then back up
+      // towards the pin if it fell off the bottom.
+      if (!clear(left, top, w, h)) {
+        for (let attempt = 0; attempt < 24; attempt += 1) {
+          const next = top + h + 6;
+          if (next + h > height - 4) break;
+          if (clear(left, next, w, h)) { top = next; break; }
+        }
+        if (!clear(left, top, w, h)) {
+          for (let attempt = 0; attempt < 24; attempt += 1) {
+            const next = top - h - 6;
+            if (next < 4) break;
+            if (clear(left, next, w, h)) { top = next; break; }
+          }
+        }
+      }
+      taken.push({ left, top, right: left + w, bottom: top + h });
+      // The pin is a zero-size anchor at (x, y), and the label is positioned inside it,
+      // so offsets have to be relative to the pin, not to the stage.
+      label.style.left = `${Math.round(left - x)}px`; label.style.top = `${Math.round(top - y)}px`;
+      // Keep the whole dot, ring and number badge inside the picture on edge clicks.
+      const inset = radius + 3;
+      const dotX = Math.min(Math.max(x, inset), width - inset), dotY = Math.min(Math.max(y, inset), height - inset);
+      dot.style.left = `${Math.round(dotX - x)}px`; dot.style.top = `${Math.round(dotY - y)}px`;
+    });
+  };
+  useLayoutEffect(() => { clampPinLabels(); }, [marks, pendingNorm, stageBox, markupMode]);
+  // The picture used to jump a few pixels when markup opened: the first fit measured the layer
+  // before the toolbar had finished wrapping. Stay hidden until the size has settled for two
+  // frames, so the screenshot appears where it will stay.
+  const [stageReady, setStageReady] = useState(false);
+  useEffect(() => {
+    if (!markupMode) { setStageReady(false); return; }
+    let inner = 0;
+    const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setStageReady(true)); });
+    return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
+  }, [markupMode, stageBox]);
+  useEffect(() => { setConfirmDiscard(false); }, [marks.length]);
+  // An armed "Discard N pins?" must not sit there waiting for a stray click minutes later.
+  useEffect(() => {
+    if (!confirmDiscard) return;
+    const timer = setTimeout(() => setConfirmDiscard(false), 4000);
+    return () => clearTimeout(timer);
+  }, [confirmDiscard]);
   const navigate = async (url: string) => {
     if (current) await action({ action: "navigate", id: current.id, url });
     else await action({ action: "open", chatId, workspace, url });
@@ -165,11 +321,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       onPointerDown={resize} onKeyDown={(e) => {
         if (["ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); onWidth(width + (e.key === "ArrowLeft" ? 20 : -20)); }
       }} />
-    <aside id="browser-panel" className="browser-pane" style={{ width }} aria-label="Chromium browser">
+    <aside id="browser-panel" className={`browser-pane${dragging ? " browser-resizing" : ""}${state.scope === scope ? "" : " browser-pane-pending"}`} style={{ width }} aria-label="Chromium browser">
       <div className="browser-heading"><Globe size={14} /><strong>Browser</strong><span title={chatName && chatName !== "Terminal" ? `${chatName}'s browser` : workspace ? `This chat's browser in ${workspace}` : "This chat's browser"}>{chatName && chatName !== "Terminal" ? `${chatName}'s browser` : "This chat's browser"}</span>
         <IconButton label="Hide browser (Ctrl Shift B)" onClick={onClose}><X size={16} /></IconButton>
       </div>
-      <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
+      <div className={markupMode ? "browser-tabs browser-locked" : "browser-tabs"} role="tablist" aria-label="Browser tabs">
         {state.scope === scope && state.tabs.map((tab, index) => <div className={`browser-tab ${tab.id === state.activeId ? "selected" : ""}`} key={tab.id}>
           <button role="tab" tabIndex={tab.id === state.activeId ? 0 : -1} aria-selected={tab.id === state.activeId} title={tab.url}
             onKeyDown={(event) => {
@@ -183,11 +339,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         </div>)}
         <IconButton label="New browser tab" onClick={() => void action({ action: "open", chatId, workspace })}><Plus size={15} /></IconButton>
       </div>
-      <form className="browser-navigation" onSubmit={(e) => { e.preventDefault(); void navigate(address); }}>
+      <form className={markupMode ? "browser-navigation browser-locked" : "browser-navigation"} onSubmit={(e) => { e.preventDefault(); void navigate(address); }}>
         <IconButton label="Back" disabled={!current?.canGoBack} onClick={() => void action({ action: "back", id: current?.id })}><ArrowLeft size={15} /></IconButton>
         <IconButton label="Forward" disabled={!current?.canGoForward} onClick={() => void action({ action: "forward", id: current?.id })}><ArrowRight size={15} /></IconButton>
         <IconButton label={current?.loading ? "Stop loading" : "Reload page"} disabled={!current || current.url === "about:blank"} onClick={() => void action({ action: current?.loading ? "stop" : "reload", id: current?.id })}>{current?.loading ? <X size={15} /> : <RefreshCw size={15} />}</IconButton>
-        <input ref={input} aria-label="Browser address" placeholder="localhost:3000 or any website" value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} autoComplete="off" />
+        <input ref={input} aria-label="Browser address" placeholder={state.scope === scope ? "localhost:3000 or any website" : ""} value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} autoComplete="off" />
         <button type="submit" className="icon-button" aria-label="Go to address"><ArrowRight size={15} /></button>
       </form>
       <div className="browser-tools">
@@ -209,7 +365,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       {markupMode && current && <div className="browser-markup-bar">
         <strong>Mark up the screenshot</strong>
         <span className="browser-markup-hint">Click the picture to drop a pin, type what it means, then Add. Pins are numbered for the chat.</span>
-        <input aria-label="What this pin means" placeholder="e.g. This button is broken" value={markDraft} maxLength={80}
+        <input ref={markInputRef} aria-label="What this pin means" placeholder="e.g. This button is broken" value={markDraft} maxLength={80}
           onChange={(e) => setMarkDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); document.querySelector<HTMLButtonElement>(".browser-mark-add")?.click(); } }} />
         <button className="browser-mark-add" disabled={!markDraft.trim() || marks.length >= 10} onClick={() => {
@@ -220,27 +376,29 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         }}>Add</button>
         {marks.length > 0 && <button onClick={() => setMarks((old) => old.slice(0, -1))}>Remove last</button>}
         {marks.length > 0 && <button disabled={marksSending} onClick={() => void sendMarkup()}><Send size={12} />{marksSending ? "Sending…" : `Send ${marks.length} pin${marks.length === 1 ? "" : "s"} to chat`}</button>}
-        <button disabled={marksSending} onClick={cancelMarkup}>Cancel</button>
+        <button disabled={marksSending} onClick={cancelMarkup}>{confirmDiscard ? `Discard ${marks.length} pin${marks.length === 1 ? "" : "s"}?` : "Done marking"}</button>
       </div>}
       <div ref={host} className={mobile || markupMode ? "browser-viewport browser-viewport-device" : "browser-viewport"}>
-        {markupMode && current ? <div className="browser-markup-layer">
-          <div className="browser-markup-stage" style={markupSize ? { aspectRatio: `${markupSize.width} / ${markupSize.height}` } : undefined}>
+        {markupMode && current ? <div className="browser-markup-layer" ref={markupLayerRef}>
+          <div ref={stageRef} className="browser-markup-stage" style={{ ...(stageBox ? { width: stageBox.width, height: stageBox.height } : {}), visibility: stageBox && stageReady ? undefined : "hidden" }}>
             <img alt="Screenshot to mark up" src={markupImage} draggable={false}
               onClick={(e) => {
                 const box = e.currentTarget.getBoundingClientRect();
+                if (box.width < 1 || box.height < 1) return;
                 const x = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
                 const y = Math.min(1, Math.max(0, (e.clientY - box.top) / box.height));
                 setPendingNorm({ x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 });
                 setError("");
+                // Dropping a pin arms the note field: whatever the user types next belongs to it.
+                requestAnimationFrame(() => markInputRef.current?.focus());
               }} />
-            {marks.map((mark, index) => <div className="browser-mark-pin" key={index} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
+            {marks.map((mark, index) => <div className="browser-mark-pin" key={index} data-x={mark.x} data-y={mark.y} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
               <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
             </div>)}
-            {pendingNorm && <div className="browser-mark-pin browser-mark-pending" style={{ left: `${pendingNorm.x * 100}%`, top: `${pendingNorm.y * 100}%` }}>
+            {pendingNorm && <div className="browser-mark-pin browser-mark-pending" data-x={pendingNorm.x} data-y={pendingNorm.y} style={{ left: `${pendingNorm.x * 100}%`, top: `${pendingNorm.y * 100}%` }}>
               <span>?</span><em>New pin: type what it means, then Add</em>
             </div>}
           </div>
-          <div className="browser-markup-exit"><button onClick={cancelMarkup}><X size={12} />Done marking</button></div>
         </div> : current?.error ? <div className="browser-empty"><Globe size={30} /><strong>Couldn’t load this page</strong><p>{current.error}</p><button onClick={() => void action({ action: "reload", id: current.id })}>Try again</button></div> : (!current || current.url === "about:blank") && <div className="browser-empty">
           <Globe size={34} /><strong>This chat has its own browser.</strong><p>Open a local dev server or a live website here.<br />Other chats keep their own pages, right where they left them.</p>
           <div className="browser-local-links">{[3000, 5173, 8080].map((port) => <button key={port} onClick={() => void navigate(`http://localhost:${port}`)}>localhost:{port}</button>)}</div>
