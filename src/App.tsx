@@ -58,6 +58,7 @@ import {
   type AdministratorStatus,
   type ImageAttachment,
   type AttachmentImport,
+  type BrowserMark,
   type BrowserPage,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
@@ -169,14 +170,14 @@ export default function App() {
   }, [accounts]);
   const projectTabsRef = useRef<Record<string, string>>({});
   const MIN_PANEL = 48;
-  const MIN_MAIN = 48;
+  const MIN_MAIN = 240;
   const RAIL_WIDTH = 44;
   const [panelPreferences] = useState(() => { try { return JSON.parse(localStorage.getItem("lumen.panels") || "{}") || {}; } catch { return {}; } });
   const [panel, setPanel] = useState<"files" | "git">(panelPreferences.panel === "git" ? "git" : "files");
   const [sidebar, setSidebar] = useState(panelPreferences.projects !== false);
   const [explorer, setExplorer] = useState(panelPreferences.workspace === true);
-  const [browserOpen, setBrowserOpen] = useState(panelPreferences.browser === true);
   const [browserWidth, setBrowserWidth] = useState(Number.isFinite(panelPreferences.browserWidth) ? Math.max(MIN_PANEL, panelPreferences.browserWidth) : 500);
+  const browserOpen = !!tabs.find((tab) => tab.id === activeId)?.browserOpen;
   const projectsToggle = useRef<HTMLButtonElement>(null);
   const explorerToggle = useRef<HTMLButtonElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(Number.isFinite(panelPreferences.projectsWidth) ? Math.max(MIN_PANEL, panelPreferences.projectsWidth) : 250);
@@ -265,8 +266,8 @@ export default function App() {
     return () => observer.disconnect();
   }, [activeId, verticalChats]);
   useEffect(() => {
-    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browser: browserOpen, browserWidth, split, terminalHeight })); } catch {}
-  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserOpen, browserWidth, split, terminalHeight]);
+    try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browserWidth, split, terminalHeight })); } catch {}
+  }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserWidth, split, terminalHeight]);
   const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
   const hideExplorer = () => { setExplorer(false); explorerToggle.current?.focus(); };
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -311,6 +312,18 @@ export default function App() {
     [],
   );
   const active = tabs.find((t) => t.id === activeId);
+  const browserOpenRef = useRef<Record<string, boolean>>({});
+  const setBrowserOpen = (open: boolean | ((value: boolean) => boolean)) => {
+    const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
+    if (!chat) { notify("Open a chat first, then its browser stays with that chat."); return; }
+    const key = chat.controlId || chat.id;
+    const current = browserOpenRef.current[key] ?? chat.browserOpen === true;
+    const next = typeof open === "function" ? open(current) : open;
+    if (next === current) return;
+    browserOpenRef.current[key] = next;
+    setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: next } : tab));
+    void updateTab(chat.id, { browserOpen: next });
+  };
   if (active && !active.projectless) projectTabsRef.current[active.root] = active.id;
   const root = active?.projectless ? "" : active?.root || selectedRoot;
   const rootRef = useRef(root);
@@ -375,20 +388,25 @@ export default function App() {
     setNotice(text);
   }, []);
   const openWeb = (url: string) => {
+    const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
+    if (!chat) { notify("Open a chat before opening its browser."); return; }
+    const chatId = chat.controlId || chat.id;
+    const workspace = chat.cwd && chat.cwd !== chat.root ? chat.cwd : chat.projectless ? "" : chat.root;
     setBrowserOpen(true);
-    void api("browser:action", { action: "open", url, workspace: checkoutPath }).catch((error) => notify(error.message));
+    void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => notify(error.message));
   };
   const updateTab = (id: string, change: Partial<Tab>) => {
     const tab = tabsRef.current.find((value) => value.id === id);
     setTabs((old) => old.map((value) => value.id === id ? { ...value, ...change } : value));
     return tab?.controlId ? api("recovery:update", tab.controlId, change).catch((error) => notify("Draft recovery could not be saved: " + error.message)) : Promise.resolve();
   };
-  const attachBrowser = async (id: string) => {
+  const attachBrowser = async (id: string, marks?: BrowserMark[], captureToken?: string) => {
     const chatId = activeIdRef.current;
     const chat = tabsRef.current.find((tab) => tab.id === chatId);
     if (!chat || chat.agent === "shell" || chat.mode !== "rich") throw new Error("Select a readable agent chat to attach this page.");
     if ((chat.draftAttachments?.length || 0) >= 8) throw new Error("Attach up to eight images.");
-    const result = await api<{ attachment: ImageAttachment; page: BrowserPage }>("browser:attach", id, chatId);
+    if (marks && ((marks.length < 1) || (marks.length > 10))) throw new Error("Mark up to ten things on the screenshot, or skip markup.");
+    const result = await api<{ attachment: ImageAttachment; page: BrowserPage }>("browser:attach", id, chatId, marks, captureToken);
     const latest = tabsRef.current.find((tab) => tab.id === chatId);
     if (!latest) throw new Error("The chat was closed while capturing the page.");
     if ((latest.draftAttachments?.length || 0) >= 8) throw new Error("Attach up to eight images.");
@@ -502,7 +520,9 @@ export default function App() {
         queuedMessages: resume?.queuedMessages?.map((m) => ({ ...m, state: "queued" })) || [],
         queuePaused: !!resume?.queuedMessages?.length,
         archived: resume?.archived === true,
+        browserOpen: resume?.browserOpen === true,
       };
+      browserOpenRef.current[created.controlId] = tab.browserOpen === true;
       setTabs((old) => [...old.filter((value) => value.controlId !== tab.controlId), tab]);
       const selectionUnchanged = rootRef.current === selection.root && activeIdRef.current === selection.id;
       const canFocusArchived = showArchivedRef.current || resume?.archived !== true;
@@ -933,16 +953,18 @@ export default function App() {
   };
   const closeTab = (tab: Tab) => {
     const action = () => {
-      api("session:close", tab.id).catch((e) => notify(e.message));
-      setTabs((old) => {
-        const next = old.filter((t) => t.id !== tab.id);
-        if (activeIdRef.current === tab.id) {
-          const sibling = next.filter((t) => tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root)).at(-1);
-          setActiveId(sibling?.id || "");
-          setSelectedRoot(tab.projectless ? "" : tab.root);
-        }
-        return next;
-      });
+      void api("session:close", tab.id).then(() => {
+        delete browserOpenRef.current[tab.controlId || tab.id];
+        setTabs((old) => {
+          const next = old.filter((t) => t.id !== tab.id);
+          if (activeIdRef.current === tab.id) {
+            const sibling = next.filter((t) => tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root)).at(-1);
+            setActiveId(sibling?.id || "");
+            setSelectedRoot(tab.projectless ? "" : tab.root);
+          }
+          return next;
+        });
+      }).catch((e) => notify(e.message));
     };
     if (tab.busy)
       setConfirmation({
@@ -1005,6 +1027,7 @@ export default function App() {
     else if (action === "close") {
       if (tab.busy || tab.queuedMessages?.length || tab.mode === "native") throw new Error("Stop this task and remove queued messages in readable view before closing it.");
       await api("session:close", tab.id);
+      delete browserOpenRef.current[tab.controlId || tab.id];
       setTabs((old) => {
         const next = old.filter((t) => t.id !== tab.id);
         if (activeIdRef.current === tab.id) {
@@ -1765,7 +1788,7 @@ export default function App() {
             </div>
           )}
         </main>
-        <BrowserPane workspace={checkoutPath} open={browserOpen} blocked={resizing || !!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
+        <BrowserPane chatId={active?.controlId || activeId} chatName={active?.name || ""} workspace={checkoutPath} open={browserOpen} blocked={resizing || !!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
           width={browserWidth} maxWidth={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleExplorer ? explorerWidth : 0) - (visibleSidebar ? MIN_PANEL : 0))}
           onWidth={applyBrowserWidth} onClose={() => setBrowserOpen(false)} onAttach={attachBrowser}
           canAttach={!!active && active.agent !== "shell" && active.mode === "rich" && !active.recoveryError} onError={notify} />

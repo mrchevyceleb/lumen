@@ -1,9 +1,12 @@
 export type Agent = "shell" | "pi" | "codex" | "claude" | "grok" | "google";
 export type Mode = "rich" | "native";
 export interface ImageAttachment { id: string; name: string; mimeType: string; bytes: number; preview: string }
-export interface BrowserTab { id: string; title: string; url: string; error: string; loading: boolean; unloaded?: boolean; canGoBack: boolean; canGoForward: boolean }
-export interface BrowserState { workspace: string; activeId: string; tabs: BrowserTab[]; error?: string }
+export type BrowserViewMode = { mode: "desktop" } | { mode: "mobile"; device: string; orientation: "portrait" | "landscape" };
+export interface BrowserTab { id: string; title: string; url: string; error: string; loading: boolean; unloaded?: boolean; canGoBack: boolean; canGoForward: boolean; view?: BrowserViewMode }
+export interface BrowserState { scope: string; activeId: string; tabs: BrowserTab[]; error?: string }
+export interface BrowserSnapshot { active: BrowserState; states: BrowserState[] }
 export interface BrowserPage { url: string; title: string; text: string; console: { level: string; message: string }[] }
+export interface BrowserMark { label: string; x: number; y: number; color: string }
 export interface AdministratorStatus { supported: boolean; elevated: boolean | null; error: string }
 export interface AccountProfile { id: string; agent: "claude" | "codex"; name: string; signedIn: boolean; email: string; signingIn: boolean; inUse: boolean }
 export interface SignInProfile { id: string; agent: Exclude<Agent, "shell">; name: string }
@@ -128,6 +131,7 @@ export interface Tab {
   queuePaused?: boolean;
   managedBy?: string;
   draftAttachments?: ImageAttachment[];
+  browserOpen?: boolean;
   terminalReady?: boolean;
   terminalOpen?: boolean;
   terminalId?: string;

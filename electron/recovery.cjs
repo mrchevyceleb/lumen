@@ -98,20 +98,20 @@ class RecoveryStore {
       // Renderer updates presentation/drafts. Runtime fields already have a
       // newer, authoritative journal entry and must not be overwritten.
       const ui = { name: tab.name, nameCustom: tab.nameCustom === true, color: tab.color, draft: tab.draft || "", nativeDraft: tab.nativeDraft || "",
-        draftAttachments: tab.draftAttachments || [], mode: tab.mode, managedBy: tab.managedBy, archived: tab.archived === true };
+        draftAttachments: tab.draftAttachments || [], mode: tab.mode, managedBy: tab.managedBy, archived: tab.archived === true, browserOpen: tab.browserOpen === true };
       return old ? { ...old, ...ui } : { ...tab, controlId: tab.controlId || tab.id, messages: tab.messages || [] };
     });
     for (const tab of this.state.tabs) if (!tabs.some((value) => value.controlId === tab.controlId)) tabs.push(tab);
     const compact = tabs.map((tab) => {
       if (!this.state.tabs.some((saved) => saved.controlId === tab.controlId)) return tab;
-      return Object.fromEntries(["controlId", "name", "nameCustom", "color", "draft", "nativeDraft", "draftAttachments", "mode", "managedBy", "archived"].map((key) => [key, tab[key]]));
+      return Object.fromEntries(["controlId", "name", "nameCustom", "color", "draft", "nativeDraft", "draftAttachments", "mode", "managedBy", "archived", "browserOpen"].map((key) => [key, tab[key]]));
     });
     this.record("workspace", { tabs: compact, active: value.active || "", root: value.root || "", projects: value.projects || [] }, true);
   }
   update(controlId, changes) {
     if (!validId(controlId) || !this.state.tabs.some((tab) => tab.controlId === controlId)) throw new Error("This saved chat is unavailable.");
     const patch = {};
-    for (const key of ["draft", "draftAttachments", "nativeDraft", "name", "nameCustom", "color"]) if (Object.hasOwn(changes, key)) patch[key] = key === "nativeDraft" ? changes[key] || "" : key === "nameCustom" ? changes[key] === true : changes[key];
+    for (const key of ["draft", "draftAttachments", "nativeDraft", "name", "nameCustom", "color", "browserOpen"]) if (Object.hasOwn(changes, key)) patch[key] = key === "nativeDraft" ? changes[key] || "" : ["nameCustom", "browserOpen"].includes(key) ? changes[key] === true : changes[key];
     this.record("patch", { controlId, patch }, Object.hasOwn(patch, "draftAttachments") || Object.hasOwn(patch, "nativeDraft"));
   }
   remove(controlId) { this.record("remove", { controlId }, true); for (const [id, binding] of this.bindings) if (binding === controlId) this.bindings.delete(id); }

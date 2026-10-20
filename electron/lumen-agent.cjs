@@ -20,10 +20,12 @@ const help = `Lumen agent control — all tasks are visible in the app
   lumen-agent answer TASK_ID REQUEST_ID --response '{"value":"..."}'
   lumen-agent watch TASK_ID [--timeout 600] [--interval 1000]
   lumen-agent browser list
-  lumen-agent browser open --url http://localhost:3000 [--workspace FOLDER]
+  lumen-agent browser open --url http://localhost:3000 [--chat-id TASK_ID]
   lumen-agent browser inspect|screenshot|reload|back|forward|select|close TAB_ID
   lumen-agent browser navigate TAB_ID --url https://example.com
   lumen-agent browser evaluate TAB_ID --script-file interaction.js
+  lumen-agent browser view TAB_ID --device iphone|pixel|ipad [--orientation landscape]   (phone-size view; --device desktop switches back)
+  lumen-agent browser screenshot-markup TAB_ID --marks '[{"label":"broken button","x":0.42,"y":0.18}]' [--output marked.png]   (x/y normalized 0-1)
   Screenshot: --output FILE.png saves the image instead of printing a data URL.
 Options: --connection FILE, --id UUID (retry-safe task/message ID), --owner NAME,
   --cwd FOLDER, --account-id UUID. Omit --root for a chat without a workspace.
@@ -40,7 +42,7 @@ async function main() {
     else { if (process.argv[i + 1] === undefined || process.argv[i + 1].startsWith("--")) throw new Error(`Missing value for ${arg}`); options[arg.slice(2)] = process.argv[++i]; }
   }
   if (options.help || !args.length || args[0] === "help") return console.log(help);
-  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "account-id", "response", "timeout", "interval", "url", "workspace", "script-file", "output"]);
+  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks"]);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown option --${key}`);
   const dataDir = process.platform === "win32" ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Lumen") : process.platform === "darwin" ? path.join(os.homedir(), "Library", "Application Support", "Lumen") : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Lumen");
   const file = options.connection || process.env.LUMEN_CONTROL_FILE || path.join(dataDir, "agent-control.json");
@@ -63,9 +65,19 @@ async function main() {
   }
   const [command, id, messageId] = args;
   if (command === "browser") {
-    const result = await request("POST", "/v1/browser", { action: id, id: messageId, url: options.url, workspace: options.workspace,
-      ...(options["script-file"] ? { script: await fs.readFile(options["script-file"], "utf8") } : {}) });
-    if (id === "screenshot" && options.output) {
+    const body = { action: id, id: messageId, url: options.url, chatId: options["chat-id"], workspace: options.workspace,
+      ...(options["script-file"] ? { script: await fs.readFile(options["script-file"], "utf8") } : {}) };
+    if (id === "view") {
+      body.view = !options.device || options.device === "desktop" ? { mode: "desktop" }
+        : { mode: "mobile", device: options.device, orientation: options.orientation === "landscape" ? "landscape" : "portrait" };
+    }
+    if (id === "screenshot-markup") {
+      if (!options.marks) throw new Error("screenshot-markup needs --marks '[{\"label\":\"...\",\"x\":0.42,\"y\":0.18}]' (x/y normalized 0-1).");
+      try { body.marks = JSON.parse(options.marks); } catch { throw new Error("--marks must be a JSON array of {label, x, y}."); }
+      if (!Array.isArray(body.marks)) throw new Error("--marks must be a JSON array of {label, x, y}.");
+    }
+    const result = await request("POST", "/v1/browser", body);
+    if ((id === "screenshot" || id === "screenshot-markup") && options.output) {
       if (typeof result.image !== "string" || !result.image.startsWith("data:image/png;base64,")) throw new Error("No browser screenshot returned.");
       await fs.writeFile(options.output, Buffer.from(result.image.slice("data:image/png;base64,".length), "base64"));
       return console.log(JSON.stringify({ path: path.resolve(options.output) }));

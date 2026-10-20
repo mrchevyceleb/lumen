@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const channels = new Set([
   "bootstrap", "agents:install-google", "agents:models",
-  "browser:activate", "browser:layout", "browser:action", "browser:attach", "browser:link-menu",
+  "browser:activate", "browser:snapshot", "browser:layout", "browser:action", "browser:attach", "browser:link-menu", "browser:discard",
   "administrator:status", "administrator:restart",
   "recovery:load", "recovery:save", "recovery:update", "attachments:paste", "attachments:choose", "attachments:import", "session:reconnect",
   "agent-control:status", "agent-control:change", "agent-control:ready", "agent-control:reply", "agent-control:claim",

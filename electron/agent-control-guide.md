@@ -74,11 +74,11 @@ All prompts, streamed responses, and tool activity use the regular chat UI. Agen
 
 ## Browser previews and interactions
 
-The embedded Chromium browser uses the same authenticated loopback connection. `GET /v1/browser` lists tabs grouped by workspace; `POST /v1/browser` accepts `{ action, id?, workspace?, url?, script? }`. Actions: `list`, `open`, `navigate`, `select`, `close`, `back`, `forward`, `reload`, `stop`, `devtools`, `inspect`, `screenshot`, and `evaluate`. Use the browser tab ID, not a coding task ID. `open` accepts an absolute workspace/worktree path and an HTTP/HTTPS URL; omitting workspace uses the currently selected working folder. Navigation returns immediately: poll `list` until `loading` is false and check `error` before inspecting. Creating a browser tab does not switch projects or reveal a hidden browser panel.
+The embedded Chromium browser uses the same authenticated loopback connection. Each chat owns its browser tabs and panel state. `GET /v1/browser` lists tabs grouped by chat; `POST /v1/browser` accepts `{ action, id?, chatId?, url?, script?, view?, marks? }`. Actions: `list`, `open`, `navigate`, `select`, `close`, `back`, `forward`, `reload`, `stop`, `devtools`, `inspect`, `screenshot`, `screenshot-markup`, `view`, and `evaluate`. Use the browser tab ID for tab actions, not a coding task ID. For `open`, pass the owning chat's stable ID as `chatId`; omitting it uses the currently selected chat. Navigation returns immediately: poll `list` until `loading` is false and check `error` before inspecting. Creating a browser tab does not switch chats or reveal a hidden browser panel. `view` switches a tab between `{ mode: "desktop" }` and `{ mode: "mobile", device: "iphone" | "pixel" | "ipad", orientation: "portrait" | "landscape" }` (a real device viewport and mobile user agent; each tab remembers its view). `screenshot-markup` takes `{ marks: [{ label, x, y, color? }] }` with `x`/`y` normalized 0-1 across the screenshot and returns a PNG data URL with numbered callout pins drawn on; the pane's **Mark up** button does the same thing from the UI and attaches the result to the chat draft.
 
 ```powershell
 node $lumen browser list
-node $lumen browser open --workspace 'C:\repo' --url 'http://localhost:3000'
+node $lumen browser open --chat-id TASK_ID --url 'http://localhost:3000'
 node $lumen browser inspect TAB_ID
 node $lumen browser screenshot TAB_ID --output 'C:\temp\preview.png'
 node $lumen browser navigate TAB_ID --url 'https://example.com'

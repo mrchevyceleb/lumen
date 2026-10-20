@@ -210,6 +210,7 @@ startup.then(async (start) => {
     const session = sessions.sessions.get(id);
     const controlId = session?.controlId || recovery.state.tabs.find((tab) => tab.id === id || tab.controlId === id)?.controlId;
     if (session) await sessions.close(id);
+    if (controlId) browser?.discard(controlId);
     if (controlId) recovery.remove(controlId);
     accounts.notify({ type: "changed" });
   });
@@ -288,11 +289,11 @@ startup.then(async (start) => {
     },
   });
   window.removeMenu();
-  browser = new BrowserService(window, dataDir, (folder) => typeof folder === "string" && (folder === "" || [...workspace.roots, ...workspace.recent].some((known) => {
-    const relative = path.relative(known, folder);
-    return !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
-  })));
-  handle("browser:activate", (root) => browser.activate(root));
+  browser = new BrowserService(window, dataDir, (chatId) => [...sessions.sessions.values()].some((session) => session.controlId.toLowerCase() === String(chatId).toLowerCase())
+    || recovery.state.tabs.some((tab) => tab.controlId.toLowerCase() === String(chatId).toLowerCase()));
+  handle("browser:activate", (chatId, workspace) => browser.activate(chatId, workspace));
+  handle("browser:snapshot", (chatId, workspace) => browser.snapshot(chatId, workspace));
+  handle("browser:discard", (chatId) => browser.discard(chatId));
   handle("browser:link-menu", (value) => {
     const url = browserURL(value);
     if (url === "about:blank") throw new Error("Choose a web link.");
@@ -312,10 +313,10 @@ startup.then(async (start) => {
     if (body?.action === "evaluate") throw new Error("Page scripts use the authenticated local agent API.");
     return browser.control(body);
   });
-  handle("browser:attach", async (id, sessionId) => {
+  handle("browser:attach", async (id, sessionId, marks, captureToken = "") => {
     const chat = sessions.get(sessionId);
-    const { image, page } = await browser.captureContext(id);
-    return { attachment: await attachments.save(chat.controlId, image, "Browser screenshot.png"), page };
+    const { image, page } = await browser.captureContext(id, marks, captureToken);
+    return { attachment: await attachments.save(chat.controlId, image, marks?.length ? "Browser screenshot (markup).png" : "Browser screenshot.png"), page };
   });
   installZoom(window.webContents, dataDir);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
