@@ -50,9 +50,10 @@ const chatScope = (chatId) => {
   return CHAT_SCOPE_PREFIX + chatId.toLowerCase();
 };
 // Built-in phone widths (CSS px at devicePixelRatio 3, Chrome mobile user agents).
-// The smallest device-emulation scale Chromium actually honours; below it the override is
-// silently pinned to its floor and the page is drawn cropped inside a smaller box.
-const MIN_EMULATION_SCALE = 0.28;
+// The smallest device-emulation scale Chromium actually honours. Measured on this build: a fitted
+// scale of 0.51 draws the whole page, 0.42 is silently ignored and the page is drawn cropped at
+// 1:1 inside the smaller box (heading and bottom bar fall outside it). Stay just above the floor.
+const MIN_EMULATION_SCALE = 0.52;
 const DEVICE_PROFILES = {
   iphone: { width: 390, height: 844, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1" },
   pixel: { width: 412, height: 915, userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36" },
