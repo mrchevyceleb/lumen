@@ -105,12 +105,14 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     if (markupLayerRef.current) observer.observe(markupLayerRef.current);
     return () => observer.disconnect();
   }, [markupMode, markupSize]);
-  // Hide the composited page synchronously, before a different chat paints. The async
-  // layout(null) below can land a few frames late, and that gap is exactly what showed
-  // the previous chat's page over the new one.
+  // Switch synchronously, before a different chat paints. The async path below lands a few frames
+  // late, and that gap is exactly what showed the previous chat's page over the new one. The same
+  // call puts this chat's own page up when it has one, so the pane is never left blank either.
   useLayoutEffect(() => {
-    try { window.lumen.hideBrowserNow(); } catch { /* app is closing */ }
-    void api("browser:layout", null).catch(() => {});
+    const rect = host.current?.getBoundingClientRect();
+    const box = rect && rect.width > 1 && rect.height > 1 ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
+    try { window.lumen.switchBrowserNow(chatId, workspace, box, open && !markupMode); }
+    catch { /* app is closing */ }
   }, [scope]);
   useLayoutEffect(() => {
     if (!open || markupMode) { void api("browser:layout", null).catch(onError); return; }

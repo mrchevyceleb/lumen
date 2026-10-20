@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld("lumen", {
     return () => ipcRenderer.removeListener("session:event", listener);
   },
   hideBrowserNow: () => ipcRenderer.sendSync("browser:hide-now"),
+  switchBrowserNow: (chatId, workspace, box, paint) => ipcRenderer.sendSync("browser:switch-now", chatId, workspace, box, paint),
   onBrowser: (callback) => {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on("browser:state", listener);

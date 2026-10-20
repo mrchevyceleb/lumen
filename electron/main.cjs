@@ -317,6 +317,12 @@ startup.then(async (start) => {
     if (trusted) browser.hideNow();
     event.returnValue = trusted;
   });
+  ipcMain.on("browser:switch-now", (event, chatId, workspace, box, paint) => {
+    const trusted = event.sender === window?.webContents && event.senderFrame === window?.webContents.mainFrame
+      && (event.senderFrame?.url === fileURL || (devURL && event.senderFrame?.url.startsWith(`${devURL}/`)));
+    if (trusted) browser.switchNow(chatId, workspace, box, paint === true);
+    event.returnValue = trusted;
+  });
   handle("browser:action", (body) => {
     if (body?.action === "evaluate") throw new Error("Page scripts use the authenticated local agent API.");
     return browser.control(body);

@@ -519,6 +519,29 @@ class BrowserService {
     this.visible = false; this.bounds = null;
     this.detach();
   }
+  // The chat switch runs synchronously from the renderer's layout effect, so the outgoing page is
+  // retracted AND the incoming chat's own page is put on screen in the same turn. Without the
+  // second half the pane sat blank for the round trip it takes the renderer to re-measure.
+  switchNow(chatId, workspace = "", box = null, paint = false) {
+    const scope = chatId ? chatScope(chatId) : "";
+    const rect = box && [box.x, box.y, box.width, box.height].every(Number.isFinite) ? box : null;
+    this.visible = false;
+    this.detach();
+    if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
+    this.adoptLegacy(scope, typeof workspace === "string" ? workspace : "");
+    this.scope = scope;
+    this.group();
+    this.pendingLayout = null;
+    if (paint && rect) {
+      const zoom = this.window.webContents.getZoomFactor(), [width, height] = this.window.getContentSize();
+      const x = Math.max(0, Math.min(width, Math.round(rect.x * zoom))), y = Math.max(0, Math.min(height, Math.round(rect.y * zoom)));
+      this.bounds = { x, y, width: Math.max(0, Math.min(width - x, Math.round(rect.width * zoom))), height: Math.max(0, Math.min(height - y, Math.round(rect.height * zoom))) };
+      this.visible = true;
+      this.sync();
+    }
+    this.emit();
+    return this.state();
+  }
   layout(value) {
     if (value && (value.scope !== this.scope || value.id !== this.group().activeId)) {
       // A layout can arrive one round-trip before the chat switch lands here. Dropping it left the
