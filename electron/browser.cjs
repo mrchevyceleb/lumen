@@ -247,12 +247,12 @@ class BrowserService {
   activate(chatId, workspace = "") {
     const scope = chatId ? chatScope(chatId) : "";
     if (chatId && this.knownChats.size < 2000) this.knownChats.add(chatId.toLowerCase());
-    const pending = this.pendingLayout;
-    // Retract the outgoing page now. The new chat's own page is attached by the layout the
-    // renderer sends in the same commit that paints it, never before, so one chat's page can
-    // never sit over the other chat's screen.
-    this.layout(null);
-    if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
+    const pending = this.pendingLayout, switching = scope !== this.scope;
+    // Retract the outgoing page only when the chat really changes. Re-announcing the chat that is
+    // already active (clicking its own row, or a snapshot on the active chat) must not blank a page
+    // that is already correct, because nothing re-measures until something else moves.
+    if (switching) this.layout(null);
+    if (switching && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
     this.adoptLegacy(scope, workspace);
     this.scope = scope;
     this.group();

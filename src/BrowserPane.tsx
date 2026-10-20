@@ -176,6 +176,8 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       const x = Number(pin.dataset.x || 0) * width, y = Number(pin.dataset.y || 0) * height;
       const radius = dot.offsetWidth / 2 || 13, gap = 6;
       label.style.transform = "none";
+      // Measure at natural width each time, so a label widens again when the stage grows.
+      label.style.width = "";
       let w = label.offsetWidth, h = label.offsetHeight;
       if (w > width - 8) { label.style.width = `${width - 8}px`; w = label.offsetWidth; h = label.offsetHeight; }
       let left = x + radius + gap;
