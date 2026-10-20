@@ -1396,7 +1396,22 @@ export default function App() {
       : settings.accent
     : settings.accent;
   const hasNative = tabs.some((t) => t.mode === "native" || t.terminalReady || t.toolTerminals?.length);
+  // Safety net for the switch paths that do not go through selectTab (restore, close, archive):
+  // announce the active chat before this frame paints, so no other chat's page outlives the switch.
+  const activeChatKey = active ? active.controlId || active.id : "";
+  useLayoutEffect(() => {
+    void api("browser:activate", activeChatKey, active && !active.projectless ? active.root : "").catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatKey]);
+  // A switch has to retract the outgoing chat's native page in the same commit. The browser pane
+  // only tells the main process once its own effects run, and a chat with no browser open never
+  // tells it at all, so the previous chat's page stayed composited over the chat being opened for
+  // a few frames. Announcing the new chat here covers every switch path: tabs, keyboard and close.
+  const announceChat = (tab?: Tab) => {
+    void api("browser:activate", tab ? tab.controlId || tab.id : "", tab && !tab.projectless ? tab.root : "").catch(() => {});
+  };
   const selectTab = (tab: Tab) => {
+    announceChat(tab);
     setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
     if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
   };

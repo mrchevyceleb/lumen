@@ -98,9 +98,10 @@ const buildMarkupHTML = (imageDataURL, marks, width, height) => {
   return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
     `.pin{position:absolute;width:0;height:0;pointer-events:none}` +
     `.dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center}` +
-    `.pin em{position:absolute;left:calc(var(--r) + ${gap}px);top:0;transform:translateY(-50%);font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95);max-width:290px}` +
+    `.pin em{position:absolute;left:calc(var(--r) + ${gap}px);top:0;transform:translateY(-50%);width:max-content;font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95);max-width:290px}` +
     `.pin.flip em{left:auto;right:calc(var(--r) + ${gap}px);text-align:right}` +
-    `.pin.high em{top:-15px}.pin.low em{top:15px}` +
+    // Anchor the label box inside the image at the edges so it is never clipped.
+    `.pin.high em{top:auto;bottom:${Math.round(radius + gap)}px;transform:none}.pin.low em{top:${Math.round(radius + gap)}px;transform:none}` +
     `</style><img src="${imageDataURL}">${pins}`;
 };
 const MARK_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -117,6 +118,9 @@ class BrowserService {
     this.bounds = null;
     this.pendingLayout = null;
     this.attached = null;
+    // Chat ids the app has actually opened a chat for. The local agent API may only target these,
+    // so a client cannot invent a chat that does not exist in Lumen.
+    this.knownChats = new Set();
     this.popups = new Set();
     this.profile = session.fromPartition("persist:lumen-browser");
     const networks = new Set(["local-network", "local-network-access", "loopback-network"]);
@@ -238,7 +242,12 @@ class BrowserService {
   }
   activate(chatId, workspace = "") {
     const scope = chatId ? chatScope(chatId) : "";
+    if (chatId && this.knownChats.size < 2000) this.knownChats.add(chatId.toLowerCase());
     const pending = this.pendingLayout;
+    // The pane geometry is the same for every chat, so a chat that already has a page can be
+    // painted in the same turn as the outgoing chat is retracted instead of leaving the pane
+    // blank until the renderer re-measures it.
+    const wasVisible = this.visible, bounds = this.bounds;
     this.layout(null);
     if (scope !== this.scope && !this.groups.get(this.scope)?.tabs.length) this.groups.delete(this.scope);
     this.adoptLegacy(scope, workspace);
@@ -249,6 +258,7 @@ class BrowserService {
     // The renderer measured this chat's pane while the switch was still in flight; use it instead
     // of waiting for the next distinct measurement, which may never come.
     if (pending && pending.scope === scope && pending.id === this.group().activeId) this.layout(pending);
+    else if (wasVisible && bounds) { this.bounds = bounds; this.visible = true; this.sync(); }
     return this.state();
   }
   discard(chatId) {
@@ -658,7 +668,13 @@ class BrowserService {
     if (action === "list") return { chats: [...this.groups].map(([scope, group]) => ({ scope, chatId: scope.startsWith(CHAT_SCOPE_PREFIX) ? scope.slice(CHAT_SCOPE_PREFIX.length) : "", activeId: group.activeId, tabs: group.tabs.map((tab) => this.metadata(tab)) })) };
     if (action === "open") {
       let scope;
-      if (Object.hasOwn(body, "chatId")) scope = chatScope(body.chatId);
+      if (Object.hasOwn(body, "chatId")) {
+        scope = chatScope(body.chatId);
+        // Refuse a chat Lumen has never opened: it would leave an orphan tab group and hides a
+        // client bug behind a 200.
+        if (!this.knownChats.has(body.chatId.toLowerCase()) && !this.groups.has(scope))
+          throw bad("That chat is not open in Lumen.", 404);
+      }
       else if (Object.hasOwn(body, "scope")) {
         if (!validScope(body.scope) || !body.scope) throw bad("Choose a chat before using its browser.");
         scope = body.scope.toLowerCase();

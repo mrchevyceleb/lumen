@@ -103,9 +103,9 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     if (markupLayerRef.current) observer.observe(markupLayerRef.current);
     return () => observer.disconnect();
   }, [markupMode, markupSize]);
-  // Launching a new chat must blank the native page in the same commit. Without this the previous
-  // chat's Chromium view stays composited over the new chat's pane until the layout round-trip.
-  useLayoutEffect(() => { void api("browser:layout", null).catch(() => {}); }, [scope]);
+  // The switch itself retracts the outgoing page (App announces the new chat to the main process
+  // before this pane mounts, which paints this chat's own page in the same turn), so nothing here
+  // blanks the pane; only a closed or marking pane detaches its own page.
   useLayoutEffect(() => {
     if (!open || markupMode) { void api("browser:layout", null).catch(onError); return; }
     let frame = 0, previous = "", failed = false;
@@ -153,7 +153,12 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     catch (e: any) { setError(e.message); }
     finally { marksLock.current = false; setMarksSending(false); }
   };
-  const cancelMarkup = () => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); };
+  const cancelMarkup = () => { setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setExitArmed(false); };
+  // Leaving markup throws away every pin, so a click with pins on the shot arms a confirm first
+  // instead of silently discarding the work.
+  const [exitArmed, setExitArmed] = useState(false);
+  useEffect(() => { setExitArmed(false); }, [marks.length]);
+  const closeMarkup = () => { if (marks.length > 0 && !exitArmed) { setExitArmed(true); return; } cancelMarkup(); };
   const navigate = async (url: string) => {
     if (current) await action({ action: "navigate", id: current.id, url });
     else await action({ action: "open", chatId, workspace, url });
@@ -243,7 +248,9 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         }}>Add</button>
         {marks.length > 0 && <button onClick={() => setMarks((old) => old.slice(0, -1))}>Remove last</button>}
         {marks.length > 0 && <button disabled={marksSending} onClick={() => void sendMarkup()}><Send size={12} />{marksSending ? "Sending…" : `Send ${marks.length} pin${marks.length === 1 ? "" : "s"} to chat`}</button>}
-        <button disabled={marksSending} onClick={cancelMarkup}>Cancel</button>
+        <button disabled={marksSending} className={exitArmed ? "armed" : ""} onClick={closeMarkup}>
+          <X size={12} />{exitArmed ? `Discard ${marks.length} pin${marks.length === 1 ? "" : "s"}?` : "Done marking"}
+        </button>
       </div>}
       <div ref={host} className={mobile || markupMode ? "browser-viewport browser-viewport-device" : "browser-viewport"}>
         {markupMode && current ? <div className="browser-markup-layer" ref={markupLayerRef}>
@@ -267,7 +274,6 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
               <span>?</span><em>New pin: type what it means, then Add</em>
             </div>}
           </div>
-          <div className="browser-markup-exit"><button onClick={cancelMarkup}><X size={12} />Done marking</button></div>
         </div> : current?.error ? <div className="browser-empty"><Globe size={30} /><strong>Couldn’t load this page</strong><p>{current.error}</p><button onClick={() => void action({ action: "reload", id: current.id })}>Try again</button></div> : (!current || current.url === "about:blank") && <div className="browser-empty">
           <Globe size={34} /><strong>This chat has its own browser.</strong><p>Open a local dev server or a live website here.<br />Other chats keep their own pages, right where they left them.</p>
           <div className="browser-local-links">{[3000, 5173, 8080].map((port) => <button key={port} onClick={() => void navigate(`http://localhost:${port}`)}>localhost:{port}</button>)}</div>
