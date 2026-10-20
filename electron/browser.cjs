@@ -195,7 +195,7 @@ class BrowserService {
     if (!validScope(scope) || scope.length > 8192) throw bad("Invalid browser scope.");
     if (!this.groups.has(scope)) {
       for (const [key, group] of this.groups) if (key !== this.scope && !group.tabs.length) this.groups.delete(key);
-      if (this.groups.size >= 512) throw new Error("The browser has reached its saved-chat limit.");
+      if (this.groups.size >= 512) throw bad("The browser has reached its saved-chat limit.", 409);
       this.groups.set(scope, { tabs: [], activeId: "" });
     }
     return this.groups.get(scope);
@@ -467,11 +467,11 @@ class BrowserService {
   create(scope = this.scope, url = "about:blank") {
     if (!validScope(scope)) throw bad("Invalid browser scope.");
     if (this.knownChat && scope && !this.knownChat(scope.slice(CHAT_SCOPE_PREFIX.length)))
-      throw new Error("That chat is closed, so its browser cannot open new tabs.");
+      throw bad("That chat is closed, so its browser cannot open new tabs.", 404);
     if ([...this.groups.values(), ...this.legacy.values()].reduce((sum, group) => sum + group.tabs.length, 0) >= MAX_TABS)
-      throw new Error(`Close a browser tab before opening another (${MAX_TABS} across all chats).`);
+      throw bad(`Close a browser tab before opening another (${MAX_TABS} across all chats).`);
     const normalized = browserURL(url), group = this.group(scope);
-    if (group.tabs.length >= 24) throw new Error("Close a browser tab before opening another (24 per chat).");
+    if (group.tabs.length >= 24) throw bad("Close a browser tab before opening another (24 per chat).");
     const tab = { id: crypto.randomUUID(), url: normalized, title: "New tab", error: "", console: [], view: { mode: "desktop" } };
     group.tabs.push(tab); group.activeId = tab.id;
     if (normalized !== "about:blank") this.ensure(tab);
@@ -587,21 +587,21 @@ class BrowserService {
   }
   async capture(id) {
     const { tab } = this.find(id);
-    if (tab.url === "about:blank") throw new Error("Open a page before capturing it.");
+    if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
     return this.pageOperation(tab, (contents) => contents.capturePage(undefined, { stayHidden: true, stayAwake: true }));
   }
   async beginCapture(id) {
     const { tab } = this.find(id);
-    if (tab.url === "about:blank") throw new Error("Open a page before capturing it.");
+    if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
     const generation = tab.generation;
     const image = await this.capture(id);
     const size = image.getSize();
-    if (!size.width || !size.height) throw new Error("The screenshot was empty. Reload the page and try again.");
+    if (!size.width || !size.height) throw bad("The screenshot was empty. Reload the page and try again.", 409);
     // Read the page text at the same moment as the pixels. Reading it later let an app that keeps
     // rendering (a live dashboard, a chat) send text describing a page the screenshot no longer showed.
-    if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again once it finishes loading.");
+    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
     const page = await this.inspect(id).catch(() => null);
-    if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again once it finishes loading.");
+    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
     const token = crypto.randomUUID();
     this.markCaptures.set(token, { tabId: tab.id, generation: tab.generation, image, page, createdAt: Date.now() });
     for (const [key, capture] of this.markCaptures) if (Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) this.markCaptures.delete(key);
@@ -610,13 +610,13 @@ class BrowserService {
   }
   takeCapture(token, id) {
     const capture = typeof token === "string" ? this.markCaptures.get(token) : undefined;
-    if (!capture) throw new Error("That screenshot expired. Capture it again.");
+    if (!capture) throw bad("That screenshot expired. Capture it again.", 409);
     this.markCaptures.delete(token);
     const { tab } = this.find(id);
     if (capture.tabId !== tab.id || capture.generation !== tab.generation)
-      throw new Error("The page changed since that screenshot. Capture it again.");
+      throw bad("The page changed since that screenshot. Capture it again.", 409);
     const size = capture.image.getSize();
-    if (!size.width || !size.height) throw new Error("The screenshot was empty. Capture it again.");
+    if (!size.width || !size.height) throw bad("The screenshot was empty. Capture it again.", 409);
     return { tab, image: capture.image, size, page: capture.page || null };
   }
   async composeMarkedImageFor(frozen, marks) {
@@ -659,18 +659,23 @@ class BrowserService {
           contents.removeListener("did-stop-loading", stopped); contents.removeListener("destroyed", destroyed);
           error ? reject(error) : resolve();
         };
-        const destroyed = () => finish(new Error("The browser tab was closed."));
+        const destroyed = () => finish(bad("The browser tab was closed.", 404));
         const stopped = () => {
           if (contents.isDestroyed()) destroyed();
           else if (!contents.isLoadingMainFrame()) finish(tab.error ? new Error(tab.error) : null);
         };
-        const timer = setTimeout(() => finish(new Error("The page took too long to load.")), 15000);
+        const timer = setTimeout(() => finish(bad("The page took too long to load.", 504)), 15000);
         contents.on("did-stop-loading", stopped); contents.once("destroyed", destroyed);
-        Promise.resolve(tab.ready).then(stopped, finish);
+        Promise.resolve(tab.ready).then(stopped, (error) => {
+          // A restored phone tab reloads to apply emulation, which aborts the original load.
+          // That is not a failure: the reload's own did-stop-loading resolves this wait.
+          if (error?.code === "ERR_ABORTED" && !contents.isDestroyed() && contents.isLoadingMainFrame()) return;
+          finish(error);
+        });
       });
     }
-    if (contents.isDestroyed()) throw new Error("The browser tab was closed.");
-    if (contents.isLoadingMainFrame()) throw new Error("Wait for the page to finish loading and try again.");
+    if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
+    if (contents.isLoadingMainFrame()) throw bad("Wait for the page to finish loading and try again.", 409);
     if (tab.error) throw new Error(tab.error);
     return new Promise((resolve, reject) => {
       let done = false;
@@ -679,9 +684,9 @@ class BrowserService {
         contents.removeListener("destroyed", destroyed); contents.removeListener("did-start-navigation", navigating);
         error ? reject(error) : resolve(result);
       };
-      const destroyed = () => finish(new Error("The browser tab was closed."));
-      const navigating = (details) => { if (details.isMainFrame) finish(new Error("The page changed while capturing it. Try again once it finishes loading.")); };
-      const timer = setTimeout(() => finish(new Error("The page took too long. Reload it and try again.")), 15000);
+      const destroyed = () => finish(bad("The browser tab was closed.", 404));
+      const navigating = (details) => { if (details.isMainFrame) finish(bad("The page changed while capturing it. Try again once it finishes loading.", 409)); };
+      const timer = setTimeout(() => finish(bad("The page took too long. Reload it and try again.", 504)), 15000);
       contents.once("destroyed", destroyed); contents.on("did-start-navigation", navigating);
       Promise.resolve().then(() => operation(contents)).then((result) => finish(null, result), (error) => finish(error));
     });
@@ -689,7 +694,7 @@ class BrowserService {
   async inspect(id) {
     const { tab } = this.find(id);
     const text = await this.pageOperation(tab, (contents) => contents.executeJavaScript("document.body?.innerText.slice(0, 16000) || ''"));
-    return { url: tab.url, title: tab.title, text, console: tab.console };
+    return { url: tab.url, title: tab.title, text, console: [...tab.console] };
   }
   async captureContext(id, marks, captureToken = "") {
     const { tab } = this.find(id);
@@ -711,7 +716,7 @@ class BrowserService {
     await this.pageOperation(tab, () => undefined);
     const generation = tab.generation;
     const [image, page] = await Promise.all([this.capture(id), this.inspect(id)]);
-    if (tab.generation !== generation) throw new Error("The page changed while capturing it. Try again.");
+    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again.", 409);
     return { image, page };
   }
   async control(body) {
@@ -723,8 +728,10 @@ class BrowserService {
       if (Object.hasOwn(body, "chatId")) {
         scope = chatScope(body.chatId);
         // Refuse a chat Lumen has never opened: it would leave an orphan tab group and hides a
-        // client bug behind a 200.
-        if (!this.knownChats.has(body.chatId.toLowerCase()) && !this.groups.has(scope))
+        // client bug behind a 200. A restored or background chat is known through the live
+        // session callback even when the renderer has not activated it this session.
+        const chatIdLower = String(body.chatId).toLowerCase();
+        if (!this.knownChats.has(chatIdLower) && !(this.knownChat && this.knownChat(chatIdLower)) && !this.groups.has(scope))
           throw bad("That chat is not open in Lumen.", 404);
       }
       else if (Object.hasOwn(body, "scope")) {

@@ -48,6 +48,8 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const onWidthRef = useRef(onWidth);
   onWidthRef.current = onWidth;
   const current = state.scope === scope ? state.tabs.find((tab) => tab.id === state.activeId) : undefined;
+  const currentIdRef = useRef<string | undefined>(current?.id);
+  currentIdRef.current = current?.id;
   const action = async (body: object) => {
     if (markupMode && PAGE_CHANGING.has((body as { action?: string }).action || "")) return null;
     try { setError(""); return await api("browser:action", body); }
@@ -100,8 +102,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     if (markupScopeRef.current === scope) return;
     markupScopeRef.current = scope;
     if (!markupMode) return;
+    // The frozen shot belongs to the chat it was taken in, so it cannot follow the user into a
+    // different chat. Say so instead of dropping it silently.
+    if (marks.length || markupImage) onError("Marking closed: that screenshot belongs to the chat you left, so its pins were discarded.");
     setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); setConfirmDiscard(false); marksLock.current = false;
-  }, [scope, markupMode]);
+  }, [scope, markupMode, marks.length, markupImage, onError]);
   useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
   // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
   // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
@@ -161,9 +166,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     return () => cancelAnimationFrame(frame);
   }, [open, blocked, markupMode, current?.id, current?.url, current?.error, scope, onError]);
   const enterMarkup = async () => {
-    if (!current || captureLock.current || markupMode) return; captureLock.current = true; setCapturing(true);
+    if (!current || captureLock.current || markupMode) return;
+    const startScope = scopeRef.current, startTab = current.id;
+    captureLock.current = true; setCapturing(true);
     try {
-      const frozen = await api<{ token: string; image: string }>("browser:action", { action: "markup-begin", id: current.id });
+      const frozen = await api<{ token: string; image: string }>("browser:action", { action: "markup-begin", id: startTab });
       if (!frozen.token || !frozen.image) throw new Error("The screenshot came back empty.");
       const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => {
         const probe = new Image();
@@ -171,6 +178,10 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         probe.onerror = () => reject(new Error("The screenshot could not be read."));
         probe.src = frozen.image;
       });
+      // A capture can take a while. If the user moved to another chat or tab meanwhile, this
+      // picture no longer belongs to what is on screen, so drop it instead of opening markup
+      // over the wrong page.
+      if (scopeRef.current !== startScope || currentIdRef.current !== startTab) return;
       setMarkupToken(frozen.token);
       setMarkupImage(frozen.image);
       setMarkupSize(dimensions);

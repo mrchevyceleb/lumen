@@ -314,13 +314,15 @@ startup.then(async (start) => {
   ipcMain.on("browser:hide-now", (event) => {
     const trusted = event.sender === window?.webContents && event.senderFrame === window?.webContents.mainFrame
       && (event.senderFrame?.url === fileURL || (devURL && event.senderFrame?.url.startsWith(`${devURL}/`)));
-    if (trusted) browser.hideNow();
+    // This call blocks the renderer until returnValue is set: never leave it hanging, even if
+    // the browser throws.
+    try { if (trusted) browser.hideNow(); } catch { /* keep the renderer moving */ }
     event.returnValue = trusted;
   });
   ipcMain.on("browser:switch-now", (event, chatId, workspace, box, paint) => {
     const trusted = event.sender === window?.webContents && event.senderFrame === window?.webContents.mainFrame
       && (event.senderFrame?.url === fileURL || (devURL && event.senderFrame?.url.startsWith(`${devURL}/`)));
-    if (trusted) browser.switchNow(chatId, workspace, box, paint === true);
+    try { if (trusted) browser.switchNow(chatId, workspace, box, paint === true); } catch { /* keep the renderer moving */ }
     event.returnValue = trusted;
   });
   handle("browser:action", (body) => {

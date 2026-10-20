@@ -225,6 +225,9 @@ export default function App() {
   const visibleSidebar = sidebar;
   const panelWidthsRef = useRef({ sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen });
   panelWidthsRef.current = { sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen };
+  // Width to come back to after the explorer is auto-hidden for lack of room; the clamp would
+  // otherwise leave it at its minimum and save that narrow width for the next launch.
+  const explorerRestoreRef = useRef(0);
   useEffect(() => {
     const openKeys: Array<"sidebar" | "browser" | "explorer"> = [];
     if (visibleSidebar) openKeys.push("sidebar");
@@ -269,13 +272,19 @@ export default function App() {
   // the browser closes or the window has room again.
   useEffect(() => {
     if (!visibleExplorer || explorerPinned.current) return;
+    // Room left for the explorer itself once the conversation keeps its own minimum: below one
+    // pane minimum there is nothing usable to show, so hide it instead of squeezing all three.
     const room = viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? sidebarWidth : 0) - (browserOpen ? browserWidth : 0);
-    if (room < 0) setExplorerHidden(true);
-  }, [browserOpen, viewportWidth, visibleExplorer, visibleSidebar, sidebarWidth, browserWidth]);
+    if (room < MIN_PANEL) {
+      if (!explorerRestoreRef.current) explorerRestoreRef.current = explorerWidth;
+      setExplorerHidden(true);
+    }
+  }, [browserOpen, viewportWidth, visibleExplorer, visibleSidebar, sidebarWidth, browserWidth, explorerWidth]);
   useEffect(() => {
     if (!explorerHidden) return;
     if (browserOpen && viewportWidth < 1180) return;
     setExplorerHidden(false); explorerPinned.current = false;
+    if (explorerRestoreRef.current) { setExplorerWidth(explorerRestoreRef.current); explorerRestoreRef.current = 0; }
   }, [browserOpen, viewportWidth, explorerHidden]);
   const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
   useLayoutEffect(() => {
@@ -330,10 +339,18 @@ export default function App() {
     if (!agentMenu) return;
     const close = (event: PointerEvent) => {
       const target = event.target as Node;
-      if (!agentMenuRef.current?.contains(target) && !(target instanceof Element && target.closest(".agent-menu-anchor"))) {
+      const inside = agentMenuRef.current?.contains(target)
+        || (target instanceof Element && (!!target.closest(".agent-menu-anchor") || !!target.closest("[data-agent-menu-trigger]")));
+      if (!inside) {
         setAgentMenu(false);
         setAgentMenuRoot(undefined);
       }
+    };
+    // A click inside the native browser view never reaches this document, but it does move
+    // focus off the window, so losing focus closes the menu too.
+    const closeOnBlur = () => {
+      setAgentMenu(false);
+      setAgentMenuRoot(undefined);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -344,9 +361,11 @@ export default function App() {
     };
     document.addEventListener("pointerdown", close, true);
     document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("blur", closeOnBlur);
     return () => {
       document.removeEventListener("pointerdown", close, true);
       document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("blur", closeOnBlur);
     };
   }, [agentMenu]);
   const [notice, setNotice] = useState("");
@@ -1446,7 +1465,7 @@ export default function App() {
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
     <div className="agent-menu-anchor" ref={agentMenuAnchorRef}>
       <IconButton label="New agent session" active={agentMenu} aria-expanded={agentMenu} aria-controls={agentMenu ? "new-chat-menu" : undefined} onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}><Plus size={18} /></IconButton>
-      {agentMenu && createPortal(<div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" style={agentMenuPos ? { top: agentMenuPos.top, right: agentMenuPos.right } : { visibility: "hidden" }} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); }
+      {agentMenu && createPortal(<div className="agent-menu" id="new-chat-menu" ref={agentMenuRef} role="group" aria-label="Choose an agent" style={agentMenuPos ? { top: agentMenuPos.top, right: agentMenuPos.right } : { opacity: 0, pointerEvents: "none" }} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setAgentMenu(false); if (agentMenuTrigger.current?.isConnected) agentMenuTrigger.current.focus(); }
         else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
           const items = [...(agentMenuRef.current?.querySelectorAll<HTMLButtonElement>("button") || [])];
           if (!items.length) return;
@@ -1680,6 +1699,7 @@ export default function App() {
                   </button>
                   <button
                     className="switch-agent"
+                    data-agent-menu-trigger
                     onClick={() => { setAgentMenuRoot(undefined); setAgentMenu(!agentMenu); }}
                   >
                     <AgentMark

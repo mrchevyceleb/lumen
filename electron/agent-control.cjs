@@ -159,7 +159,7 @@ class AgentControl {
         try { return send(200, await this.browser(req.method === "GET" ? { action: "list" } : body)); }
         catch (error) {
           // Browser validation failures are client errors, not server faults.
-          const status = error.status || (/chat is closed|browser tab is closed/i.test(error.message || "") ? 404 : 500);
+          const status = error.status || (/chat is closed|browser (?:tab )?(?:is|was) closed/i.test(error.message || "") ? 404 : 500);
           throw new ControlError(error.message, status);
         }
       }
