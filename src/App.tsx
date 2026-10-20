@@ -63,6 +63,17 @@ import {
   type BrowserPage,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
+
+// Two chats from the same agent both called "Claude Code" are impossible to tell apart in the
+// sidebar (and their browsers both read "Claude Code's browser"), so a new chat takes the next
+// free number instead of repeating a name that is already on screen.
+const uniqueChatName = (base: string, tabs: { id: string; name: string }[], exceptId = "") => {
+  const taken = new Set(tabs.filter((tab) => tab.id !== exceptId).map((tab) => tab.name));
+  if (!taken.has(base)) return base;
+  const stem = base.replace(/ \d+$/, "");
+  for (let n = 2; n < 500; n += 1) if (!taken.has(`${stem} ${n}`)) return `${stem} ${n}`;
+  return base;
+};
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
 import SettingsPanel from "./SettingsPanel";
 import Conversation, { AgentMark } from "./Conversation";
@@ -611,7 +622,11 @@ export default function App() {
         browserOpen: resume?.browserOpen === true,
       };
       browserOpenRef.current[created.controlId] = tab.browserOpen === true;
-      setTabs((old) => [...old.filter((value) => value.controlId !== tab.controlId), tab]);
+      setTabs((old) => {
+        const rest = old.filter((value) => value.controlId !== tab.controlId);
+        const name = tab.nameCustom ? tab.name : uniqueChatName(tab.name, rest);
+        return [...rest, name === tab.name ? tab : { ...tab, name }];
+      });
       const selectionUnchanged = rootRef.current === selection.root && activeIdRef.current === selection.id;
       const canFocusArchived = showArchivedRef.current || resume?.archived !== true;
       const canFocusProject = created.projectless || showArchivedRef.current || !isHiddenProject(created.root);
@@ -633,7 +648,11 @@ export default function App() {
       if (control) throw e;
       if (resume?.controlId && resume.agent) {
         const retained = { ...resume, id: resume.controlId, mode: "rich", busy: false, recoveryError: e.message, messages: resume.messages || [], name: resume.name || agentNames[resume.agent] } as Tab;
-        setTabs((old) => [...old.filter((value) => value.controlId !== retained.controlId), retained]);
+        setTabs((old) => {
+          const rest = old.filter((value) => value.controlId !== retained.controlId);
+          const name = retained.nameCustom ? retained.name : uniqueChatName(retained.name, rest, retained.controlId);
+          return [...rest, name === retained.name ? retained : { ...retained, name }];
+        });
         setActiveId(retained.id);
         return retained;
       }
@@ -982,7 +1001,8 @@ export default function App() {
           setUiRequests((old) => [...old.filter((value) => value.session !== e.id || value.request.id !== request.id), { session: e.id, request }]);
         else if (request.method === "notify") notify(request.message || "Pi notification");
         else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
-        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id && !tab.nameCustom ? { ...tab, name: request.title || tab.name } : tab));
+        // An agent that names two chats the same thing leaves them indistinguishable too.
+        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id && !tab.nameCustom && request.title ? { ...tab, name: uniqueChatName(request.title, old, tab.id) } : tab));
         // Pi's footer status updates are routine, not popup notifications.
         else if (request.method === "setStatus") return;
         else if (request.method === "setWidget") {

@@ -50,6 +50,9 @@ const chatScope = (chatId) => {
   return CHAT_SCOPE_PREFIX + chatId.toLowerCase();
 };
 // Built-in phone widths (CSS px at devicePixelRatio 3, Chrome mobile user agents).
+// The smallest device-emulation scale Chromium actually honours; below it the override is
+// silently pinned to its floor and the page is drawn cropped inside a smaller box.
+const MIN_EMULATION_SCALE = 0.28;
 const DEVICE_PROFILES = {
   iphone: { width: 390, height: 844, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1" },
   pixel: { width: 412, height: 915, userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36" },
@@ -391,6 +394,23 @@ class BrowserService {
     if (!size || !this.bounds?.width || !this.bounds?.height) return 1;
     return Math.min(1, this.bounds.width / size.width, this.bounds.height / size.height);
   }
+  // Chromium silently refuses a device-emulation scale below roughly a quarter, keeping the
+  // override at its floor. The view then holds a scaled-down box while the page inside still lays
+  // out at full device width, so the phone view showed a cropped sliver of the page (heading and
+  // bottom bar outside the box) in a narrow pane. Emulating a proportionally smaller phone keeps
+  // the requested scale above that floor, so the whole page always fits.
+  emulatedView(size) {
+    const fit = this.fitScale(size);
+    if (fit >= MIN_EMULATION_SCALE) return { size, scale: fit };
+    const ratio = fit / MIN_EMULATION_SCALE;
+    return {
+      size: {
+        width: Math.max(1, Math.round(size.width * ratio)),
+        height: Math.max(1, Math.round(size.height * ratio)),
+      },
+      scale: MIN_EMULATION_SCALE,
+    };
+  }
   deviceSize(view) {
     const normalized = normalizeView(view);
     if (normalized.mode !== "mobile") return null;
@@ -405,7 +425,8 @@ class BrowserService {
     const size = this.deviceSize(tab.view);
     if (!size) return "desktop";
     const view = normalizeView(tab.view);
-    return `${view.device}:${view.orientation}:${Math.round(this.fitScale(size) * 1000)}`;
+    const fitted = this.emulatedView(size);
+    return `${view.device}:${view.orientation}:${Math.round(fitted.scale * 1000)}:${fitted.size.width}x${fitted.size.height}`;
   }
   applyEmulation(tab) {
     if (!tab.nativeView || tab.nativeView.webContents.isDestroyed()) return;
@@ -452,10 +473,10 @@ class BrowserService {
     try {
       // No userAgent option on this Electron: set it on the contents itself.
       contents.setUserAgent(profile.userAgent);
-      const scale = this.fitScale(size);
-      contents.enableDeviceEmulation({ screenPosition: "mobile", screenSize: size, viewPosition: { x: 0, y: 0 }, viewSize: size,
-        deviceScaleFactor: 3, scale });
-      tab.appliedScale = scale;
+      const fitted = this.emulatedView(size);
+      contents.enableDeviceEmulation({ screenPosition: "mobile", screenSize: fitted.size, viewPosition: { x: 0, y: 0 }, viewSize: fitted.size,
+        deviceScaleFactor: 3, scale: fitted.scale });
+      tab.appliedScale = fitted.scale;
     } catch { try { contents.disableDeviceEmulation(); } catch { /* Keep desktop rendering. */ } }
   }
   markEmulationReady(tab, contents) {
@@ -604,9 +625,9 @@ class BrowserService {
     const device = this.deviceSize(tab.view);
     if (!device) { view.setBounds(this.bounds); }
     else {
-      const scale = this.fitScale(device);
-      const width = Math.max(1, Math.round(device.width * scale));
-      const height = Math.min(this.bounds.height, Math.max(1, Math.round(device.height * scale)));
+      const fitted = this.emulatedView(device);
+      const width = Math.max(1, Math.min(this.bounds.width, Math.round(fitted.size.width * fitted.scale)));
+      const height = Math.min(this.bounds.height, Math.max(1, Math.round(fitted.size.height * fitted.scale)));
       view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - width) / 2), y: this.bounds.y + Math.max(0, Math.floor((this.bounds.height - height) / 2)), width, height });
     }
     // Emulation has to land after the view holds its final size: Chromium drops an override
