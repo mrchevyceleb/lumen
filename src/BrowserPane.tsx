@@ -11,6 +11,10 @@ const DEVICE_OPTIONS: { id: string; label: string; width: number; height: number
   { id: "ipad", label: "iPad 820×1180", width: 820, height: 1180 },
 ];
 const MARK_PALETTE = ["red", "orange", "blue", "green", "purple"];
+// While a screenshot is being marked, the page under the pins must stay the page that was
+// captured: swapping tabs, navigating, or reloading would make the frozen shot (and the
+// token bound to its generation) stale, so those actions wait until marking ends.
+const PAGE_CHANGING = new Set(["select", "close", "open", "navigate", "back", "forward", "reload", "stop", "view"]);
 
 export default function BrowserPane({ chatId, chatName, workspace, open, blocked, width, maxWidth, onWidth, onClose, onAttach, canAttach, onError }: {
   chatId: string; chatName: string; workspace: string; open: boolean; blocked: boolean; width: number; maxWidth: number; onWidth: (width: number) => void;
@@ -45,6 +49,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   onWidthRef.current = onWidth;
   const current = state.scope === scope ? state.tabs.find((tab) => tab.id === state.activeId) : undefined;
   const action = async (body: object) => {
+    if (markupMode && PAGE_CHANGING.has((body as { action?: string }).action || "")) return null;
     try { setError(""); return await api("browser:action", body); }
     catch (e: any) { setError(e.message); return null; }
   };
@@ -88,6 +93,15 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     if (markupMode) return;
     setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false;
   }, [current?.id, current?.url, markupMode]);
+  // A frozen screenshot belongs to the chat it was taken in. Leaving that chat ends marking
+  // rather than carrying chat A's pins and image into chat B's pane.
+  const markupScopeRef = useRef(scope);
+  useEffect(() => {
+    if (markupScopeRef.current === scope) return;
+    markupScopeRef.current = scope;
+    if (!markupMode) return;
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); setConfirmDiscard(false); marksLock.current = false;
+  }, [scope, markupMode]);
   useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
   // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
   // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
@@ -147,7 +161,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     return () => cancelAnimationFrame(frame);
   }, [open, blocked, markupMode, current?.id, current?.url, current?.error, scope, onError]);
   const enterMarkup = async () => {
-    if (!current || captureLock.current) return; captureLock.current = true; setCapturing(true);
+    if (!current || captureLock.current || markupMode) return; captureLock.current = true; setCapturing(true);
     try {
       const frozen = await api<{ token: string; image: string }>("browser:action", { action: "markup-begin", id: current.id });
       if (!frozen.token || !frozen.image) throw new Error("The screenshot came back empty.");
@@ -243,7 +257,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       <div className="browser-heading"><Globe size={14} /><strong>Browser</strong><span title={chatName && chatName !== "Terminal" ? `${chatName}'s browser` : workspace ? `This chat's browser in ${workspace}` : "This chat's browser"}>{chatName && chatName !== "Terminal" ? `${chatName}'s browser` : "This chat's browser"}</span>
         <IconButton label="Hide browser (Ctrl Shift B)" onClick={onClose}><X size={16} /></IconButton>
       </div>
-      <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
+      <div className={markupMode ? "browser-tabs browser-locked" : "browser-tabs"} role="tablist" aria-label="Browser tabs">
         {state.scope === scope && state.tabs.map((tab, index) => <div className={`browser-tab ${tab.id === state.activeId ? "selected" : ""}`} key={tab.id}>
           <button role="tab" tabIndex={tab.id === state.activeId ? 0 : -1} aria-selected={tab.id === state.activeId} title={tab.url}
             onKeyDown={(event) => {
@@ -257,7 +271,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         </div>)}
         <IconButton label="New browser tab" onClick={() => void action({ action: "open", chatId, workspace })}><Plus size={15} /></IconButton>
       </div>
-      <form className="browser-navigation" onSubmit={(e) => { e.preventDefault(); void navigate(address); }}>
+      <form className={markupMode ? "browser-navigation browser-locked" : "browser-navigation"} onSubmit={(e) => { e.preventDefault(); void navigate(address); }}>
         <IconButton label="Back" disabled={!current?.canGoBack} onClick={() => void action({ action: "back", id: current?.id })}><ArrowLeft size={15} /></IconButton>
         <IconButton label="Forward" disabled={!current?.canGoForward} onClick={() => void action({ action: "forward", id: current?.id })}><ArrowRight size={15} /></IconButton>
         <IconButton label={current?.loading ? "Stop loading" : "Reload page"} disabled={!current || current.url === "about:blank"} onClick={() => void action({ action: current?.loading ? "stop" : "reload", id: current?.id })}>{current?.loading ? <X size={15} /> : <RefreshCw size={15} />}</IconButton>

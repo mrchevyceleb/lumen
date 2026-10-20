@@ -59,6 +59,8 @@
 .browser-error { display: flex; gap: 10px; padding: 9px 12px; color: #d9968c; font-size: 11px; overflow-wrap: anywhere; }
 .browser-error button { margin-left: auto; flex-shrink: 0; }
 .browser-loading { animation: browser-spin 1s linear infinite; }
+/* Marking freezes one tab's screenshot: page-swapping controls stay out of reach until it ends. */
+.browser-locked { pointer-events: none; opacity: 0.55; }
 @keyframes browser-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .browser-loading { animation: none; } }
 .chat-web-link { color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
