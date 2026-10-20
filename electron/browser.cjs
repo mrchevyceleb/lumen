@@ -148,7 +148,7 @@ class BrowserService {
         if (legacy && typeof group.workspace !== "string") continue;
         const tabs = group.tabs.slice(0, Math.min(24, remaining)).flatMap((tab) => {
           try {
-            return [{ id: crypto.randomUUID(), url: browserURL(tab.url), title: String(tab.title || "New tab").slice(0, 200), error: "", console: [], view: normalizeView(tab.view), history: this.cleanHistory(tab.history) }];
+            return [{ id: crypto.randomUUID(), url: browserURL(tab.url), title: String(tab.title || "New tab").slice(0, 200), error: "", console: [], view: normalizeView(tab.view), history: this.cleanHistory(tab.history), restored: true }];
           } catch { return []; }
         });
         remaining -= tabs.length;
@@ -438,6 +438,15 @@ class BrowserService {
     tab.pendingEmulationView = undefined;
     if (pendingView && !sameView(pendingView, tab.view)) tab.view = pendingView;
     this.applyEmulation(tab);
+    // Emulation applied after a restored document has already laid out is not honoured by the
+    // compositor (the live view switch reloads for the same reason), so a restored phone tab
+    // lays out once more. Readiness is one-shot, so this cannot loop, and a new tab never takes
+    // this branch because it only ever emulates before its first request.
+    if (tab.restored) {
+      tab.restored = false;
+      if (this.deviceSize(tab.view)) { contents.reload(); return; }
+    }
+    this.sync();
   }
   load(tab, url, history = null) {
     tab.url = url; tab.pendingURL = url; tab.error = ""; tab.console = [];
