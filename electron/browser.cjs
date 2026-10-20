@@ -18,8 +18,10 @@ function browserURL(value) {
   let url;
   try { url = new URL(/^[a-z][\w+.-]*:/i.test(input) && !local && !hostWithPort ? input : `${local ? "http" : "https"}://${input}`); }
   catch { throw bad("Try a full address like localhost:3000, or a site like example.com."); }
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
-    throw bad("Use an HTTP or HTTPS address without embedded credentials.");
+  if (url.username || url.password)
+    throw bad("Leave the username and password out of the address. Sign in on the page itself.");
+  if (!["http:", "https:"].includes(url.protocol))
+    throw bad("That is not a web page. Try a site like example.com, or a local address like localhost:3000.");
   return url.href;
 }
 function friendlyLoadError(description, url) {
@@ -98,7 +100,7 @@ const buildMarkupHTML = (imageDataURL, marks, width, height) => {
     `let left=x+r+GAP;if(left+w>W-4)left=x-r-GAP-w;` +
     `if(left<4)left=Math.min(Math.max(4,W-4-w),Math.max(4,x-w/2));` +
     `const top=Math.min(Math.max(4,y-h/2),Math.max(4,H-4-h));` +
-    `em.style.left=Math.round(left)+'px';em.style.top=Math.round(top)+'px';` +
+    `em.style.left=Math.round(left-x)+'px';em.style.top=Math.round(top-y)+'px';` +
     `const dx=Math.min(Math.max(x,r+2),W-r-2),dy=Math.min(Math.max(y,r+2),H-r-2);` +
     `dot.style.left=Math.round(dx-x)+'px';dot.style.top=Math.round(dy-y)+'px';}};window.__layoutPins();`;
   return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
@@ -311,6 +313,11 @@ class BrowserService {
     // renders the right (mobile) page, not just the right-sized one.
     this.applyEmulation(tab);
     this.guard(contents);
+    // A click inside the native page never reaches the app's own document, so report the page
+    // taking focus and let the renderer close any menu that was open over it.
+    contents.on("focus", () => {
+      if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) this.window.webContents.send("browser:command", "page-focus");
+    });
     contents.setWindowOpenHandler(({ url }) => webURL(url) ? { action: "allow", overrideBrowserWindowOptions: {
       parent: this.window, width: 1000, height: 760, autoHideMenuBar: true, webPreferences: this.preferences,
     } } : { action: "deny" });
@@ -391,6 +398,15 @@ class BrowserService {
     return normalized.orientation === "landscape"
       ? { width: profile.height, height: profile.width } : { width: profile.width, height: profile.height };
   }
+  // Emulation is only honoured when it is applied against the view's real size, so the key
+  // folds in the fitted scale: a rotate, a device change, a restore or a pane resize all
+  // produce a new key and sync() re-applies it once the new bounds have landed.
+  emulationKey(tab) {
+    const size = this.deviceSize(tab.view);
+    if (!size) return "desktop";
+    const view = normalizeView(tab.view);
+    return `${view.device}:${view.orientation}:${Math.round(this.fitScale(size) * 1000)}`;
+  }
   applyEmulation(tab) {
     if (!tab.nativeView || tab.nativeView.webContents.isDestroyed()) return;
     const contents = tab.nativeView.webContents, size = this.deviceSize(tab.view);
@@ -419,11 +435,15 @@ class BrowserService {
 
     if (!size) {
       tab.appliedScale = 1;
+      tab.emulationKey = "desktop";
       try { contents.disableDeviceEmulation(); } catch { /* Already desktop. */ }
       contents.setUserAgent(this.desktopUserAgent || contents.getUserAgent().replace(/\s(?:Electron|lumen-workspace|Lumen)\/\S+/g, ""));
       return;
     }
     const profile = DEVICE_PROFILES[normalizeView(tab.view).device];
+    // Record the attempt either way: a headless retry on every frame would be worse than a
+    // single failed override, and the next layout change or view switch tries again.
+    tab.emulationKey = this.emulationKey(tab);
     try {
       // No userAgent option on this Electron: set it on the contents itself.
       contents.setUserAgent(profile.userAgent);
@@ -492,7 +512,11 @@ class BrowserService {
     if (sameView(tab.view, next)) return this.state();
     tab.view = next;
     this.ensure(tab);
-    this.applyEmulation(tab);
+    // Let sync() apply the emulation once the view has its final size for this view; applying
+    // it against the previous bounds is dropped and left the phone view rendering unemulated
+    // until the next manual resize. Before the first navigation only the UA matters.
+    tab.emulationKey = null;
+    if (!tab.emulationReady) this.applyEmulation(tab);
     if (tab.url !== "about:blank") {
       const contents = tab.nativeView.webContents;
       this.load(tab, tab.url);
@@ -576,13 +600,14 @@ class BrowserService {
     if (!device) { view.setBounds(this.bounds); }
     else {
       const scale = this.fitScale(device);
-      // Only re-emulate once the tab is past its first navigation; before that applyEmulation()
-      // queues the change itself, and sync() runs on every renderer frame.
-      if (tab.appliedScale !== scale && tab.emulationReady) this.applyEmulation(tab);
       const width = Math.max(1, Math.round(device.width * scale));
       const height = Math.min(this.bounds.height, Math.max(1, Math.round(device.height * scale)));
       view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - width) / 2), y: this.bounds.y + Math.max(0, Math.floor((this.bounds.height - height) / 2)), width, height });
     }
+    // Emulation has to land after the view holds its final size: Chromium drops an override
+    // applied against the previous bounds, which is what left the phone view rendering at 1x
+    // after a rotate, a device change or a restore until something else resized the pane.
+    if (tab.emulationReady && tab.emulationKey !== this.emulationKey(tab)) this.applyEmulation(tab);
     view.setVisible(true);
   }
   async capture(id) {

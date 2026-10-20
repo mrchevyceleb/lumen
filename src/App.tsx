@@ -368,6 +368,13 @@ export default function App() {
       window.removeEventListener("blur", closeOnBlur);
     };
   }, [agentMenu]);
+  // The native browser view swallows clicks from the app's document, so the main process
+  // reports when a page takes focus and the menu closes exactly as if you clicked outside it.
+  useEffect(() => window.lumen.onBrowserCommand((command) => {
+    if (command !== "page-focus") return;
+    setAgentMenu(false);
+    setAgentMenuRoot(undefined);
+  }), []);
   const [notice, setNotice] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
@@ -2263,7 +2270,9 @@ export default function App() {
         </Modal>
       )}
       {notice && (
-        <div className="toast" role="status">
+        // The native browser page sits above everything the app draws, so the toast keeps to
+        // the column the app actually owns instead of sliding under the pane.
+        <div className="toast" role="status" style={browserOpen ? { left: `calc((100% - ${browserWidth + 24}px) / 2)`, maxWidth: `min(680px, calc(100% - ${browserWidth + 48}px))` } : undefined}>
           <span>{notice}</span>
           <button
             aria-label="Dismiss notification"

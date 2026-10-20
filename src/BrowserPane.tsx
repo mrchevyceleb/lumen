@@ -222,7 +222,9 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       if (left + w > width - 4) left = x - radius - gap - w;
       if (left < 4) left = Math.min(Math.max(4, width - 4 - w), Math.max(4, x - w / 2));
       const top = Math.min(Math.max(4, y - h / 2), Math.max(4, height - 4 - h));
-      label.style.left = `${Math.round(left)}px`; label.style.top = `${Math.round(top)}px`;
+      // The pin is a zero-size anchor at (x, y), and the label is positioned inside it,
+      // so offsets have to be relative to the pin, not to the stage.
+      label.style.left = `${Math.round(left - x)}px`; label.style.top = `${Math.round(top - y)}px`;
       // Keep the whole dot visible when the click lands on the very edge of the picture.
       const dotX = Math.min(Math.max(x, radius + 2), width - radius - 2), dotY = Math.min(Math.max(y, radius + 2), height - radius - 2);
       dot.style.left = `${Math.round(dotX - x)}px`; dot.style.top = `${Math.round(dotY - y)}px`;
