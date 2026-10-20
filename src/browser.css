@@ -1,4 +1,8 @@
 .browser-pane { flex-shrink: 0; min-width: 0; overflow: hidden; min-height: 0; display: flex; flex-direction: column; background: var(--bg); border-left: 1px solid var(--border); }
+/* Switching chats: this chat's browser state has not arrived yet, and painting an empty tab strip
+   and a dead address bar for a couple of frames reads as a half-drawn panel. Keep the space (the
+   native page's bounds depend on it) but leave the chrome out of sight until it is real. */
+.browser-pane-pending .browser-tabs, .browser-pane-pending .browser-navigation { visibility: hidden; }
 .browser-heading { height: 36px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; color: var(--muted); font-size: 11px; }
 .browser-heading strong { color: var(--text); font-weight: 500; }
 .browser-heading > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -60,7 +64,10 @@
 .browser-error button { margin-left: auto; flex-shrink: 0; }
 .browser-loading { animation: browser-spin 1s linear infinite; }
 /* Marking freezes one tab's screenshot: page-swapping controls stay out of reach until it ends. */
-.browser-locked { pointer-events: none; opacity: 0.55; }
+/* Controls that stop answering while a screenshot is being marked must look like it, not just be
+   dimmed: the tab strip and address bar keep their layout but read as parked. */
+.browser-locked { pointer-events: none; opacity: 0.38; filter: grayscale(0.7); }
+.browser-locked input { cursor: not-allowed; }
 @keyframes browser-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .browser-loading { animation: none; } }
 .chat-web-link { color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }

@@ -112,6 +112,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     // screenshot and every pin back exactly as they were, until the capture token expires.
     if (markupMode && (marks.length || markupImage)) {
       markupStash.current.set(left, { image: markupImage, token: markupToken, size: markupSize, marks, draft: markDraft, at: Date.now() });
+      onError(`Marks kept with this chat. They will be here when you come back.`);
     }
     const kept = markupStash.current.get(scope);
     const fresh = kept && Date.now() - kept.at < MARKUP_TTL_MS ? kept : undefined;
@@ -286,7 +287,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       onPointerDown={resize} onKeyDown={(e) => {
         if (["ArrowLeft", "ArrowRight"].includes(e.key)) { e.preventDefault(); onWidth(width + (e.key === "ArrowLeft" ? 20 : -20)); }
       }} />
-    <aside id="browser-panel" className={dragging ? "browser-pane browser-resizing" : "browser-pane"} style={{ width }} aria-label="Chromium browser">
+    <aside id="browser-panel" className={`browser-pane${dragging ? " browser-resizing" : ""}${state.scope === scope ? "" : " browser-pane-pending"}`} style={{ width }} aria-label="Chromium browser">
       <div className="browser-heading"><Globe size={14} /><strong>Browser</strong><span title={chatName && chatName !== "Terminal" ? `${chatName}'s browser` : workspace ? `This chat's browser in ${workspace}` : "This chat's browser"}>{chatName && chatName !== "Terminal" ? `${chatName}'s browser` : "This chat's browser"}</span>
         <IconButton label="Hide browser (Ctrl Shift B)" onClick={onClose}><X size={16} /></IconButton>
       </div>

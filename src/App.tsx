@@ -1281,7 +1281,7 @@ export default function App() {
         e.preventDefault(); void addTab("shell");
       } else if (e.key === "Tab") {
         const visible = tabsRef.current.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless);
-        if (visible.length > 1) { e.preventDefault(); const index = visible.findIndex((tab) => tab.id === activeIdRef.current); const next = visible[(index + (e.shiftKey ? -1 : 1) + visible.length) % visible.length]; setActiveId(next.id); }
+        if (visible.length > 1) { e.preventDefault(); const index = visible.findIndex((tab) => tab.id === activeIdRef.current); const next = visible[(index + (e.shiftKey ? -1 : 1) + visible.length) % visible.length]; retractBeforeSwitch(next.id); announceChat(next); setActiveId(next.id); }
       } else if ((e.target as HTMLElement)?.closest(".native-terminal")) return;
       else if (e.key.toLowerCase() === "s") {
         e.preventDefault();
@@ -1436,7 +1436,15 @@ export default function App() {
   const announceChat = (tab?: Tab) => {
     void api("browser:activate", tab ? tab.controlId || tab.id : "", tab && !tab.projectless ? tab.root : "").catch(() => {});
   };
+  // A chat with no browser open has no pane to retract the outgoing page for it, so the retract
+  // happens here, synchronously, before this commit paints. The async announce below lands a few
+  // frames late under load, and those frames showed the previous chat's page over the new one.
+  const retractBeforeSwitch = (nextId: string) => {
+    if (!nextId || nextId === activeIdRef.current) return;
+    try { window.lumen.hideBrowserNow(); } catch { /* app is closing */ }
+  };
   const selectTab = (tab: Tab) => {
+    retractBeforeSwitch(tab.id);
     announceChat(tab);
     setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
     if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
@@ -1448,6 +1456,8 @@ export default function App() {
     if (archived && !showArchivedRef.current && activeIdRef.current === tab.id) {
       const sibling = tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t) && (tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root))).at(-1)
         || tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t)).at(-1);
+      retractBeforeSwitch(sibling?.id || "");
+      announceChat(sibling);
       setActiveId(sibling?.id || "");
       setSelectedRoot(sibling && !sibling.projectless ? sibling.root : "");
     }
@@ -1457,6 +1467,8 @@ export default function App() {
     const shownRoot = activeTab ? (activeTab.projectless ? "" : activeTab.root) : selectedRoot;
     if (!((activeTab?.archived) || (shownRoot && isHiddenProject(shownRoot)))) return;
     const sibling = tabsRef.current.filter((t) => t.id !== activeTab?.id && listedTab(t)).at(-1);
+    retractBeforeSwitch(sibling?.id || "");
+    announceChat(sibling);
     setActiveId(sibling?.id || "");
     setSelectedRoot(sibling && !sibling.projectless ? sibling.root : "");
   };
