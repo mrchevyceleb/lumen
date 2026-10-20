@@ -341,7 +341,13 @@ class Runtime {
       env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s) };
       args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
       if (!s.sessionRef) { s.sessionRef = uuid(); o.event(s, { type: "session", sessionRef: s.sessionRef }); }
-      else if (s.sessionStarted && !await require("./session-history.cjs").sessionFile(s)) {
+      else if (s.sessionStarted && !await require("./session-history.cjs").sessionFile(s).then(async (file) => {
+        // An empty transcript file is not resumable either: it is what a first launch that died
+        // leaves behind, and --resume on it fails exactly like a missing one.
+        if (!file) return null;
+        const stat = await fs.stat(file).catch(() => null);
+        return stat && stat.size > 64 ? file : null;
+      })) {
         // A chat keeps its conversation id across restarts, but Claude Code's transcript can be
         // gone: cleaned up, deleted, or never written when the first launch died. Resuming a
         // missing transcript makes every send fail with "No conversation found", so start a
