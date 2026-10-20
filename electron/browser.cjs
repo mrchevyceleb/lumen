@@ -350,6 +350,31 @@ class BrowserService {
   applyEmulation(tab) {
     if (!tab.nativeView || tab.nativeView.webContents.isDestroyed()) return;
     const contents = tab.nativeView.webContents, size = this.deviceSize(tab.view);
+
+    // Electron 44 segfaults when device emulation is changed before the first
+    // committed navigation. Track that lifecycle explicitly and defer queued
+    // view changes until Chromium reports that the initial page committed.
+    if (!tab.emulationReady) {
+      tab.pendingEmulationView = tab.view;
+      if (!tab.emulationNavigationHooked) {
+        tab.emulationNavigationHooked = true;
+        contents.once("did-navigate", () => {
+          tab.emulationReady = true;
+          if (contents.isDestroyed()) return;
+          const pendingView = tab.pendingEmulationView;
+          tab.pendingEmulationView = undefined;
+          if (pendingView && !sameView(pendingView, tab.view)) tab.view = pendingView;
+          this.applyEmulation(tab);
+        });
+      }
+      // Setting the UA before the initial request is safe and lets restored
+      // phone tabs receive mobile HTML on their very first navigation.
+      const initialProfile = size ? DEVICE_PROFILES[normalizeView(tab.view).device] : null;
+      if (initialProfile) contents.setUserAgent(initialProfile.userAgent);
+      else if (this.desktopUserAgent) contents.setUserAgent(this.desktopUserAgent);
+      return;
+    }
+
     if (!size) {
       try { contents.disableDeviceEmulation(); } catch { /* Already desktop. */ }
       contents.setUserAgent(this.desktopUserAgent || contents.getUserAgent().replace(/\s(?:Electron|lumen-workspace|Lumen)\/\S+/g, ""));
