@@ -1159,9 +1159,13 @@ class Sessions {
         await syncNativeMcp(s);
         if (!s.sessionRef) { s.sessionRef = uuid(); this.event(s, { type: "session", sessionRef: s.sessionRef }); }
         const history = await require("./session-history.cjs").readHistory(s);
-        const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId) || s.savedTab;
-        if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The saved CLI conversation is unavailable. This chat is retained; restore its original history before continuing.");
-        s.sessionStarted = !!history;
+        // An empty transcript has nothing to resume either, so treat it as missing.
+        const resumable = !!history?.messages.length;
+        // A missing transcript used to block this chat forever. Start a fresh conversation in
+        // the same chat instead and say so, so the terminal is usable again.
+        if (!resumable && s.sessionStarted)
+          this.event(s, { type: "diagnostic", title: "Started a fresh conversation", text: "Claude no longer had this chat's saved conversation, so the terminal starts a new one. Your earlier messages stay in the chat view." });
+        s.sessionStarted = resumable;
         if (Number.isFinite(history?.contextTokens) && history.contextTokens >= 0) this.event(s, { type: "context", contextTokens: history.contextTokens });
         launch = profiledLaunch(s, [s.sessionStarted ? "--resume" : "--session-id", s.sessionRef, ...cliOptions(s), ...extraOptions(s), ...launchOptions(s)], resolveLauncher);
         s.nativeOwned = true;
@@ -1841,8 +1845,11 @@ class Sessions {
       if (s.agent === "claude") await claudeHome(this, s); else await grokHome(this, s);
       const history = await require("./session-history.cjs").readHistory(s);
       const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId) || s.savedTab;
-      if (!history && saved?.messages?.some((message) => message.role === "user")) throw new Error("The saved CLI conversation is unavailable. This chat is retained; choose its original session before continuing.");
-      s.sessionStarted = !!history;
+      // Reopening a chat whose transcript vanished used to throw and block it permanently.
+      // Start fresh in the same chat instead: the retained messages stay on screen.
+      if (!history?.messages.length && s.sessionStarted)
+        this.event(s, { type: "diagnostic", title: "Started a fresh conversation", text: "Claude no longer had this chat's saved conversation, so this chat starts a new one. Your earlier messages stay visible here." });
+      s.sessionStarted = !!history?.messages.length;
       if (history?.messages.length) this.event(s, { type: "history", messages: history.messages });
       if (Number.isFinite(history?.contextTokens) && history.contextTokens >= 0) {
         this.event(s, { type: "context", contextTokens: history.contextTokens });

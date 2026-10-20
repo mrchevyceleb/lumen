@@ -313,6 +313,12 @@ class Runtime {
       if (e.type === "system" && e.subtype === "status") this.phase(e.status === "compacting");
       if (e.type === "result") {
         if (e.is_error && (e.error_code === "authentication_failed" || /failed to authenticate|OAuth session expired|invalid authentication credentials|OAuth access token (?:has been )?(?:revoked|expired)/i.test([e.result, ...(e.errors || [])].join("\n")))) { this.authFailed = true; s.claudeAuthInvalid = true; }
+        // Belt and braces for the pre-launch transcript check: if Claude still says the
+        // conversation is missing, stop resuming it so the next send starts fresh.
+        if (e.is_error && /No conversation found with session ID/i.test([e.result, ...(e.errors || [])].join("\n")) && s.sessionStarted) {
+          s.sessionStarted = false;
+          o.event(s, { type: "diagnostic", title: "Conversation reset", text: "Claude could not find this chat's saved conversation. Send your message again and Lumen will start a fresh one." });
+        }
         const usage = e.modelUsage?.[this.contextModel] || (Object.keys(e.modelUsage || {}).length === 1 ? Object.values(e.modelUsage)[0] : null);
         if (!this.contextWindow && usage?.contextWindow) this.contextWindow = usage.contextWindow;
         this.reportContext();
@@ -335,6 +341,14 @@ class Runtime {
       env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s) };
       args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
       if (!s.sessionRef) { s.sessionRef = uuid(); o.event(s, { type: "session", sessionRef: s.sessionRef }); }
+      else if (s.sessionStarted && !await require("./session-history.cjs").sessionFile(s)) {
+        // A chat keeps its conversation id across restarts, but Claude Code's transcript can be
+        // gone: cleaned up, deleted, or never written when the first launch died. Resuming a
+        // missing transcript makes every send fail with "No conversation found", so start a
+        // new conversation in the same chat instead of wedging it.
+        s.sessionStarted = false;
+        o.event(s, { type: "diagnostic", title: "Started a fresh conversation", text: "Claude no longer had this chat's saved conversation, so Lumen started a new one. Your earlier messages stay visible here." });
+      }
       args.push(s.sessionStarted ? "--resume" : "--session-id", s.sessionRef);
     } else if (s.agent === "codex") {
       const port = await new Promise((resolve, reject) => { const listener = net.createServer(); listener.once("error", reject); listener.listen(0, "127.0.0.1", () => { const port = listener.address().port; listener.close(() => resolve(port)); }); });
