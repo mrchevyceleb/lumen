@@ -11,6 +11,49 @@ export function webLink(value: string) {
   } catch { return null; }
 }
 
+// mailto: and tel: belong to the system, not to a file path. They are the only
+// external schemes a chat link may hand off, so a vscode: or ssh: link stays
+// inert instead of launching an app nobody asked for.
+export function externalLink(href?: string) {
+  const match = href?.trim().match(/^(mailto|tel):(\S.*)$/i);
+  return match ? `${match[1].toLowerCase()}:${match[2]}` : null;
+}
+
+// Turn a Markdown href into a path the app can open on disk. Handles the shapes
+// agents actually emit: C:/Users/..., C:\Users\..., \\server\share, /home/me,
+// ~/Desktop/file, file:///C:/..., and plain relative paths. Anything that is a
+// real web link, or a scheme we do not handle, comes back null. The path stays
+// percent-encoded here: the main process decodes it exactly once.
+export function filePathFromHref(href?: string) {
+  if (!href) return null;
+  let value = href.trim();
+  if (!value) return null;
+  if (/^(?:mailto|tel|data|javascript):/i.test(value)) return null;
+  if (webLink(value)) return null;
+  if (/^file:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      if (url.host && url.host.toLowerCase() !== "localhost") {
+        // file://server/share/x is a UNC path, not a workspace-relative one.
+        value = `\\\\${url.host}${url.pathname.replace(/\//g, "\\")}`;
+      } else {
+        // file:///C:/x and file://C:/x both mean C:/x on Windows.
+        value = url.pathname.replace(/^\/([a-zA-Z]:[\\/])/, "$1");
+      }
+    } catch {
+      value = value.replace(/^file:\/\/(?:localhost)?/i, "");
+    }
+  } else {
+    // A scheme we do not handle (ftp:, vscode:, ssh:, about:) is not a file; a
+    // drive letter is the one colon form that is. README.md#section and
+    // image.png?raw=1 keep only the path part.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) && !/^[a-zA-Z]:[\\/]/.test(value)) return null;
+    value = value.replace(/[?#].*$/, "");
+  }
+  if (!value || value.startsWith("#")) return null;
+  return value;
+}
+
 export function findWebLinks(text: string) {
   const pattern = /(?:https?:\/\/|www\.|localhost(?=[:/?#\s]|$)|(?:\d{1,3}\.){3}\d{1,3}(?=:\d+)|\[::1\](?=[:/?#\s]|$)|[\w.-]+\.\w+:\d+)[^\s<>"'`\\]*/gi;
   const links: { start: number; end: number; text: string; url: string }[] = [];
@@ -43,16 +86,39 @@ export async function webLinkMenu(url: string, onWeb: (url: string) => void, onE
   } catch (error: any) { onError(error.message); }
 }
 
-export function ChatLink({ href, children, onWeb, onError, onFile }: { href?: string; children: ReactNode; onWeb: (url: string) => void; onError: (message: string) => void; onFile?: (path: string) => void }) {
+export function ChatLink({ href, children, onWeb, onError, onFile, onFileMenu }: { href?: string; children: ReactNode; onWeb: (url: string) => void; onError: (message: string) => void; onFile?: (path: string) => void; onFileMenu?: (path: string) => void }) {
   const url = href ? webLink(href) : null;
-  return <a className={url ? "chat-web-link" : undefined} href={url || href}
-    title={url ? "Open in Lumen · Ctrl-click to open in main browser" : undefined}
+  const external = url ? null : externalLink(href);
+  const file = url || external ? null : filePathFromHref(href);
+  // javascript:, data:, ftp: and friends are inert: keep no href at all, so a
+  // middle click or a keyboard activation cannot navigate the app window.
+  const inert = Boolean(href) && !url && !external && !file;
+  const title = url
+    ? "Open in Lumen · Ctrl-click to open in main browser"
+    : external
+      ? "Open this link in its app"
+      : file
+        ? "Open this file · Right-click for more"
+        : undefined;
+  return <a className={url || external ? "chat-web-link" : file ? "chat-file-link" : undefined} href={inert ? undefined : url || href}
+    title={title}
+    aria-disabled={inert || undefined}
     onClick={(event) => {
       if (url) activateWebLink(event, url, onWeb, onError);
-      else { event.preventDefault(); if (href) onFile?.(href.replace(/^\.\//, "")); }
+      else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
+      else { event.preventDefault(); if (file) onFile?.(file); }
     }}
-    onAuxClick={(event) => { if (event.button === 1 && url) activateWebLink(event, url, onWeb, onError); }}
-    onContextMenu={url ? (event) => { event.preventDefault(); void webLinkMenu(url, onWeb, onError); } : undefined}>{children}</a>;
+    onAuxClick={(event) => {
+      if (event.button !== 1) return;
+      if (url) activateWebLink(event, url, onWeb, onError);
+      else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
+      else if (file) { event.preventDefault(); onFile?.(file); }
+    }}
+    onContextMenu={url
+      ? (event) => { event.preventDefault(); void webLinkMenu(url, onWeb, onError); }
+      : file && onFileMenu
+        ? (event) => { event.preventDefault(); onFileMenu(file); }
+        : undefined}>{children}</a>;
 }
 
 export function LinkText({ text, onWeb, onError }: { text: string; onWeb: (url: string) => void; onError: (message: string) => void }) {
