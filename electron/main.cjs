@@ -6,6 +6,7 @@ const {
   WorkspaceService,
   Sessions,
   resolveLauncher,
+  inside,
 } = require("./services.cjs");
 const { installZoom } = require("./zoom.cjs");
 const { openPaths, resolveOpenPath } = require("./launch.cjs");
@@ -43,6 +44,152 @@ app.on("second-instance", (_event, argv, cwd, data) => {
   }
 });
 let dirtyEditors = 0;
+
+function decodePath(value) {
+  try { return decodeURIComponent(value); } catch { return value; }
+}
+
+async function resolveLinkPath(filePath, root) {
+  if (typeof filePath !== "string" || !filePath.trim())
+    throw new Error("That link has no file path.");
+  let value = filePath.trim();
+  if (/^file:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      if (parsed.host && parsed.host.toLowerCase() !== "localhost") {
+        // file://server/share/x is a UNC path, not a workspace-relative one.
+        value = `\\\\${parsed.host}${parsed.pathname.replace(/\//g, "\\")}`;
+      } else {
+        value = parsed.pathname;
+        // file:///C:/x and file://C:/x both mean C:/x on Windows.
+        value = value.replace(/^\/([a-zA-Z]:[\\/])/, "$1");
+      }
+    } catch {
+      value = value.replace(/^file:\/\/(?:localhost)?/i, "");
+    }
+  } else {
+    // Markdown links often carry ?raw=1 or #L10; neither is part of the file name.
+    value = value.replace(/[?#].*$/, "");
+  }
+  // Exactly one decode pass, here, for every shape: the renderer passes the raw
+  // href through untouched so a literal %2520 does not become a space.
+  value = decodePath(value);
+  // A scheme we do not handle (ftp:, vscode:, ssh:, about:) is not a file path;
+  // C:/ and C:\ are drive letters, not schemes.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) && !/^[a-zA-Z]:[\\/]/.test(value))
+    throw new Error("Lumen can only open web links and files on this computer.");
+  if (value === "~" || value.startsWith("~/") || value.startsWith("~\\"))
+    value = path.join(app.getPath("home"), value.slice(1));
+  // A drive or UNC path is absolute even when it came from another OS; do not
+  // glue it onto the workspace root just because this platform disagrees.
+  const foreignAbsolute = /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
+  if (!path.isAbsolute(value) && !foreignAbsolute) {
+    if (!root) throw new Error("Open a workspace before opening its files.");
+    value = path.resolve(root, value);
+  }
+  return path.normalize(value);
+}
+
+// Extensions that are never text even when their first bytes have no NUL:
+// PDFs, Office/OpenDocument files, media containers and 3D binaries all belong
+// with their viewer, not in the Monaco buffer.
+const NEVER_TEXT_EXTENSIONS = new Set([
+  ".pdf", ".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm", ".ppt", ".pptx", ".pptm", ".odt", ".ods", ".odp",
+  ".zip", ".7z", ".rar", ".gz", ".tgz", ".tar",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".heic", ".tif", ".tiff", ".avif",
+  ".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus",
+  ".glb", ".fbx", ".stl", ".ply", ".dae", ".usdz",
+]);
+
+async function isTextFile(file, size) {
+  if (size > 2 * 1024 * 1024) return false;
+  if (NEVER_TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) return false;
+  const handle = await fs.open(file, "r");
+  try {
+    const buffer = Buffer.alloc(Math.min(size, 4096));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const sample = buffer.subarray(0, bytesRead);
+    if (sample.includes(0)) return false;
+    // Binary files without a NUL in the first block (small PDFs, some formats)
+    // still give themselves away by the share of control bytes they carry.
+    let control = 0;
+    for (const byte of sample) if (byte < 9 || (byte > 13 && byte < 32)) control++;
+    return sample.length === 0 || control / sample.length < 0.02;
+  } finally {
+    await handle.close();
+  }
+}
+
+// A chat link is agent output, so a left click only ever hands PASSIVE file
+// types to the OS: media, plain documents, archives and 3D assets. Active
+// document formats (HTML, SVG, XML, macro-capable Office files), scripts,
+// installers, shortcuts, .app bundles and unknown extensions are revealed in
+// the file manager instead; the right-click menu can still open them after an
+// explicit confirmation.
+const PASSIVE_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".heic", ".tif", ".tiff", ".avif",
+  ".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus",
+  ".pdf", ".txt", ".md", ".markdown", ".csv", ".tsv", ".rtf", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
+  ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz",
+  ".glb", ".gltf", ".fbx", ".obj", ".stl", ".ply", ".dae", ".usdz",
+  ".json", ".yaml", ".yml", ".toml", ".log", ".css",
+]);
+const UNSUPPORTED_MESSAGE = "Lumen does not launch this file type from a chat link. Right-click it and choose Open in default app if you trust it.";
+
+function isPassiveTarget(target, stat) {
+  if (stat.isDirectory()) return !target.toLowerCase().endsWith(".app");
+  return PASSIVE_EXTENSIONS.has(path.extname(target).toLowerCase());
+}
+
+async function revealTarget(target, stat, error) {
+  shell.showItemInFolder(target);
+  return { kind: "unsupported", error, folder: stat.isDirectory() ? target : path.dirname(target) };
+}
+
+async function openLink(filePath, root) {
+  const target = await resolveLinkPath(filePath, root);
+  let stat;
+  try { stat = await fs.stat(target); } catch { throw new Error(`That file is gone: ${target}`); }
+  const rootPath = typeof root === "string" && root ? path.resolve(root) : "";
+  const real = stat.isFile() || stat.isDirectory() ? await fs.realpath(target).catch(() => target) : target;
+  if (stat.isFile() && rootPath) {
+    // Compare real paths on both sides so a workspace opened through a symlink
+    // still counts as the workspace.
+    const realRoot = await fs.realpath(rootPath).catch(() => rootPath);
+    if (inside(realRoot, real) && await isTextFile(target, stat.size))
+      return { kind: "editor", relative: path.relative(realRoot, real).split(path.sep).join("/") };
+  }
+  if (!isPassiveTarget(target, stat))
+    return revealTarget(target, stat, UNSUPPORTED_MESSAGE);
+  const error = await shell.openPath(target);
+  if (!error) return { kind: "external" };
+  // No app registered for this type: put it on screen instead of leaving the
+  // click dead.
+  return revealTarget(target, stat, error);
+}
+
+async function openLinkExplicitly(filePath, root) {
+  // The right-click menu path: the person chose this file, so anything is
+  // launchable after a confirmation for non-passive types.
+  const target = await resolveLinkPath(filePath, root);
+  let stat;
+  try { stat = await fs.stat(target); } catch { throw new Error(`That file is gone: ${target}`); }
+  if (!isPassiveTarget(target, stat)) {
+    const { response } = await dialog.showMessageBox(window, {
+      type: "warning",
+      buttons: ["Cancel", "Open anyway"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Open this file?",
+      message: path.basename(target),
+      detail: "Agent-provided files can run code. Only open it if you trust what produced it.",
+    });
+    if (response !== 1) return { kind: "cancel" };
+  }
+  const error = await shell.openPath(target);
+  if (!error) return { kind: "external" };
+  return revealTarget(target, stat, error);
+}
 let allowClose = false,
   closeTimer;
 const devURL = process.env.LUMEN_DEV === "1" ? "http://127.0.0.1:5173" : "";
@@ -271,6 +418,25 @@ startup.then(async (start) => {
       throw new Error("Only web links can open externally.");
     await shell.openExternal(url);
   });
+  // Chat file links: resolve whatever the agent wrote (Windows or POSIX absolute,
+  // ~, file:// URL, or workspace-relative) and open it the right way. Text files
+  // inside the workspace go to the editor; everything else goes to the OS.
+  handle("file:open-link", (filePath, root) => openLink(filePath, root));
+  handle("file:link-menu", (filePath, root) => new Promise((resolve) => {
+    let pending = null;
+    const task = (work) => { pending = Promise.resolve().then(work); };
+    const menu = Menu.buildFromTemplate([
+      { label: "Open", click: () => task(() => openLink(filePath, root)) },
+      { label: "Open in default app", click: () => task(() => openLinkExplicitly(filePath, root)) },
+      { label: "Show in folder", click: () => task(async () => { shell.showItemInFolder(await resolveLinkPath(filePath, root)); return { kind: "done" }; }) },
+      { type: "separator" },
+      { label: "Copy path", click: () => task(async () => { clipboard.writeText(await resolveLinkPath(filePath, root)); return { kind: "done" }; }) },
+    ]);
+    menu.popup({
+      window,
+      callback: () => { Promise.resolve(pending).then(resolve, (error) => resolve({ kind: "error", error: error.message })); },
+    });
+  }));
   handle("window:action", (action) => {
     if (action === "minimize") window.minimize();
     else if (action === "maximize")

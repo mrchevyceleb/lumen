@@ -493,8 +493,20 @@ export default function App() {
     if (!chat) { notify("Open a chat before opening its browser."); return; }
     const chatId = chat.controlId || chat.id;
     const workspace = chat.cwd && chat.cwd !== chat.root ? chat.cwd : chat.projectless ? "" : chat.root;
+    const wasBrowserOpen = browserOpen;
     setBrowserOpen(true);
-    void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => notify(error.message));
+    void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => {
+      // A link that cannot use the pane still should not feel dead: hand it to
+      // the system browser instead, and if that fails too, put the pane back
+      // the way it was and say what went wrong.
+      void api("external:open", url).then(
+        () => { if (!wasBrowserOpen) setBrowserOpen(false); },
+        (fallbackError) => {
+          if (!wasBrowserOpen) setBrowserOpen(false);
+          notify(`Could not open that link: ${fallbackError.message || error.message}`);
+        },
+      );
+    });
   };
   const updateTab = (id: string, change: Partial<Tab>) => {
     const tab = tabsRef.current.find((value) => value.id === id);
@@ -1176,25 +1188,44 @@ export default function App() {
     await settleControl(); persist();
     return { ...view(find() || tab), ...(action === "message" ? { messageId: body.id } : {}) };
   });
-  const openFile = async (file: string, folder = root) => {
-    if (!folder) return;
-    const normalized = file
-      .replace(/^file:\/\//, "")
-      .replace(/^\//, "")
-      .split("#")[0];
+  const openEditorDoc = async (normalized: string, folder: string) => {
     const existing = docs.find((d) => samePath(d.root, folder) && d.path === normalized);
     if (existing) {
       setActiveDocKey(docKey(existing));
       return;
     }
+    const result = await api("files:read", folder, normalized);
+    const doc: Doc = { root: folder, ...result, saved: result.content };
+    setDocs((old) => [...old, doc]);
+    setActiveDocKey(docKey(doc));
+  };
+  const showUnsupported = (result: { error?: string }) => {
+    notify(result.error ? `${result.error} It is selected in your file manager.` : "That file could not be opened.");
+  };
+  // Chat links point at all sorts of files: text in the workspace, images and
+  // models on the Desktop, whole folders. Let the main process pick the right
+  // way to open it instead of assuming everything is an editor file.
+  const openFile = async (file: string, folder = root) => {
     try {
-      const result = await api("files:read", folder, normalized);
-      const doc: Doc = { root: folder, ...result, saved: result.content };
-      setDocs((old) => [...old, doc]);
-      setActiveDocKey(docKey(doc));
+      const result = await api<{ kind: "editor" | "external" | "unsupported"; relative?: string; error?: string; folder?: string }>(
+        "file:open-link",
+        file,
+        folder || "",
+      );
+      if (result.kind === "editor" && result.relative && folder) await openEditorDoc(result.relative, folder);
+      else if (result.kind === "unsupported") showUnsupported(result);
     } catch (e: any) {
       notify(e.message);
     }
+  };
+  const fileMenu = (file: string, folder = root) => {
+    void api<{ kind?: string; relative?: string; error?: string }>("file:link-menu", file, folder || "")
+      .then((result) => {
+        if (result?.kind === "editor" && result.relative && folder) return openEditorDoc(result.relative, folder);
+        if (result?.kind === "unsupported") showUnsupported(result);
+        else if (result?.kind === "error") notify(result.error || "That file could not be opened.");
+      })
+      .catch((e) => notify(e.message));
   };
   const saveFile = async () => {
     if (!activeDoc) return;
@@ -1786,7 +1817,8 @@ export default function App() {
                           notify(e.message),
                         )
                       }
-                      onFile={openFile}
+                      onFile={(file) => void openFile(file, root || active.root)}
+                      onFileMenu={(file) => fileMenu(file, root || active.root)}
                       onWeb={openWeb}
                       onError={notify}
                       onSignIn={() => void signInChat(active.id)}

@@ -42,6 +42,7 @@ const channels = new Set([
   "settings:load",
   "settings:save",
   "external:open",
+  "file:open-link", "file:link-menu",
   "window:action",
   "updates:status",
   "updates:check",

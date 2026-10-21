@@ -27,7 +27,7 @@ import SessionControls, { lumenCommands, parseThreshold } from "./SessionControl
 import type { SessionControlsState } from "./types";
 import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames, foregroundFor } from "./settings";
-import { ChatLink, LinkText, rehypeWebLinks, webLink } from "./ChatLinks";
+import { ChatLink, LinkText, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
   agent,
@@ -65,6 +65,7 @@ export default function Conversation({
   onSend,
   onStop,
   onFile,
+  onFileMenu,
   onWeb,
   onError,
   onNative,
@@ -86,6 +87,7 @@ export default function Conversation({
   onSend: (text: string) => Promise<boolean>;
   onStop: () => void;
   onFile: (path: string) => void;
+  onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
   onError: (message: string) => void;
   onNative: (draft?: string) => void;
@@ -320,6 +322,7 @@ export default function Conversation({
                 tab={tab}
                 color={color}
                 onFile={onFile}
+                onFileMenu={onFileMenu}
                 onWeb={onWeb}
                 onError={onError}
                 onSignIn={onSignIn}
@@ -524,6 +527,7 @@ function MessageView({
   tab,
   color,
   onFile,
+  onFileMenu,
   onWeb,
   onError,
   onSignIn,
@@ -532,6 +536,7 @@ function MessageView({
   tab: Tab;
   color: string;
   onFile: (path: string) => void;
+  onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
   onError: (message: string) => void;
   onSignIn: () => void;
@@ -608,10 +613,13 @@ function MessageView({
           <Markdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeWebLinks]}
-            urlTransform={(url) => webLink(url) || defaultUrlTransform(url)}
+            // defaultUrlTransform drops things like C:/Users/... because it reads
+            // "C:" as an unknown protocol. A file path is not a protocol, so keep it
+            // intact and let ChatLink decide how to open it.
+            urlTransform={(url) => webLink(url) || filePathFromHref(url) || defaultUrlTransform(url)}
             components={{
               a: ({ href, children }) => (
-                <ChatLink href={href} onWeb={onWeb} onError={onError} onFile={onFile}>{children}</ChatLink>
+                <ChatLink href={href} onWeb={onWeb} onError={onError} onFile={onFile} onFileMenu={onFileMenu}>{children}</ChatLink>
               ),
               pre: ({ children }) => (
                 <div className="code-block">
