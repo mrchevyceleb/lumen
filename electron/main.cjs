@@ -78,8 +78,9 @@ function parseLinkPath(filePath) {
     } catch {
       value = value.replace(/^file:\/\/(?:localhost)?/i, "");
     }
-  } else {
-    // Markdown links often carry ?raw=1 or #L10; neither is part of the file name.
+  } else if (!isDevicePath(value)) {
+    // Markdown links often carry ?raw=1 or #L10; neither is part of the file
+    // name. A device path's ? is part of its namespace, so it keeps its ?.
     value = value.replace(/[?#].*$/, "");
   }
   // Exactly one decode pass, here, for every shape: the renderer passes the raw
@@ -170,6 +171,20 @@ const ACTIVE_EXTENSIONS = new Set([
   ".py", ".pyw", ".rb", ".pl", ".php", ".deb", ".rpm", ".pkg", ".dmg",
 ]);
 const ACTIVE_MESSAGE = "Lumen will not run this file from a chat link. Open it yourself if you trust what produced it.";
+const NO_APP_MESSAGE = (target) => `No app on this computer opens ${path.extname(target) || "this file type"}.`;
+
+// report.pdf that really points at a program is the one case where the generic
+// warning is not specific enough: name the disguise and where it leads. Only a
+// link that was actually followed, and whose name changed, is a disguise.
+function activeMessage(clicked, real, redirected) {
+  const name = path.basename(clicked);
+  const disguised = redirected && name
+    && PASSIVE_EXTENSIONS.has(path.extname(name).toLowerCase())
+    && name.toLowerCase() !== path.basename(real).toLowerCase();
+  return disguised
+    ? `${name} points to a program (${real}), so Lumen will not run it from a chat link.`
+    : ACTIVE_MESSAGE;
+}
 
 // An extension is only one of the ways a file says it is a program. Look at
 // the permission bits and the first bytes as well: an extensionless ELF or PE
@@ -361,7 +376,9 @@ async function settleLink(filePath, root) {
   const kind = normalizeDevicePath(settled.real);
   assertNotDevice(kind);
   if (kind !== resolved && isNetworkPath(kind) && !await confirmNetwork(kind)) return null;
-  return settled;
+  // `clicked` is the path the link named after walking to an absolute path;
+  // `redirected` means a shortcut moved it somewhere else.
+  return { ...settled, clicked: target, redirected: resolved !== target };
 }
 
 async function openLink(filePath, root) {
@@ -381,15 +398,15 @@ async function openLink(filePath, root) {
     return { kind: "folder", folder: real };
   }
   if (await isActiveTarget(real, realStat))
-    return revealTarget(real, realStat, ACTIVE_MESSAGE);
+    return revealTarget(real, realStat, activeMessage(settled.clicked, real, settled.redirected));
   if (!isPassiveTarget(real, realStat))
     return revealTarget(real, realStat, UNSUPPORTED_MESSAGE);
   if (!await hasFileHandler(real))
-    return revealTarget(real, realStat, `No app on this computer opens ${path.extname(real) || "this file type"}. Open it from the folder below, or pick a default app in your settings.`);
+    return revealTarget(real, realStat, NO_APP_MESSAGE(real));
   if (!await unchanged(real, realStat))
     throw new Error(`That file changed while Lumen was opening it. Click the link again.`);
   const error = await shell.openPath(real);
-  if (!error) return { kind: "external" };
+  if (!error) return { kind: "external", path: real };
   // No app registered for this type: put it on screen instead of leaving the
   // click dead.
   return revealTarget(real, realStat, error);
@@ -403,7 +420,7 @@ async function showInFolder(filePath, root) {
   const stat = await statTarget(resolved);
   if (!stat.isFile() && !stat.isDirectory()) throw new Error(`Lumen cannot show ${resolved} in a file manager.`);
   shell.showItemInFolder(resolved);
-  return { kind: "done" };
+  return { kind: "folder", folder: resolved };
 }
 
 async function openLinkExplicitly(filePath, root) {
@@ -414,7 +431,7 @@ async function openLinkExplicitly(filePath, root) {
   if (!settled) return { kind: "cancel" };
   const { real, realStat } = settled;
   if (await isActiveTarget(real, realStat))
-    return revealTarget(real, realStat, ACTIVE_MESSAGE);
+    return revealTarget(real, realStat, activeMessage(settled.clicked, real, settled.redirected));
   if (!isPassiveTarget(real, realStat)) {
     const { response } = await dialog.showMessageBox(window, {
       type: "warning",
@@ -428,10 +445,15 @@ async function openLinkExplicitly(filePath, root) {
     });
     if (response !== 1) return { kind: "cancel" };
   }
+  // Same check the ordinary click does: on Linux openPath reports success even
+  // when nothing is registered, so without this the menu says "Opened" about a
+  // file no app displayed.
+  if (!await hasFileHandler(real))
+    return revealTarget(real, realStat, NO_APP_MESSAGE(real));
   if (!realStat.isDirectory() && !await unchanged(real, realStat))
     throw new Error(`That file changed while Lumen was opening it. Click the link again.`);
   const error = await shell.openPath(real);
-  if (!error) return { kind: "external" };
+  if (!error) return { kind: "external", path: real };
   return revealTarget(real, realStat, error);
 }
 let allowClose = false,
@@ -681,8 +703,9 @@ startup.then(async (start) => {
         // Host path.isAbsolute says false for C:\... and \\server\share on
         // POSIX, so recognise the foreign absolute shapes on their own.
         const absolute = path.isAbsolute(value) || isDevicePath(value) || isNetworkPath(value) || /^[a-zA-Z]:[\\/]/.test(value);
-        clipboard.writeText(absolute || !root ? value : path.resolve(root, value));
-        return { kind: "done" };
+        const copied = absolute || !root ? value : path.resolve(root, value);
+        clipboard.writeText(copied);
+        return { kind: "copied", path: copied };
       }) },
     ]);
     menu.popup({

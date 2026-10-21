@@ -1598,6 +1598,48 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   text-decoration-thickness: 1.5px;
   text-decoration-color: var(--accent);
 }
+/* A chat link is a little object, not just coloured text: it lifts, glows and
+   presses under the pointer, so it reads as something you can grab. It stays an
+   inline box (a long path must wrap mid-link); relative offsets do the lift, and
+   box-decoration-break keeps a wrapped link looking like one object. */
+.prose a.chat-file-link,
+.prose a.chat-web-link {
+  position: relative;
+  top: 0;
+  border-radius: 5px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition:
+    color 140ms ease,
+    text-decoration-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease,
+    top 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.prose a.chat-file-link:hover,
+.prose a.chat-web-link:hover {
+  top: -1.5px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: 0 3px 12px -5px color-mix(in srgb, var(--accent) 80%, transparent);
+}
+.prose a.chat-file-link:active,
+.prose a.chat-web-link:active {
+  top: 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .prose a.chat-file-link,
+  .prose a.chat-web-link {
+    transition: color 140ms ease, text-decoration-color 140ms ease;
+  }
+  .prose a.chat-file-link:hover,
+  .prose a.chat-web-link:hover,
+  .prose a.chat-file-link:active,
+  .prose a.chat-web-link:active {
+    top: 0;
+  }
+}
 .prose code {
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 0.84em;
@@ -1837,8 +1879,9 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 }
 .jump-bottom {
   position: absolute;
-  bottom: 190px;
+  bottom: calc(100% + 8px);
   left: 50%;
+  transform: translateX(-50%);
   width: 34px;
   height: 34px;
   border: 1px solid var(--border);
@@ -1848,12 +1891,18 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   place-items: center;
   box-shadow: 0 5px 20px #0003;
   z-index: 5;
+  animation: jump-appear 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes jump-appear {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .jump-bottom:hover {
-  transform: translateY(2px);
+  transform: translateX(-50%) translateY(2px);
 }
 .composer-wrap {
   flex-shrink: 0;
+  position: relative;
   padding: 6px max(20px, calc((100% - 1100px) / 2)) 8px;
 }
 .composer-anchor { position: relative; }
@@ -1892,7 +1941,7 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .native-command-draft code { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .native-command-draft button { display: grid; place-items: center; padding: 4px; }
 .native-terminal.has-command-draft > .terminal-host { height: calc(100% - 42px); }
-@media (prefers-reduced-motion: reduce) { .command-menu, .command-refreshing { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .command-menu, .command-refreshing, .jump-bottom { animation: none; } }
 .composer {
   container-type: inline-size;
   border: 1px solid color-mix(in srgb, var(--border) 88%, var(--muted));

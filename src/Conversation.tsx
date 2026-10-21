@@ -27,7 +27,7 @@ import SessionControls, { lumenCommands, parseThreshold } from "./SessionControl
 import type { SessionControlsState } from "./types";
 import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames, foregroundFor } from "./settings";
-import { ChatLink, LinkText, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
+import { ChatLink, LinkText, externalLink, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
 import { StreamingMarkdown } from "./stream-fade";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
@@ -69,6 +69,7 @@ export default function Conversation({
   onFileMenu,
   onWeb,
   onError,
+  onNotice,
   onNative,
   onFollowFolder,
   attachment,
@@ -91,6 +92,7 @@ export default function Conversation({
   onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
   onError: (message: string) => void;
+  onNotice: (message: string) => void;
   onNative: (draft?: string) => void;
   onFollowFolder: (folder: string) => void;
   attachment?: string;
@@ -338,6 +340,7 @@ export default function Conversation({
                 onFileMenu={onFileMenu}
                 onWeb={onWeb}
                 onError={onError}
+                onNotice={onNotice}
                 onSignIn={onSignIn}
               />
             ))}
@@ -375,23 +378,26 @@ export default function Conversation({
           </div>
         )}
       </div>
-      {away && (
-        <button
-          className="jump-bottom"
-          aria-label="Jump to latest message"
-          onClick={() => {
-            stick.current = true;
-            scroll.current?.scrollTo({
-              top: scroll.current.scrollHeight,
-              behavior: "smooth",
-            });
-            setAway(false);
-          }}
-        >
-          <ArrowDown size={18} />
-        </button>
-      )}
       <div className="composer-wrap">
+        {/* Anchored to the composer, not the window: when the toolbar wraps on a
+            narrow chat the composer grows, and a fixed offset would land the
+            arrow on top of the model picker. */}
+        {away && (
+          <button
+            className="jump-bottom"
+            aria-label="Jump to latest message"
+            onClick={() => {
+              stick.current = true;
+              scroll.current?.scrollTo({
+                top: scroll.current.scrollHeight,
+                behavior: "smooth",
+              });
+              setAway(false);
+            }}
+          >
+            <ArrowDown size={18} />
+          </button>
+        )}
         {tab.agent !== "shell" && <QueuedMessages tab={tab} onConfig={onConfig} />}
         {tab.agent === "shell" && tab.cwd && tab.cwd !== tab.root && (
           <button
@@ -544,6 +550,7 @@ function MessageView({
   onFileMenu,
   onWeb,
   onError,
+  onNotice,
   onSignIn,
 }: {
   message: Message;
@@ -554,6 +561,7 @@ function MessageView({
   onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
   onError: (message: string) => void;
+  onNotice: (message: string) => void;
   onSignIn: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -632,12 +640,13 @@ function MessageView({
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeWebLinks]}
             // defaultUrlTransform drops things like C:/Users/... because it reads
-            // "C:" as an unknown protocol. A file path is not a protocol, so keep it
-            // intact and let ChatLink decide how to open it.
-            urlTransform={(url) => webLink(url) || filePathFromHref(url) || defaultUrlTransform(url)}
+            // "C:" as an unknown protocol, and it drops tel: outright. A file path
+            // and a phone number are what ChatLink knows how to open, so keep both
+            // intact and let it decide.
+            urlTransform={(url) => webLink(url) || externalLink(url) || filePathFromHref(url) || defaultUrlTransform(url)}
             components={{
               a: ({ href, children }) => (
-                <ChatLink href={href} onWeb={onWeb} onError={onError} onFile={onFile} onFileMenu={onFileMenu}>{children}</ChatLink>
+                <ChatLink href={href} onWeb={onWeb} onError={onError} onNotice={onNotice} onFile={onFile} onFileMenu={onFileMenu}>{children}</ChatLink>
               ),
               pre: ({ children }) => (
                 <div className="code-block">
