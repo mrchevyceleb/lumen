@@ -1694,6 +1694,13 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   border-top: 1px solid var(--border);
   margin: 26px 0;
 }
+/* Agents paste screenshots at their capture size, which can be wider than the
+   whole window. Fit one to the conversation so nothing runs off the edge. Only
+   the width is capped: a tall screenshot keeps its full width and stays
+   readable, and the chat scrolls past it. Small images keep their size. */
+.prose img {
+  max-width: 100%;
+}
 .prose input[type="checkbox"] {
   accent-color: var(--accent);
 }
