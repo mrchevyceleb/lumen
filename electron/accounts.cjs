@@ -83,12 +83,33 @@ function claudeAccountSettings(s, settings) {
   return { ...settings, apiKeyHelper: "", env };
 }
 const readJson = (file) => fsp.readFile(file, "utf8").then(JSON.parse).catch((e) => { if (e.code === "ENOENT") return {}; throw e; });
+const locked = (error) => ["EPERM", "EBUSY", "EACCES"].includes(error?.code);
+// Windows refuses to replace a file another process has open, and the Claude CLI
+// keeps this chat's .claude.json open while it runs. The lock clears in
+// milliseconds, so a replace waits it out. Before this, a first message could
+// fail outright with EPERM while Lumen synced the account config.
+const renameWithRetry = async (from, to, stillWanted) => {
+  for (let attempt = 0; ; attempt++) {
+    try { await fsp.rename(from, to); return true; }
+    catch (error) {
+      if (!locked(error) || attempt >= 8) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+      // The lock means another writer may have replaced the file while this
+      // one waited. Ask again before trying to overwrite it.
+      if (stillWanted && !await stillWanted()) return false;
+    }
+  }
+};
 const writeJson = async (file, value, expected) => {
   const temporary = file + "." + crypto.randomUUID() + ".tmp";
   await fsp.writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
   if (expected !== undefined && signature(await readJson(file)) !== expected) { await fsp.unlink(temporary); return false; }
-  await fsp.rename(temporary, file);
-  return true;
+  const written = await renameWithRetry(temporary, file, expected === undefined ? undefined : async () => {
+    if (signature(await readJson(file)) === expected) return true;
+    await fsp.unlink(temporary).catch(() => {});
+    return false;
+  });
+  return written !== false;
 };
 const agentNames = { claude: "Claude Code", codex: "Codex", grok: "Grok", pi: "Pi", google: "Google Antigravity" };
 const sourceHome = (agent) => {
@@ -320,6 +341,14 @@ class Accounts {
   cancel(id) { const login = this.logins.get(id); if (!login?.ended) login?.terminal?.kill(); else this.logins.delete(id); }
   async syncClaude(s) {
     if (!s.claudeHome) return;
+    // The running CLI keeps the chat's .claude.json open on Windows, so a
+    // replace can stay locked. That file only mirrors the account block in the
+    // source config; credentials and revision markers below must still sync,
+    // and a real permission problem must still surface.
+    const syncChatConfig = async (file, value) => {
+      try { await writeJson(file, value); }
+      catch (error) { if (!locked(error)) throw error; }
+    };
     const key = s.accountId || `claude-default:${path.resolve(sourceHome("claude"))}`;
     const previous = this.authLocks.get(key) || Promise.resolve();
     const syncing = previous.catch(() => {}).then(async () => {
@@ -346,7 +375,7 @@ class Accounts {
         }
         if (JSON.stringify(chatConfig.oauthAccount) !== JSON.stringify(config.oauthAccount)) {
           if (config.oauthAccount) chatConfig.oauthAccount = config.oauthAccount; else delete chatConfig.oauthAccount;
-          await writeJson(localConfig, chatConfig);
+          await syncChatConfig(localConfig, chatConfig);
         }
         if (baseline !== current) await fsp.writeFile(marker, current, { mode: 0o600 });
         return;
@@ -356,7 +385,7 @@ class Accounts {
       const sameAccount = typeof config.oauthAccount?.accountUuid === "string" && !!config.oauthAccount.accountUuid && config.oauthAccount.accountUuid === chatConfig.oauthAccount?.accountUuid;
       if (JSON.stringify(config.oauthAccount) !== JSON.stringify(chatConfig.oauthAccount)) {
         if (config.oauthAccount) chatConfig.oauthAccount = config.oauthAccount; else delete chatConfig.oauthAccount;
-        await writeJson(localConfig, chatConfig);
+        await syncChatConfig(localConfig, chatConfig);
       }
       const [a, b] = await Promise.all([readJson(central), readJson(local)]);
       if (JSON.stringify(a) === JSON.stringify(b)) { await fsp.writeFile(path.join(s.claudeHome, ".lumen-account-revision"), p.revision); return; }
@@ -406,4 +435,4 @@ class Accounts {
   }
   dispose() { for (const id of this.logins.keys()) this.cancel(id); }
 }
-module.exports = { Accounts, accountEnvironment, claudeAccountSettings, codexAccountOptions, sourceHome, syncCodexServers };
+module.exports = { Accounts, accountEnvironment, claudeAccountSettings, codexAccountOptions, sourceHome, syncCodexServers, renameWithRetry };
