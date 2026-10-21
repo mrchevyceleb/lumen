@@ -1218,6 +1218,13 @@ export default function App() {
   const showUnsupported = (result: { error?: string }) => {
     notify(result.error ? `${result.error} It is selected in your file manager.` : "That file could not be opened.");
   };
+  const linkName = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() || value;
+  // An external app takes over the screen, so say in the app what just opened:
+  // a click should never feel like it did nothing.
+  const showOpened = (result: { kind?: string; folder?: string }, file: string) => {
+    if (result.kind === "external") notify(`Opened ${linkName(file)}`);
+    else if (result.kind === "folder") notify(`Showed ${linkName(result.folder || file)} in your file manager.`);
+  };
   // Chat links point at all sorts of files: text in the workspace, images and
   // models on the Desktop, whole folders. Let the main process pick the right
   // way to open it instead of assuming everything is an editor file.
@@ -1230,16 +1237,18 @@ export default function App() {
       );
       if (result.kind === "editor" && result.relative && folder) await openEditorDoc(result.relative, folder);
       else if (result.kind === "unsupported") showUnsupported(result);
+      else showOpened(result, file);
     } catch (e: any) {
       notify(e.message);
     }
   };
   const fileMenu = (file: string, folder = root) => {
-    void api<{ kind?: string; relative?: string; error?: string }>("file:link-menu", file, folder || "")
+    void api<{ kind?: string; relative?: string; error?: string; folder?: string }>("file:link-menu", file, folder || "")
       .then((result) => {
         if (result?.kind === "editor" && result.relative && folder) return openEditorDoc(result.relative, folder);
         if (result?.kind === "unsupported") showUnsupported(result);
         else if (result?.kind === "error") notify(result.error || "That file could not be opened.");
+        else showOpened(result || {}, file);
       })
       .catch((e) => notify(e.message));
   };
