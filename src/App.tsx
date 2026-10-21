@@ -414,20 +414,26 @@ export default function App() {
   );
   const active = tabs.find((t) => t.id === activeId);
   const browserOpenRef = useRef<Record<string, boolean>>({});
-  // Every real change to any pane, including the person's own toggles, bumps
-  // this. A failed link open may only undo the pane it opened itself.
-  const browserToggles = useRef(0);
+  // Per chat: every real pane change bumps that chat's toggle counter, so a
+  // failed link open only ever undoes the pane it opened itself, and activity
+  // in another chat cannot keep it from cleaning up.
+  const browserPanes = useRef<Record<string, { opens: number; toggles: number }>>({});
+  const paneState = (key: string) => browserPanes.current[key] ||= { opens: 0, toggles: 0 };
+  const setBrowserOpenFor = (chat: Tab, open: boolean) => {
+    const key = chat.controlId || chat.id;
+    const current = browserOpenRef.current[key] ?? chat.browserOpen === true;
+    if (open === current) return;
+    paneState(key).toggles++;
+    browserOpenRef.current[key] = open;
+    setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: open } : tab));
+    void updateTab(chat.id, { browserOpen: open });
+  };
   const setBrowserOpen = (open: boolean | ((value: boolean) => boolean)) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat first, then its browser stays with that chat."); return; }
     const key = chat.controlId || chat.id;
     const current = browserOpenRef.current[key] ?? chat.browserOpen === true;
-    const next = typeof open === "function" ? open(current) : open;
-    if (next === current) return;
-    browserToggles.current++;
-    browserOpenRef.current[key] = next;
-    setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: next } : tab));
-    void updateTab(chat.id, { browserOpen: next });
+    setBrowserOpenFor(chat, typeof open === "function" ? open(current) : open);
   };
   if (active && !active.projectless) projectTabsRef.current[active.root] = active.id;
   const root = active?.projectless ? "" : active?.root || selectedRoot;
@@ -492,25 +498,27 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
-  const browserOpens = useRef(0);
   const openWeb = (url: string) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat before opening its browser."); return; }
     const chatId = chat.controlId || chat.id;
     const workspace = chat.cwd && chat.cwd !== chat.root ? chat.cwd : chat.projectless ? "" : chat.root;
-    const request = ++browserOpens.current;
-    const wasBrowserOpen = browserOpen;
-    setBrowserOpen(true);
-    const paneToken = browserToggles.current;
+    const pane = paneState(chatId);
+    const request = ++pane.opens;
+    // Read the pane state from the same per-chat ref the setter uses, not the
+    // render closure: the person may have opened it since this render.
+    const wasBrowserOpen = browserOpenRef.current[chatId] ?? chat.browserOpen === true;
+    setBrowserOpenFor(chat, true);
+    const paneToken = pane.toggles;
     void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => {
       // A link that cannot use the pane still should not feel dead: hand it to
       // the system browser instead, and if that fails too, put the pane back
       // the way it was and say what went wrong. Only the newest request may put
       // the pane back: an older failure must not close a browser a newer link
       // has just opened.
-      const restore = () => { if (browserOpens.current === request && browserToggles.current === paneToken && !wasBrowserOpen) setBrowserOpen(false); };
+      const restore = () => { if (pane.opens === request && pane.toggles === paneToken && !wasBrowserOpen) setBrowserOpenFor(chat, false); };
       void api("external:open", url).then(restore, (fallbackError) => {
-        if (browserOpens.current !== request) return;
+        if (pane.opens !== request) return;
         restore();
         notify(`Could not open that link: ${fallbackError.message || error.message}`);
       });
@@ -1215,7 +1223,7 @@ export default function App() {
   // way to open it instead of assuming everything is an editor file.
   const openFile = async (file: string, folder = root) => {
     try {
-      const result = await api<{ kind: "editor" | "external" | "unsupported"; relative?: string; error?: string; folder?: string }>(
+      const result = await api<{ kind: "editor" | "external" | "unsupported" | "folder" | "cancel"; relative?: string; error?: string; folder?: string }>(
         "file:open-link",
         file,
         folder || "",

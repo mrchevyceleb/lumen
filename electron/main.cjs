@@ -88,9 +88,11 @@ function parseLinkPath(filePath) {
 }
 
 async function resolveLinkPath(filePath, root) {
+  // Check the raw link before any parsing: query stripping would eat the "?"
+  // in "\\?\C:\Windows" and turn a device path into a relative one.
+  if (typeof filePath === "string" && isDevicePath(filePath.trim()))
+    throw new Error("Lumen does not open device paths from chat links.");
   let value = parseLinkPath(filePath);
-  // Check before anything else: "\\?\C:\Windows" must never turn into a
-  // relative path, and a device name is never a file in a chat.
   if (isDevicePath(value))
     throw new Error("Lumen does not open device paths from chat links.");
   // A scheme we do not handle (ftp:, vscode:, ssh:, about:) is not a file path;
@@ -167,7 +169,33 @@ const ACTIVE_EXTENSIONS = new Set([
   ".sh", ".bash", ".zsh", ".command", ".desktop", ".run", ".bin", ".so", ".dylib",
   ".py", ".pyw", ".rb", ".pl", ".php", ".deb", ".rpm", ".pkg", ".dmg",
 ]);
-const ACTIVE_MESSAGE = "Lumen will not run this file type from a chat link. It is selected in your file manager; open it from there if you trust it.";
+const ACTIVE_MESSAGE = "Lumen will not run this file from a chat link. Open it yourself if you trust what produced it.";
+
+// An extension is only one of the ways a file says it is a program. Look at
+// the permission bits and the first bytes as well: an extensionless ELF or PE
+// binary, a Mach-O bundle and a #! script are all just as launchable.
+const EXECUTABLE_MAGIC = [
+  [0x4d, 0x5a],             // PE / DOS
+  [0x7f, 0x45, 0x4c, 0x46], // ELF
+  [0xfe, 0xed, 0xfa, 0xce], // Mach-O 32 big endian
+  [0xce, 0xfa, 0xed, 0xfe], // Mach-O 32 little endian
+  [0xfe, 0xed, 0xfa, 0xcf], // Mach-O 64 big endian
+  [0xcf, 0xfa, 0xed, 0xfe], // Mach-O 64 little endian
+  [0xca, 0xfe, 0xba, 0xbe], // Java class / universal binary
+];
+
+async function hasExecutableContent(file, size) {
+  const handle = await fs.open(file, "r");
+  try {
+    const buffer = Buffer.alloc(Math.max(1, Math.min(size, 512)));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const head = buffer.subarray(0, bytesRead);
+    if (head.length >= 2 && head[0] === 0x23 && head[1] === 0x21) return true;
+    return EXECUTABLE_MAGIC.some((magic) => head.length >= magic.length && magic.every((byte, index) => head[index] === byte));
+  } finally {
+    await handle.close();
+  }
+}
 
 function isPassiveTarget(target, stat) {
   if (stat.isDirectory()) return !target.toLowerCase().endsWith(".app");
@@ -176,10 +204,19 @@ function isPassiveTarget(target, stat) {
   return PASSIVE_EXTENSIONS.has(path.extname(target).toLowerCase());
 }
 
-function isActiveTarget(target, stat) {
+async function isActiveTarget(target, stat) {
   if (stat.isDirectory()) return target.toLowerCase().endsWith(".app");
   if (!stat.isFile()) return true;
-  return ACTIVE_EXTENSIONS.has(path.extname(target).toLowerCase());
+  if (ACTIVE_EXTENSIONS.has(path.extname(target).toLowerCase())) return true;
+  // The execute bits mean nothing on Windows; the file contents carry the
+  // signal there. A file Lumen cannot read is not proven safe, so it counts
+  // as active too.
+  if (process.platform !== "win32" && (stat.mode & 0o111)) return true;
+  try {
+    return await hasExecutableContent(target, stat.size);
+  } catch {
+    return true;
+  }
 }
 
 const OTHER_COMPUTER_MESSAGE = (target) =>
@@ -197,11 +234,26 @@ async function statTarget(target) {
   }
 }
 
+// Windows hands back extended namespace paths from links: \\?\C:\x is the same
+// local file, \\?\UNC\server\share is a share in disguise, and every other
+// \\?\ or \\.\ name is a device.
+function normalizeDevicePath(value) {
+  const unc = /^\\\\\?\\UNC\\/i;
+  if (unc.test(value)) return `\\\\${value.replace(unc, "")}`;
+  if (/^\\\\\?\\[a-zA-Z]:[\\/]/.test(value)) return value.slice(4);
+  return value;
+}
+
+function assertNotDevice(value) {
+  if (isDevicePath(value)) throw new Error("Lumen does not open device paths from chat links.");
+}
+
 // Walk a path one component at a time, following links with readlink only.
 // Nothing on the far side is opened or stat-ed, so a local shortcut that points
 // at a network share is caught before a single packet leaves this machine.
 async function resolveLinkTargets(target) {
-  let pending = path.resolve(target);
+  let pending = normalizeDevicePath(path.resolve(target));
+  assertNotDevice(pending);
   for (let hops = 0; ; ) {
     const rootPart = path.parse(pending).root;
     const parts = pending.slice(rootPart.length).split(path.sep).filter(Boolean);
@@ -221,7 +273,10 @@ async function resolveLinkTargets(target) {
       if (!info.isSymbolicLink()) continue;
       if (++hops > 16)
         throw new Error(`Lumen could not follow that link: too many levels of shortcuts (${target}).`);
-      link = path.resolve(path.dirname(current), await fs.readlink(current), ...parts.slice(index + 1));
+      // A link can point straight into a namespace, so classify its target
+      // before the next round touches it.
+      link = normalizeDevicePath(path.resolve(path.dirname(current), await fs.readlink(current), ...parts.slice(index + 1)));
+      assertNotDevice(link);
       break;
     }
     if (!link) return current;
@@ -248,6 +303,19 @@ async function settleTarget(target) {
   if (!realStat.isFile() && !realStat.isDirectory())
     throw new Error(`Lumen cannot open ${real}: it is not a file or folder.`);
   return { stat, real, realStat };
+}
+
+// The OS opens a path, not a handle, so check right before the launch that the
+// object at that path is still the one that passed the type gates. A perfect
+// pin needs an fd-based launch the OS APIs do not offer; anything swapped is
+// refused instead of opened.
+async function unchanged(target, before) {
+  try {
+    const after = await fs.stat(target);
+    return after.dev === before.dev && after.ino === before.ino && after.size === before.size && after.mtimeMs === before.mtimeMs;
+  } catch {
+    return false;
+  }
 }
 
 async function confirmNetwork(...targets) {
@@ -287,7 +355,13 @@ async function settleLink(filePath, root) {
   if (!await confirmNetwork(target)) return null;
   const resolved = await resolveLinkTargets(target);
   if (resolved !== target && !await confirmNetwork(resolved)) return null;
-  return settleTarget(resolved);
+  const settled = await settleTarget(resolved);
+  // realpath can still hand back a namespace path; classify what will actually
+  // be opened before anything launches.
+  const kind = normalizeDevicePath(settled.real);
+  assertNotDevice(kind);
+  if (kind !== resolved && isNetworkPath(kind) && !await confirmNetwork(kind)) return null;
+  return settled;
 }
 
 async function openLink(filePath, root) {
@@ -302,12 +376,18 @@ async function openLink(filePath, root) {
     if (inside(realRoot, real) && await isTextFile(real, realStat.size))
       return { kind: "editor", relative: path.relative(realRoot, real).split(path.sep).join("/") };
   }
-  if (isActiveTarget(real, realStat))
+  if (realStat.isDirectory()) {
+    shell.showItemInFolder(real);
+    return { kind: "folder", folder: real };
+  }
+  if (await isActiveTarget(real, realStat))
     return revealTarget(real, realStat, ACTIVE_MESSAGE);
   if (!isPassiveTarget(real, realStat))
     return revealTarget(real, realStat, UNSUPPORTED_MESSAGE);
   if (!await hasFileHandler(real))
     return revealTarget(real, realStat, `No app on this computer opens ${path.extname(real) || "this file type"}. Open it from the folder below, or pick a default app in your settings.`);
+  if (!await unchanged(real, realStat))
+    throw new Error(`That file changed while Lumen was opening it. Click the link again.`);
   const error = await shell.openPath(real);
   if (!error) return { kind: "external" };
   // No app registered for this type: put it on screen instead of leaving the
@@ -333,7 +413,7 @@ async function openLinkExplicitly(filePath, root) {
   const settled = await settleLink(filePath, root);
   if (!settled) return { kind: "cancel" };
   const { real, realStat } = settled;
-  if (isActiveTarget(real, realStat))
+  if (await isActiveTarget(real, realStat))
     return revealTarget(real, realStat, ACTIVE_MESSAGE);
   if (!isPassiveTarget(real, realStat)) {
     const { response } = await dialog.showMessageBox(window, {
@@ -348,6 +428,8 @@ async function openLinkExplicitly(filePath, root) {
     });
     if (response !== 1) return { kind: "cancel" };
   }
+  if (!realStat.isDirectory() && !await unchanged(real, realStat))
+    throw new Error(`That file changed while Lumen was opening it. Click the link again.`);
   const error = await shell.openPath(real);
   if (!error) return { kind: "external" };
   return revealTarget(real, realStat, error);
@@ -596,7 +678,10 @@ startup.then(async (start) => {
       // resolving it here is exactly what failed for a path that is not local.
       { label: "Copy path", click: () => task(async () => {
         const value = parseLinkPath(filePath);
-        clipboard.writeText(path.isAbsolute(value) || !root ? value : path.resolve(root, value));
+        // Host path.isAbsolute says false for C:\... and \\server\share on
+        // POSIX, so recognise the foreign absolute shapes on their own.
+        const absolute = path.isAbsolute(value) || isDevicePath(value) || isNetworkPath(value) || /^[a-zA-Z]:[\\/]/.test(value);
+        clipboard.writeText(absolute || !root ? value : path.resolve(root, value));
         return { kind: "done" };
       }) },
     ]);

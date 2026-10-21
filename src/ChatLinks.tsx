@@ -90,6 +90,9 @@ export function ChatLink({ href, children, onWeb, onError, onFile, onFileMenu }:
   const url = href ? webLink(href) : null;
   const external = url ? null : externalLink(href);
   const file = url || external ? null : filePathFromHref(href);
+  // javascript:, data:, ftp: and friends are inert: keep no href at all, so a
+  // middle click or a keyboard activation cannot navigate the app window.
+  const inert = Boolean(href) && !url && !external && !file;
   const title = url
     ? "Open in Lumen · Ctrl-click to open in main browser"
     : external
@@ -97,8 +100,9 @@ export function ChatLink({ href, children, onWeb, onError, onFile, onFileMenu }:
       : file
         ? "Open this file · Right-click for more"
         : undefined;
-  return <a className={url || external ? "chat-web-link" : file ? "chat-file-link" : undefined} href={url || href}
+  return <a className={url || external ? "chat-web-link" : file ? "chat-file-link" : undefined} href={inert ? undefined : url || href}
     title={title}
+    aria-disabled={inert || undefined}
     onClick={(event) => {
       if (url) activateWebLink(event, url, onWeb, onError);
       else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
