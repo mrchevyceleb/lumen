@@ -414,6 +414,9 @@ export default function App() {
   );
   const active = tabs.find((t) => t.id === activeId);
   const browserOpenRef = useRef<Record<string, boolean>>({});
+  // Every real change to any pane, including the person's own toggles, bumps
+  // this. A failed link open may only undo the pane it opened itself.
+  const browserToggles = useRef(0);
   const setBrowserOpen = (open: boolean | ((value: boolean) => boolean)) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat first, then its browser stays with that chat."); return; }
@@ -421,6 +424,7 @@ export default function App() {
     const current = browserOpenRef.current[key] ?? chat.browserOpen === true;
     const next = typeof open === "function" ? open(current) : open;
     if (next === current) return;
+    browserToggles.current++;
     browserOpenRef.current[key] = next;
     setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: next } : tab));
     void updateTab(chat.id, { browserOpen: next });
@@ -497,13 +501,14 @@ export default function App() {
     const request = ++browserOpens.current;
     const wasBrowserOpen = browserOpen;
     setBrowserOpen(true);
+    const paneToken = browserToggles.current;
     void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => {
       // A link that cannot use the pane still should not feel dead: hand it to
       // the system browser instead, and if that fails too, put the pane back
       // the way it was and say what went wrong. Only the newest request may put
       // the pane back: an older failure must not close a browser a newer link
       // has just opened.
-      const restore = () => { if (browserOpens.current === request && !wasBrowserOpen) setBrowserOpen(false); };
+      const restore = () => { if (browserOpens.current === request && browserToggles.current === paneToken && !wasBrowserOpen) setBrowserOpen(false); };
       void api("external:open", url).then(restore, (fallbackError) => {
         if (browserOpens.current !== request) return;
         restore();
