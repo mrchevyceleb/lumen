@@ -10,8 +10,9 @@ export interface SessionTabActions {
   onRename: (tab: Tab, name: string) => void;
   onClose: (tab: Tab) => void;
   onArchiveChat: (tab: Tab) => void;
+  onExportChat: (tab: Tab) => void;
 }
-export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat }: SessionTabActions & {
+export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat, onExportChat }: SessionTabActions & {
   tabs: Tab[]; activeId: string; settings: Settings; vertical?: boolean; label: string;
 }) {
   const nav = useRef<HTMLElement>(null);
@@ -71,6 +72,7 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
       {renaming !== tab.id && <IconButton label={`Close ${tab.name} tab`} onClick={() => onClose(tab)}><X size={12} /></IconButton>}
       {menu === tab.id && <div className="chat-menu" id={`chat-menu-${tab.id}`} role="menu" style={!vertical && menuBox ? { top: menuBox.top, left: menuBox.left } : undefined} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(""); nav.current?.querySelector<HTMLButtonElement>(`[aria-controls="chat-menu-${CSS.escape(tab.id)}"]`)?.focus(); } }}>
         <button ref={menuItem} role="menuitem" onClick={() => beginRename(tab)}>Rename chat</button>
+        <button role="menuitem" onClick={() => { onExportChat(tab); setMenu(""); }}>Export chat…</button>
         <button role="menuitem" onClick={() => { onArchiveChat(tab); setMenu(""); }}>{tab.archived ? "Restore chat" : "Archive chat"}</button>
       </div>}
     </div>)}
