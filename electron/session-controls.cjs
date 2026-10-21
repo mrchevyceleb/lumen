@@ -6,7 +6,7 @@ const TOML = require("@iarna/toml");
 const net = require("node:net");
 const WebSocket = require("ws");
 const { cliOptions } = require("./models.cjs");
-const { codexAccountOptions } = require("./accounts.cjs");
+const { codexAccountOptions, renameWithRetry } = require("./accounts.cjs");
 const uuid = () => crypto.randomUUID();
 const withoutNulls = (value) => Array.isArray(value) ? value.map(withoutNulls) : value && typeof value === "object" ?
   Object.fromEntries(Object.entries(value).filter(([, v]) => v !== null).map(([k, v]) => [k, withoutNulls(v)])) : value;
@@ -61,7 +61,7 @@ async function codexThreadServers(s, loaded) {
 }
 const exists = (file) => fs.stat(file).then(() => true, () => false);
 const jsonFile = (file) => fs.readFile(file, "utf8").then(JSON.parse).catch((error) => { if (error.code === "ENOENT") return {}; throw error; });
-const atomicWrite = async (file, text) => { const temporary = file + "." + uuid() + ".tmp"; await fs.writeFile(temporary, text, { mode: 0o600 }); await fs.rename(temporary, file); };
+const atomicWrite = async (file, text) => { const temporary = file + "." + uuid() + ".tmp"; await fs.writeFile(temporary, text, { mode: 0o600 }); await renameWithRetry(temporary, file); };
 const inFolder = (root, child) => { const relative = path.relative(root, child); return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative); };
 const sessionId = (value) => typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
 
