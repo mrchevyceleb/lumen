@@ -162,10 +162,19 @@ class BrowserService {
         remaining -= tabs.length;
         const store = legacy ? this.legacy : this.groups, key = legacy ? workspace : scope;
         const current = store.get(key);
+        // Profiles saved before duplicate clicks were merged can hold the same
+        // page several times; restoring one of each keeps the saved tab list
+        // honest instead of bringing the duplicates back forever.
+        const seen = new Set((current?.tabs || []).map((tab) => tab.url));
+        const unique = tabs.filter((tab) => {
+          if (tab.url !== "about:blank" && seen.has(tab.url)) return false;
+          if (tab.url !== "about:blank") seen.add(tab.url);
+          return true;
+        });
         if (current) {
-          current.tabs.push(...tabs);
-          if (!current.activeId) current.activeId = tabs[group.activeIndex]?.id || tabs[0]?.id || "";
-        } else store.set(key, { tabs, activeId: tabs[group.activeIndex]?.id || tabs[0]?.id || "" });
+          current.tabs.push(...unique);
+          if (!current.activeId) current.activeId = unique[group.activeIndex]?.id || unique[0]?.id || "";
+        } else store.set(key, { tabs: unique, activeId: unique[group.activeIndex]?.id || unique[0]?.id || "" });
       }
     } catch { /* A new profile starts with an empty browser. */ }
     window.webContents.on("did-start-loading", () => this.layout(null));
@@ -793,7 +802,23 @@ class BrowserService {
       if (!scope) throw bad("Choose a chat before using its browser.");
       if (Object.hasOwn(body, "workspace") && typeof body.workspace !== "string") throw bad("Invalid browser workspace.");
       this.adoptLegacy(scope, typeof body.workspace === "string" ? body.workspace : "");
-      return this.create(scope, body.url ?? "about:blank");
+      // A person clicking the same chat link twice means "show me that page",
+      // not "give me another copy of it". Only link clicks ask for reuse; the
+      // agent browser actions still open the new tab they asked for.
+      const target = body.url ?? "about:blank";
+      if (body.reuse === true) {
+        const normalized = browserURL(target), group = this.groups.get(scope);
+        const open = normalized !== "about:blank" && group?.tabs.find((tab) => tab.url === normalized || tab.pendingURL === normalized);
+        if (open) {
+          group.activeId = open.id;
+          // A page that failed last time gets another try instead of leaving the
+          // link pointing at its error screen.
+          if (open.error) { open.error = ""; this.load(open, normalized); }
+          this.sync(); this.emit(true);
+          return this.metadata(open);
+        }
+      }
+      return this.create(scope, target);
     }
     // Validate the action before looking the tab up, so an unknown action names itself instead
     // of borrowing the misleading "That browser tab is closed" message.

@@ -19,6 +19,17 @@ export function externalLink(href?: string) {
   return match ? `${match[1].toLowerCase()}:${match[2]}` : null;
 }
 
+// Hand a mail or phone link to the system and say so: the app that takes over
+// is usually covering Lumen, so a silent handoff looks like a dead click. The
+// wording stays with the handoff; on Linux the OS can report success with no
+// app registered.
+export function openExternalLink(href: string, onError: (message: string) => void, onNotice?: (message: string) => void) {
+  void api("external:open", href).then(
+    () => onNotice?.(href.slice(0, href.indexOf(":")).toLowerCase() === "tel" ? "Sent to your phone app." : "Sent to your email app."),
+    (error) => onError(error?.message || "That link could not be opened."),
+  );
+}
+
 // Turn a Markdown href into a path the app can open on disk. Handles the shapes
 // agents actually emit: C:/Users/..., C:\Users\..., \\server\share, /home/me,
 // ~/Desktop/file, file:///C:/..., and plain relative paths. Anything that is a
@@ -29,6 +40,12 @@ export function filePathFromHref(href?: string) {
   let value = href.trim();
   if (!value) return null;
   if (/^(?:mailto|tel|data|javascript):/i.test(value)) return null;
+  // \\?\C:\... and \\.\... are Windows namespace paths, not queries and not
+  // schemes. Markdown percent-encodes the backslashes in a link destination, so
+  // rebuild them first; the raw value goes to the main process, which refuses
+  // device paths by name instead of guessing at a fragment.
+  const device = value.replace(/%5c/gi, "\\").replace(/%2f/gi, "/");
+  if (/^(?:\\\\[?.]\\|\/\/[?.]\/)/.test(device)) return device;
   if (webLink(value)) return null;
   if (/^file:\/\//i.test(value)) {
     try {
@@ -86,7 +103,7 @@ export async function webLinkMenu(url: string, onWeb: (url: string) => void, onE
   } catch (error: any) { onError(error.message); }
 }
 
-export function ChatLink({ href, children, onWeb, onError, onFile, onFileMenu }: { href?: string; children: ReactNode; onWeb: (url: string) => void; onError: (message: string) => void; onFile?: (path: string) => void; onFileMenu?: (path: string) => void }) {
+export function ChatLink({ href, children, onWeb, onError, onNotice, onFile, onFileMenu }: { href?: string; children: ReactNode; onWeb: (url: string) => void; onError: (message: string) => void; onNotice?: (message: string) => void; onFile?: (path: string) => void; onFileMenu?: (path: string) => void }) {
   const url = href ? webLink(href) : null;
   const external = url ? null : externalLink(href);
   const file = url || external ? null : filePathFromHref(href);
@@ -105,13 +122,13 @@ export function ChatLink({ href, children, onWeb, onError, onFile, onFileMenu }:
     aria-disabled={inert || undefined}
     onClick={(event) => {
       if (url) activateWebLink(event, url, onWeb, onError);
-      else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
+      else if (external) { event.preventDefault(); openExternalLink(external, onError, onNotice); }
       else { event.preventDefault(); if (file) onFile?.(file); }
     }}
     onAuxClick={(event) => {
       if (event.button !== 1) return;
       if (url) activateWebLink(event, url, onWeb, onError);
-      else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
+      else if (external) { event.preventDefault(); openExternalLink(external, onError, onNotice); }
       else if (file) { event.preventDefault(); onFile?.(file); }
     }}
     onContextMenu={url
