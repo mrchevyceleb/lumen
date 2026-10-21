@@ -920,6 +920,7 @@ export default function App() {
               t.busy = true;
               t.interrupted = false;
               t.phase = undefined;
+              t.phaseText = undefined;
               t.turn = e.turn;
               t.started = Date.now();
             } else if (e.type === "done") {
@@ -928,6 +929,7 @@ export default function App() {
               t.forceStopAvailable = false;
               t.interrupted = e.code === 130;
               t.phase = undefined;
+              t.phaseText = undefined;
               t.exitCode = e.code;
               t.duration = Date.now() - (t.started || Date.now());
               if (e.sessionRef) t.sessionRef = e.sessionRef;
@@ -943,7 +945,7 @@ export default function App() {
             else if (e.type === "view") { if (e.mode) t.mode = e.mode; if (e.sessionRef) t.sessionRef = e.sessionRef; }
             else if (e.type === "history") t.messages = e.messages || t.messages;
             else if (e.type === "reconnected") { t.recoveryError = undefined; t.exited = false; }
-            else if (e.type === "phase") t.phase = e.phase;
+            else if (e.type === "phase") { t.phase = e.phase; t.phaseText = e.text; }
             else if (e.type === "session") t.sessionRef = e.sessionRef;
             else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
@@ -2120,7 +2122,7 @@ export default function App() {
           {boot.administrator.supported && <button className={boot.administrator.elevated ? "administrator-active" : ""} title={boot.administrator.elevated ? "Agents and terminals have Windows administrator access" : "Restart Lumen with Windows administrator access"}
             onClick={() => { setSettingsSection("behavior"); setDialog("settings"); }}><ShieldCheck size={12} />{boot.administrator.elevated ? "Administrator" : "Run as administrator"}</button>}
           {active?.busy ? (
-              active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
+              active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "retrying" ? (active.phaseText || "Reconnecting…") : active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
           ) : (
             <>
               <Circle size={9} />

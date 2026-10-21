@@ -328,9 +328,14 @@ class Runtime {
     } else if (s.agent === "codex") this.codexEvent(e);
     else this.grokEvent(e);
   }
-  phase(compacting) {
-    this.s.phase = compacting ? "compacting" : undefined;
-    this.owner.event(this.s, { type: "phase", phase: this.s.phase });
+  // The phase is the live status the composer shows under a running turn. It is
+  // separate from messages on purpose: a transport hiccup that Codex retries
+  // belongs in the status line, not in the transcript as a failure card.
+  phase(value, text) {
+    const next = value === true ? "compacting" : value || undefined;
+    this.s.phase = ["compacting", "retrying", "waiting", "finishing"].includes(next) ? next : undefined;
+    this.s.phaseText = this.s.phase && typeof text === "string" ? text : undefined;
+    this.owner.event(this.s, { type: "phase", phase: this.s.phase, text: this.s.phaseText });
   }
   async initialize() {
     const { owner: o, s } = this;
@@ -740,6 +745,13 @@ class Runtime {
   codexEvent(e) {
     const { owner: o, s } = this, p = e.params || {};
     if (p.threadId && p.threadId !== s.sessionRef) return;
+    // Codex retries a dropped model stream on its own. The first real output of
+    // this turn means the stream is back, so the retrying status has done its
+    // job. Only this turn's output counts: a late event from an older turn is
+    // rejected below and must not hide an in-progress reconnect.
+    const turnId = p.turn?.id || p.turnId;
+    if (s.phase === "retrying" && turnId && turnId === this.activeTurnId &&
+      ["item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta"].includes(e.method)) this.phase(false);
     if (e.method === "serverRequest/resolved") for (const [id, requestId] of this.serverUiRequests) if (requestId === p.requestId) {
       this.serverUiRequests.delete(id); this.uiRequests.delete(id); o.event(s, { type: "agent_ui_cancel", request: { id } });
     }
@@ -755,7 +767,15 @@ class Runtime {
       if (item?.type === "contextCompaction") this.phase(e.method === "item/started");
     }
     if (e.method === "thread/tokenUsage/updated") { this.context = p.tokenUsage?.last?.totalTokens ?? null; this.contextWindow = p.tokenUsage?.modelContextWindow ?? null; this.reportContext(); }
-    if (e.method === "error") { if (require("./auth.cjs").authError(JSON.stringify(p.error))) { this.authFailed = true; s.authInvalid = true; } o.event(s, { type: "error", message: p.error?.message || "Codex turn failed." }); }
+    if (e.method === "error") {
+      if (require("./auth.cjs").authError(JSON.stringify(p.error))) { this.authFailed = true; s.authInvalid = true; }
+      const message = p.error?.message || "Codex turn failed.";
+      // willRetry means Codex is reconnecting by itself and the turn is still
+      // alive. A red failure card for each attempt buried real answers under
+      // "Something needs attention" whenever the connection blinked.
+      if (p.willRetry) { this.phase("retrying", message); o.event(s, { type: "diagnostic", key: "codex-retry", replace: true, title: "Codex is reconnecting", text: message }); }
+      else { this.phase(false); o.event(s, { type: "error", message }); }
+    }
     if (e.method === "turn/completed") {
       if (p.turn?.id && this.activeTurnId && p.turn.id !== this.activeTurnId) return;
       this.activeTurnId = null;

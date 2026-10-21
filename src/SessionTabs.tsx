@@ -64,9 +64,9 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
         <span>{tab.name}{tab.accountId ? ` · ${tab.accountName}` : ""}</span>
         {tab.archived && <span className="archived-tag"><Archive size={10} aria-hidden="true" />Archived</span>}
         {tab.managedBy && <Sparkles size={11} aria-label="Agent controlled task" />}
-        {tab.busy ? tab.phase ? <span className="chat-phase" title={tab.phase}>…</span> : <span className="tiny-pulse" /> : tab.mode === "native" ? <span className="native-tag">CLI</span> : null}
+        {tab.busy ? tab.phase ? <span className="chat-phase" title={tab.phaseText || tab.phase}>…</span> : <span className="tiny-pulse" /> : tab.mode === "native" ? <span className="native-tag">CLI</span> : null}
       </button>}
-      <span className="screen-reader-only" id={`chat-status-${tab.id}`}>{`${tab.archived ? "Archived. " : ""}${tab.busy ? tab.phase || "Working" : tab.mode === "native" ? "Native CLI" : "Readable session"}`}</span>
+      <span className="screen-reader-only" id={`chat-status-${tab.id}`}>{`${tab.archived ? "Archived. " : ""}${tab.busy ? tab.phaseText || tab.phase || "Working" : tab.mode === "native" ? "Native CLI" : "Readable session"}`}</span>
       {renaming !== tab.id && <button type="button" className="chat-options" aria-label={`Options for ${tab.name}`} aria-haspopup="menu" aria-expanded={menu === tab.id} aria-controls={menu === tab.id ? `chat-menu-${tab.id}` : undefined} onClick={(event) => { if (menu === tab.id) { setMenu(""); return; } const rect = event.currentTarget.getBoundingClientRect(); setMenuBox({ top: rect.bottom + 4, left: Math.max(8, rect.right - 168) }); setMenu(tab.id); }}><MoreHorizontal size={12} /></button>}
       {renaming !== tab.id && <IconButton label={`Close ${tab.name} tab`} onClick={() => onClose(tab)}><X size={12} /></IconButton>}
       {menu === tab.id && <div className="chat-menu" id={`chat-menu-${tab.id}`} role="menu" style={!vertical && menuBox ? { top: menuBox.top, left: menuBox.left } : undefined} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(""); nav.current?.querySelector<HTMLButtonElement>(`[aria-controls="chat-menu-${CSS.escape(tab.id)}"]`)?.focus(); } }}>

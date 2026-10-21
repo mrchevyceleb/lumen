@@ -107,7 +107,8 @@ export interface Tab {
   color?: string;
   messages: Message[];
   busy: boolean;
-  phase?: "waiting" | "finishing" | "compacting";
+  phase?: "waiting" | "finishing" | "compacting" | "retrying";
+  phaseText?: string;
   sessionRef?: string;
   turn?: string;
   started?: number;
@@ -202,7 +203,7 @@ export interface SessionEvent {
   catalog?: ModelCatalog;
   id: string;
   type: string;
-  phase?: "waiting" | "finishing" | "compacting";
+  phase?: "waiting" | "finishing" | "compacting" | "retrying";
   text?: string;
   key?: string;
   replace?: boolean;

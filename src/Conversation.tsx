@@ -326,13 +326,13 @@ export default function Conversation({
               />
             ))}
             {tab.busy && (
-              <div className="working-indicator">
+              <div className="working-indicator" role="status" aria-live="polite">
                 {tab.phase ? <TerminalSquare size={13} /> : <span className="thinking-dots">
                   <i />
                   <i />
                   <i />
                 </span>}{" "}
-                {tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
+                {tab.phase === "retrying" ? (tab.phaseText || "Reconnecting…") : tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
                   ? "Running command"
                   : `${agentNames[tab.agent]} is working`}
               </div>
