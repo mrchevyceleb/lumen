@@ -488,24 +488,27 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
+  const browserOpens = useRef(0);
   const openWeb = (url: string) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat before opening its browser."); return; }
     const chatId = chat.controlId || chat.id;
     const workspace = chat.cwd && chat.cwd !== chat.root ? chat.cwd : chat.projectless ? "" : chat.root;
+    const request = ++browserOpens.current;
     const wasBrowserOpen = browserOpen;
     setBrowserOpen(true);
     void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => {
       // A link that cannot use the pane still should not feel dead: hand it to
       // the system browser instead, and if that fails too, put the pane back
-      // the way it was and say what went wrong.
-      void api("external:open", url).then(
-        () => { if (!wasBrowserOpen) setBrowserOpen(false); },
-        (fallbackError) => {
-          if (!wasBrowserOpen) setBrowserOpen(false);
-          notify(`Could not open that link: ${fallbackError.message || error.message}`);
-        },
-      );
+      // the way it was and say what went wrong. Only the newest request may put
+      // the pane back: an older failure must not close a browser a newer link
+      // has just opened.
+      const restore = () => { if (browserOpens.current === request && !wasBrowserOpen) setBrowserOpen(false); };
+      void api("external:open", url).then(restore, (fallbackError) => {
+        if (browserOpens.current !== request) return;
+        restore();
+        notify(`Could not open that link: ${fallbackError.message || error.message}`);
+      });
     });
   };
   const updateTab = (id: string, change: Partial<Tab>) => {

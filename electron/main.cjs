@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require("electron");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
 const fs = require("node:fs/promises");
 const { pathToFileURL } = require("node:url");
 const {
@@ -49,10 +50,18 @@ function decodePath(value) {
   try { return decodeURIComponent(value); } catch { return value; }
 }
 
+// \\server\share and //server/share reach another machine. Nothing in a chat
+// link may touch the network before the person agrees to it.
+const isNetworkPath = (value) => /^\\\\[^\\?.]/.test(value) || /^\/\/[^/]/.test(value);
+
 async function resolveLinkPath(filePath, root) {
   if (typeof filePath !== "string" || !filePath.trim())
     throw new Error("That link has no file path.");
   let value = filePath.trim();
+  // \\?\ and \\.\ name devices and namespaces, never a file in a chat. Check
+  // before query stripping, which would otherwise eat the "?" in the name.
+  if (/^\\\\[?.]\\/.test(value))
+    throw new Error("Lumen does not open device paths from chat links.");
   if (/^file:\/\//i.test(value)) {
     try {
       const parsed = new URL(value);
@@ -80,10 +89,12 @@ async function resolveLinkPath(filePath, root) {
     throw new Error("Lumen can only open web links and files on this computer.");
   if (value === "~" || value.startsWith("~/") || value.startsWith("~\\"))
     value = path.join(app.getPath("home"), value.slice(1));
-  // A drive or UNC path is absolute even when it came from another OS; do not
-  // glue it onto the workspace root just because this platform disagrees.
-  const foreignAbsolute = /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
-  if (!path.isAbsolute(value) && !foreignAbsolute) {
+  // A drive or UNC path is absolute even when it came from another OS, but a
+  // Windows path only resolves on Windows. Saying so beats a misleading "file
+  // is gone" for a path that was never on this computer to begin with.
+  if (process.platform !== "win32" && (/^[a-zA-Z]:[\\/]/.test(value) || isNetworkPath(value)))
+    throw new Error(OTHER_COMPUTER_MESSAGE(value));
+  if (!path.isAbsolute(value)) {
     if (!root) throw new Error("Open a workspace before opening its files.");
     value = path.resolve(root, value);
   }
@@ -138,7 +149,58 @@ const UNSUPPORTED_MESSAGE = "Lumen does not launch this file type from a chat li
 
 function isPassiveTarget(target, stat) {
   if (stat.isDirectory()) return !target.toLowerCase().endsWith(".app");
+  // Sockets, pipes and devices are never something a chat link should launch.
+  if (!stat.isFile()) return false;
   return PASSIVE_EXTENSIONS.has(path.extname(target).toLowerCase());
+}
+
+const OTHER_COMPUTER_MESSAGE = (target) =>
+  `That file is on another computer, not on this one: ${target}. Right-click the link and choose Copy path to use it there.`;
+
+async function statTarget(target) {
+  try {
+    return await fs.stat(target);
+  } catch (error) {
+    // Only a missing file is gone; permissions and I/O failures say what
+    // actually happened so a real problem is not hidden behind "gone".
+    if (["ENOENT", "ENOTDIR"].includes(error?.code)) throw new Error(`That file is gone: ${target}`);
+    if (["EACCES", "EPERM"].includes(error?.code)) throw new Error(`Lumen does not have permission to open ${target}.`);
+    throw new Error(`Lumen could not open ${target}: ${error?.message || "unknown error"}`);
+  }
+}
+
+// Resolve twice: first the path the person thinks they clicked, then the file
+// it really is. A link named report.pdf that points at an executable is judged
+// by what it points at, so the confirmation rules cannot be sidestepped.
+async function settleTarget(target) {
+  const stat = await statTarget(target);
+  if (!stat.isFile() && !stat.isDirectory()) throw new Error(`Lumen cannot open ${target}: it is not a file or folder.`);
+  const real = await fs.realpath(target).catch(() => target);
+  const realStat = real === target ? stat : await statTarget(real);
+  return { stat, real, realStat };
+}
+
+async function confirmNetwork(target) {
+  if (!isNetworkPath(target)) return true;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "question",
+    buttons: ["Cancel", "Open"],
+    defaultId: 0,
+    cancelId: 0,
+    title: "Open a network path?",
+    message: target,
+    detail: "This path is on another computer. Opening it contacts that machine first.",
+  });
+  return response === 1;
+}
+
+// Linux reports success from openPath even when no application is registered,
+// so ask the same lookup the desktop uses. Elsewhere the string is reliable.
+function hasFileHandler(target) {
+  if (process.platform !== "linux") return Promise.resolve(true);
+  const query = (args) => new Promise((resolve) =>
+    execFile("xdg-mime", args, { timeout: 3000 }, (error, stdout) => resolve(error ? "" : String(stdout).trim())));
+  return query(["query", "filetype", target]).then((mime) => mime ? query(["query", "default", mime]).then(Boolean) : false);
 }
 
 async function revealTarget(target, stat, error) {
@@ -148,47 +210,58 @@ async function revealTarget(target, stat, error) {
 
 async function openLink(filePath, root) {
   const target = await resolveLinkPath(filePath, root);
-  let stat;
-  try { stat = await fs.stat(target); } catch { throw new Error(`That file is gone: ${target}`); }
+  if (!await confirmNetwork(target)) return { kind: "cancel" };
+  const { real, realStat } = await settleTarget(target);
   const rootPath = typeof root === "string" && root ? path.resolve(root) : "";
-  const real = stat.isFile() || stat.isDirectory() ? await fs.realpath(target).catch(() => target) : target;
-  if (stat.isFile() && rootPath) {
+  if (realStat.isFile() && rootPath) {
     // Compare real paths on both sides so a workspace opened through a symlink
     // still counts as the workspace.
     const realRoot = await fs.realpath(rootPath).catch(() => rootPath);
-    if (inside(realRoot, real) && await isTextFile(target, stat.size))
+    if (inside(realRoot, real) && await isTextFile(real, realStat.size))
       return { kind: "editor", relative: path.relative(realRoot, real).split(path.sep).join("/") };
   }
-  if (!isPassiveTarget(target, stat))
-    return revealTarget(target, stat, UNSUPPORTED_MESSAGE);
+  if (!isPassiveTarget(real, realStat))
+    return revealTarget(target, realStat, UNSUPPORTED_MESSAGE);
+  if (!await hasFileHandler(real))
+    return revealTarget(target, realStat, `No app on this computer opens ${path.extname(real) || "this file type"}. Open it from the folder below, or pick a default app in your settings.`);
   const error = await shell.openPath(target);
   if (!error) return { kind: "external" };
   // No app registered for this type: put it on screen instead of leaving the
   // click dead.
-  return revealTarget(target, stat, error);
+  return revealTarget(target, realStat, error);
+}
+
+async function showInFolder(filePath, root) {
+  const target = await resolveLinkPath(filePath, root);
+  if (!await confirmNetwork(target)) return { kind: "cancel" };
+  const stat = await statTarget(target);
+  if (!stat.isFile() && !stat.isDirectory()) throw new Error(`Lumen cannot show ${target} in a file manager.`);
+  shell.showItemInFolder(target);
+  return { kind: "done" };
 }
 
 async function openLinkExplicitly(filePath, root) {
   // The right-click menu path: the person chose this file, so anything is
   // launchable after a confirmation for non-passive types.
   const target = await resolveLinkPath(filePath, root);
-  let stat;
-  try { stat = await fs.stat(target); } catch { throw new Error(`That file is gone: ${target}`); }
-  if (!isPassiveTarget(target, stat)) {
+  if (!await confirmNetwork(target)) return { kind: "cancel" };
+  const { real, realStat } = await settleTarget(target);
+  if (!isPassiveTarget(real, realStat)) {
     const { response } = await dialog.showMessageBox(window, {
       type: "warning",
       buttons: ["Cancel", "Open anyway"],
       defaultId: 0,
       cancelId: 0,
       title: "Open this file?",
-      message: path.basename(target),
+      message: path.basename(real),
       detail: "Agent-provided files can run code. Only open it if you trust what produced it.",
+      noLink: true,
     });
     if (response !== 1) return { kind: "cancel" };
   }
   const error = await shell.openPath(target);
   if (!error) return { kind: "external" };
-  return revealTarget(target, stat, error);
+  return revealTarget(target, realStat, error);
 }
 let allowClose = false,
   closeTimer;
@@ -414,8 +487,8 @@ startup.then(async (start) => {
   });
   handle("external:open", async (url) => {
     const parsed = new URL(url);
-    if (!["https:", "http:"].includes(parsed.protocol))
-      throw new Error("Only web links can open externally.");
+    if (!["https:", "http:", "mailto:", "tel:"].includes(parsed.protocol))
+      throw new Error("Lumen opens web, email and phone links externally.");
     await shell.openExternal(url);
   });
   // Chat file links: resolve whatever the agent wrote (Windows or POSIX absolute,
@@ -428,7 +501,7 @@ startup.then(async (start) => {
     const menu = Menu.buildFromTemplate([
       { label: "Open", click: () => task(() => openLink(filePath, root)) },
       { label: "Open in default app", click: () => task(() => openLinkExplicitly(filePath, root)) },
-      { label: "Show in folder", click: () => task(async () => { shell.showItemInFolder(await resolveLinkPath(filePath, root)); return { kind: "done" }; }) },
+      { label: "Show in folder", click: () => task(() => showInFolder(filePath, root)) },
       { type: "separator" },
       { label: "Copy path", click: () => task(async () => { clipboard.writeText(await resolveLinkPath(filePath, root)); return { kind: "done" }; }) },
     ]);

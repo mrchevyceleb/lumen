@@ -1583,6 +1583,21 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .prose a:hover {
   text-decoration: underline;
 }
+/* File links read as files: a dashed underline says "this opens something on
+   disk", and hover pulls it to a solid accent line. */
+.prose a.chat-file-link {
+  text-decoration: underline dashed;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 3px;
+  transition: color 120ms ease, text-decoration-color 120ms ease;
+}
+.prose a.chat-file-link:hover {
+  color: var(--accent);
+  text-decoration-style: solid;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: var(--accent);
+}
 .prose code {
   font-family: "Cascadia Code", Consolas, monospace;
   font-size: 0.84em;

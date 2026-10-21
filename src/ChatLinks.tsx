@@ -11,6 +11,14 @@ export function webLink(value: string) {
   } catch { return null; }
 }
 
+// mailto: and tel: belong to the system, not to a file path. They are the only
+// external schemes a chat link may hand off, so a vscode: or ssh: link stays
+// inert instead of launching an app nobody asked for.
+export function externalLink(href?: string) {
+  const match = href?.trim().match(/^(mailto|tel):(\S.*)$/i);
+  return match ? `${match[1].toLowerCase()}:${match[2]}` : null;
+}
+
 // Turn a Markdown href into a path the app can open on disk. Handles the shapes
 // agents actually emit: C:/Users/..., C:\Users\..., \\server\share, /home/me,
 // ~/Desktop/file, file:///C:/..., and plain relative paths. Anything that is a
@@ -80,19 +88,28 @@ export async function webLinkMenu(url: string, onWeb: (url: string) => void, onE
 
 export function ChatLink({ href, children, onWeb, onError, onFile, onFileMenu }: { href?: string; children: ReactNode; onWeb: (url: string) => void; onError: (message: string) => void; onFile?: (path: string) => void; onFileMenu?: (path: string) => void }) {
   const url = href ? webLink(href) : null;
-  const file = url ? null : filePathFromHref(href);
+  const external = url ? null : externalLink(href);
+  const file = url || external ? null : filePathFromHref(href);
   const title = url
     ? "Open in Lumen · Ctrl-click to open in main browser"
-    : file
-      ? "Open this file · Right-click for more"
-      : undefined;
-  return <a className={url ? "chat-web-link" : file ? "chat-file-link" : undefined} href={url || href}
+    : external
+      ? "Open this link in its app"
+      : file
+        ? "Open this file · Right-click for more"
+        : undefined;
+  return <a className={url || external ? "chat-web-link" : file ? "chat-file-link" : undefined} href={url || href}
     title={title}
     onClick={(event) => {
       if (url) activateWebLink(event, url, onWeb, onError);
+      else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
       else { event.preventDefault(); if (file) onFile?.(file); }
     }}
-    onAuxClick={(event) => { if (event.button === 1 && url) activateWebLink(event, url, onWeb, onError); }}
+    onAuxClick={(event) => {
+      if (event.button !== 1) return;
+      if (url) activateWebLink(event, url, onWeb, onError);
+      else if (external) { event.preventDefault(); void api("external:open", external).catch((error) => onError(error.message)); }
+      else if (file) { event.preventDefault(); onFile?.(file); }
+    }}
     onContextMenu={url
       ? (event) => { event.preventDefault(); void webLinkMenu(url, onWeb, onError); }
       : file && onFileMenu
