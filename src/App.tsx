@@ -89,6 +89,7 @@ import BrowserPane from "./BrowserPane";
 import PiCustomControl from "./PiCustomControl";
 import SessionStart from "./SessionStart";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
+import { chatText } from "./chat-export";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok", "google"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -1473,6 +1474,14 @@ export default function App() {
     if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
   };
   const listedTab = (tab: Tab) => !tab.archived && (tab.projectless || !isHiddenProject(tab.root));
+  const exportChat = async (tab: Tab) => {
+    const text = chatText(tab);
+    if (!text) { notify("This chat has nothing to export yet."); return; }
+    try {
+      const result = await api<{ kind: "saved" | "canceled"; path?: string }>("chat:export", { name: tab.name, text });
+      if (result?.kind === "saved" && result.path) notify(`Chat saved to ${result.path.split(/[\\/]/).pop()}`);
+    } catch (error: any) { notify(error.message); }
+  };
   const archiveChat = (tab: Tab) => {
     const archived = !tab.archived;
     setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, archived } : t));
@@ -1501,7 +1510,7 @@ export default function App() {
     if (!next) leaveHiddenView();
     setShowArchived(next);
   };
-  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat };
+  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat, onExportChat: (tab: Tab) => void exportChat(tab) };
   const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
   const sessionActions = <div className="tab-actions">
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>

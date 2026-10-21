@@ -5,6 +5,7 @@ const channels = new Set([
   "administrator:status", "administrator:restart",
   "recovery:load", "recovery:save", "recovery:update", "attachments:paste", "attachments:choose", "attachments:import", "session:reconnect",
   "agent-control:status", "agent-control:change", "agent-control:ready", "agent-control:reply", "agent-control:claim",
+  "chat:export",
   "workspace:choose",
   "workspace:open",
   "workspace:register",

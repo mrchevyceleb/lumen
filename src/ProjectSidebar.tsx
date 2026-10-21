@@ -16,7 +16,7 @@ export function normalizeProjects(values: unknown): Project[] {
   return values.filter((p, i) => p && typeof p.root === "string" && typeof p.name === "string" && !values.slice(0, i).some((q) => q && typeof q.root === "string" && sameProject(p.root, q.root))).map((p) => ({ root: p.root, name: p.name, pinned: p.pinned === true, hidden: p.hidden === true, collapsed: p.collapsed === true, color: typeof p.color === "string" && /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : undefined }));
 }
 
-export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onTerminal, onScratch, onChange, onArchive, tabs, activeId, settings, onSelect, onCustomize, onRename, onClose, onArchiveChat, onLayout, onNewChat, newChatRoot, onCollapse, showArchived, onToggleArchived, onLeaveHidden }: SessionTabActions & {
+export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onTerminal, onScratch, onChange, onArchive, tabs, activeId, settings, onSelect, onCustomize, onRename, onClose, onArchiveChat, onExportChat, onLayout, onNewChat, newChatRoot, onCollapse, showArchived, onToggleArchived, onLeaveHidden }: SessionTabActions & {
   projects: Project[]; activeRoot: string; counts: Record<string, number>; ready: boolean;
   tabs: Tab[]; activeId: string; settings: Settings; onLayout: () => void; onNewChat: (root: string) => void; newChatRoot?: string;
   onOpen: (project: Project, reveal?: boolean) => void; onAdd: () => void; onTerminal: () => void; onScratch: () => void; onChange: (projects: Project[]) => void; onArchive: (project: Project) => void; onCollapse: () => void;
@@ -131,11 +131,11 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
             </div><button onClick={() => colorProject(project)}>Reset color</button>
             <button className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>}
         </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
-          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} />
+          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onExportChat={onExportChat} />
         </div>}</div>)}
       </section>)}
       {vertical && <div className="scratch-chats"><div className="scratch-heading"><button aria-label={`${scratchCollapsed ? "Expand" : "Collapse"} chats without a workspace`} aria-expanded={!scratchCollapsed} onClick={() => scratch.length ? setScratchCollapsed(!scratchCollapsed) : onScratch()}>{scratchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}<FolderOpen size={15} /><span>No workspace</span><small>{scratch.length}</small></button><button aria-label="New chat without workspace" disabled={!ready} aria-expanded={newChatRoot === ""} aria-controls={newChatRoot === "" ? "new-chat-menu" : undefined} onClick={() => onNewChat("")}><Plus size={13} /></button></div>
-        <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} /></div>
+        <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onExportChat={onExportChat} /></div>
       </div>}
       {revealArchived && !!archived.length && <section className="archived-projects" aria-label="Archived projects">
         {!!archivedMatches.length && <div className="project-group"><Archive size={10} /> Archived</div>}
@@ -147,7 +147,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
           <button className="project-options" aria-label={`Options for ${project.name}`} aria-expanded={menu === project.root} onClick={() => setMenu(menu === project.root ? "" : project.root)}><MoreHorizontal size={13} /></button>
           {menu === project.root && <div className="project-menu"><button onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, hidden: false, collapsed: false } : p)); setMenu(""); }}>Restore project</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button></div>}
         </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
-          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Archived chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} />
+          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Archived chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onExportChat={onExportChat} />
         </div>}</div>)}
         {!archivedMatches.length && <p className="project-empty">No matching archived projects.</p>}
       </section>}

@@ -242,6 +242,29 @@ startup.then(async (start) => {
   handle("settings:save", (settings) =>
     fs.writeFile(path.join(dataDir, "settings.json"), JSON.stringify(settings)),
   );
+  handle("chat:export", async ({ name, text } = {}) => {
+    if (typeof text !== "string" || !text.trim())
+      throw new Error("This chat has nothing to export yet.");
+    let base = String(name || "Chat")
+      .replace(/[\\/:*?"<>|\x00-\x1f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80) || "Chat";
+    // Windows refuses CON, NUL, COM1 and friends as file names even with an
+    // extension, so a chat named after one still saves.
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base.split(".")[0])) base = `Chat ${base}`;
+    const result = await dialog.showSaveDialog(window, {
+      title: "Export chat",
+      defaultPath: path.join(app.getPath("downloads"), `${base}.md`),
+      filters: [
+        { name: "Markdown", extensions: ["md"] },
+        { name: "Plain text", extensions: ["txt"] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { kind: "canceled" };
+    await fs.writeFile(result.filePath, text, "utf8");
+    return { kind: "saved", path: result.filePath };
+  });
   handle("external:open", async (url) => {
     const parsed = new URL(url);
     if (!["https:", "http:"].includes(parsed.protocol))
