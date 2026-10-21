@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import Markdown, { defaultUrlTransform } from "react-markdown";
+import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ArrowDown,
@@ -28,6 +28,7 @@ import type { SessionControlsState } from "./types";
 import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames, foregroundFor } from "./settings";
 import { ChatLink, LinkText, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
+import { StreamingMarkdown } from "./stream-fade";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 export function AgentMark({
   agent,
@@ -173,6 +174,17 @@ export default function Conversation({
   const messages = useMemo<Message[]>(() => sending && !tab.messages.some((message) => message.id === sending.id)
     ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, delivery: "send", deliveryState: "sending" }]
     : tab.messages, [tab.messages, sending]);
+  // Only the reply being written right now fades word by word; everything
+  // already on screen stays still. The reply must sit after the newest user
+  // turn, or a send in flight would replay the previous answer's fade before
+  // the new one exists.
+  const streamingId = useMemo(() => {
+    if (!tab.busy) return undefined;
+    let lastUser = -1;
+    for (let index = messages.length - 1; index >= 0; index--) if (messages[index].role === "user") { lastUser = index; break; }
+    for (let index = messages.length - 1; index > lastUser; index--) if (messages[index].role === "assistant") return messages[index].id;
+    return undefined;
+  }, [tab.busy, messages]);
   useEffect(() => {
     if (stick.current)
       scroll.current?.scrollTo({
@@ -320,6 +332,7 @@ export default function Conversation({
                 key={message.id}
                 message={message}
                 tab={tab}
+                streaming={message.id === streamingId}
                 color={color}
                 onFile={onFile}
                 onFileMenu={onFileMenu}
@@ -526,6 +539,7 @@ function MessageView({
   message: m,
   tab,
   color,
+  streaming,
   onFile,
   onFileMenu,
   onWeb,
@@ -535,6 +549,7 @@ function MessageView({
   message: Message;
   tab: Tab;
   color: string;
+  streaming: boolean;
   onFile: (path: string) => void;
   onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
@@ -610,7 +625,10 @@ function MessageView({
         </pre>
       ) : (
         <div className="prose">
-          <Markdown
+          <StreamingMarkdown
+            text={m.text}
+            animate={streaming}
+            animationKey={m.id}
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeWebLinks]}
             // defaultUrlTransform drops things like C:/Users/... because it reads
@@ -627,9 +645,7 @@ function MessageView({
                 </div>
               ),
             }}
-          >
-            {m.text}
-          </Markdown>
+          />
         </div>
       )}
     </div>
