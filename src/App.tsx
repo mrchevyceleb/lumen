@@ -238,7 +238,15 @@ export default function App() {
     if (terminalHeight > maxTerminalHeight) setTerminalHeight(maxTerminalHeight);
   }, [maxTerminalHeight, terminalHeight]);
   const visibleExplorer = explorer && !explorerHidden;
-  const visibleSidebar = sidebar;
+  // At phone width the projects column cannot stay beside a readable chat. Collapse it as a
+  // view-only state at the same threshold where the sidebar would otherwise be clamped to a
+  // sliver; the person's saved sidebar preference and width both come back untouched.
+  const narrowSidebarHidden = viewportWidth < 720;
+  const [narrowSidebarDismissed, setNarrowSidebarDismissed] = useState(false);
+  useEffect(() => {
+    setNarrowSidebarDismissed(narrowSidebarHidden);
+  }, [narrowSidebarHidden]);
+  const visibleSidebar = sidebar && !(narrowSidebarHidden && narrowSidebarDismissed);
   // Room the browser pane would actually get once the conversation keeps its
   // minimum. On a narrow window that is a sliver, so the pane stays out of the
   // way and links go to the system browser instead.
@@ -320,7 +328,16 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("lumen.panels", JSON.stringify({ projects: sidebar, workspace: explorer, panel, projectsWidth: sidebarWidth, workspaceWidth: explorerWidth, browserWidth, split, terminalHeight })); } catch {}
   }, [sidebar, explorer, panel, sidebarWidth, explorerWidth, browserWidth, split, terminalHeight]);
-  const hideProjects = () => { setSidebar(false); projectsToggle.current?.focus(); };
+  const hideProjects = () => {
+    if (narrowSidebarHidden) setNarrowSidebarDismissed(true);
+    else setSidebar(false);
+    projectsToggle.current?.focus();
+  };
+  const toggleProjects = () => {
+    if (visibleSidebar) hideProjects();
+    else if (narrowSidebarHidden) { setNarrowSidebarDismissed(false); setSidebar(true); }
+    else setSidebar(true);
+  };
   const hideExplorer = () => { explorerPinned.current = false; setExplorer(false); explorerToggle.current?.focus(); };
   // Every manual open goes through here so the responsive auto-hide can never swallow it.
   const showExplorer = () => { explorerPinned.current = true; setExplorer(true); setExplorerHidden(false); };
@@ -619,6 +636,7 @@ export default function App() {
     accountId?: string,
     scratchId?: string,
     control?: Partial<Tab>,
+    replacementControlId?: string,
   ) => {
     const config = settingsRef.current.agents[agent];
     const selection = { root: rootRef.current, id: activeIdRef.current };
@@ -636,8 +654,8 @@ export default function App() {
         sessionRef: resume?.sessionRef || "",
         scratchId: resume?.scratchId || scratchId || "",
         controlId: resume?.controlId || control?.controlId || "",
-        autoCompactTokens: resume?.autoCompactTokens ?? null,
-        mcpOverrides: resume?.mcpOverrides || {},
+        autoCompactTokens: resume?.autoCompactTokens ?? control?.autoCompactTokens ?? null,
+        mcpOverrides: resume?.mcpOverrides || control?.mcpOverrides || {},
         accountId: resume ? resume.accountId || "" : accountId,
         queuedMessages: resume?.queuedMessages || [],
         loadShellProfile: settingsRef.current.loadShellProfile,
@@ -656,11 +674,11 @@ export default function App() {
         agent,
         mode,
         name: resume?.name || control?.name || agentNames[agent],
-        nameCustom: resume?.nameCustom === true,
+        nameCustom: resume?.nameCustom === true || control?.nameCustom === true,
         managedBy: resume?.managedBy || control?.managedBy,
         accountId: created.accountId,
         accountName: created.accountName,
-        color: resume?.color,
+        color: resume?.color ?? control?.color,
         messages: resume?.messages || [],
         draft: resume?.draft || "",
         draftAttachments: resume?.draftAttachments || [],
@@ -673,8 +691,8 @@ export default function App() {
         effort: request.effort,
         workMode: request.workMode,
         controlId: created.controlId,
-        autoCompactTokens: resume?.autoCompactTokens ?? null,
-        mcpOverrides: resume?.mcpOverrides || {},
+        autoCompactTokens: resume?.autoCompactTokens ?? control?.autoCompactTokens ?? null,
+        mcpOverrides: resume?.mcpOverrides || control?.mcpOverrides || {},
         contextTokens: created.contextTokens ?? resume?.contextTokens ?? null,
         contextWindow: created.contextWindow ?? resume?.contextWindow ?? null,
         contextStale: (created.contextTokens ?? resume?.contextTokens) != null,
@@ -686,7 +704,10 @@ export default function App() {
       browserOpenRef.current[created.controlId] = tab.browserOpen === true;
       setTabs((old) => {
         const rest = old.filter((value) => value.controlId !== tab.controlId);
-        const name = tab.nameCustom ? tab.name : uniqueChatName(tab.name, rest);
+        // Clear creates a replacement while its predecessor is still open. Ignore that
+        // exact predecessor so the fresh chat inherits "Pi", not a needless "Pi 2".
+        const namingTabs = replacementControlId ? rest.filter((value) => value.controlId !== replacementControlId) : rest;
+        const name = tab.nameCustom ? tab.name : uniqueChatName(tab.name, namingTabs);
         return [...rest, name === tab.name ? tab : { ...tab, name }];
       });
       const selectionUnchanged = rootRef.current === selection.root && activeIdRef.current === selection.id;
@@ -1039,6 +1060,8 @@ export default function App() {
                       : e.replace
                         ? e.text || ""
                         : (previous?.text || "") + (e.text || ""),
+                provider: e.type === "error" ? e.provider : undefined,
+                model: e.type === "error" ? e.model : undefined,
                 title:
                   e.title === "Tool result" && previous?.title
                     ? previous.title
@@ -1089,6 +1112,73 @@ export default function App() {
       clearTimeout(fallback);
     };
   }, []);
+  // Dragging files in from Explorer: images and videos keep attaching the way they always
+  // have; every other file (and folders) lands in the draft as an @path the agent can open.
+  // Quotes and backslashes are escaped inside the quoted tag so the path stays one token.
+  const dropPaths = async (files: string[]) => {
+    if (!active) return;
+    // Shell chats take plain filesystem paths (space-escaped), never image attachments or
+    // @ mentions; the backend rejects attachments for shells.
+    if (active.agent === "shell") {
+      if (!files.length) { notify("That drop did not include a file path I can use."); return; }
+      const command = (active.command || settingsRef.current.agents.shell.command || "").replace(/\\/g, "/").split("/").pop()?.toLowerCase() || "";
+      const isCmd = /^(cmd|cmd\.exe)$/.test(command);
+      const isPowerShell = /^(pwsh|powershell|pwsh\.exe|powershell\.exe)$/.test(command) || (!command && boot.platform === "win32");
+      const shellPath = (file: string) => {
+        if (!/[\s\"'&|<>^%!`]/.test(file)) return file;
+        // CMD expands %VAR% before quotes are honored, so a dropped path containing
+        // percent expansions is left unquoted; forcing quote-removal would corrupt it.
+        if (isCmd) return file.includes("%") ? file : `"${file.replace(/"/g, "")}"`;
+        if (isPowerShell || boot.platform === "win32") return `'${file.replace(/'/g, "''")}'`;
+        return `'${file.replace(/'/g, "'\\''")}'`;
+      };
+      const text = files.map(shellPath).join(" ");
+      setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, draft: tab.draft ? `${tab.draft.replace(/\s+$/, "")} ${text} ` : `${text} ` } : tab));
+      return;
+    }
+    if (!files.length) { notify("That drop did not include a file path I can use."); return; }
+    const target = active.id;
+    const media = files.filter((file) => /\.(png|jpe?g|webp|mp4|webm|mov|mkv|avi|m4v)$/i.test(file));
+    const rest = [...files.filter((file) => !media.includes(file))];
+    // Import media in one capped batch against the attachments already in the draft. Any
+    // batch failure is retried one file at a time; anything still rejected becomes a path.
+    const currentAttachments = tabsRef.current.find((tab) => tab.id === target)?.draftAttachments?.length || 0;
+    const imageRoom = Math.max(0, 8 - currentAttachments);
+    const videos = media.filter((file) => /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(file));
+    const images = media.filter((file) => !videos.includes(file));
+    const candidates = [...videos, ...images.slice(0, imageRoom)].slice(0, 8);
+    const candidateSet = new Set(candidates);
+    const overflowMedia = media.filter((file) => !candidateSet.has(file));
+    const failedMedia: string[] = [];
+    let importedImages: AttachmentImport["images"] = [];
+    let importedRefs: string[] = [];
+    const acceptImport = (imported: AttachmentImport) => {
+      importedImages = [...importedImages, ...imported.images].slice(0, imageRoom);
+      importedRefs = [...importedRefs, ...imported.references];
+    };
+    if (candidates.length) {
+      try { acceptImport(await api<AttachmentImport>("attachments:import", target, candidates)); }
+      catch {
+        for (const file of candidates) {
+          try { acceptImport(await api<AttachmentImport>("attachments:import", target, [file])); }
+          catch { failedMedia.push(file); }
+        }
+      }
+    }
+    try {
+      if (importedImages.length) setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), ...importedImages].slice(0, 8) } : tab));
+      rest.push(...failedMedia, ...overflowMedia);
+      if (rest.length || importedRefs.length) {
+        const tag = (file: string) => /\s/.test(file)
+          ? `@"${file.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`
+          : `@${file}`;
+        const tags = [...importedRefs, ...rest].map(tag).join(" ");
+        setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draft: tab.draft ? `${tab.draft.replace(/\s+$/, "")} ${tags} ` : `${tags} ` } : tab));
+      }
+      await settleControl();
+      await persist();
+    } catch (error: any) { notify(error.message); }
+  };
   const addAttachments = async (source: "clipboard" | "choose" | string[]) => {
     if (!active || active.agent === "shell") return;
     const target = active.id;
@@ -1611,7 +1701,34 @@ export default function App() {
     if (!next) leaveHiddenView();
     setShowArchived(next);
   };
-  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat, onExportChat: (tab: Tab) => void exportChat(tab) };
+  // Clear = close this chat for good and open a fresh one with the same agent in the same
+  // place. The old CLI history file stays on disk; Lumen just stops showing it.
+  const clearChat = (tab: Tab) => {
+    const action = () => {
+      void (async () => {
+        // Create the replacement FIRST. Closing first would remove the old chat from
+        // recovery before we know the new one exists, and a failed create would orphan it.
+        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, nameCustom: tab.nameCustom === true, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides }, tab.controlId || tab.id);
+        if (!created) throw new Error("Could not start the fresh chat. This chat was kept.");
+        await api("session:close", tab.id);
+        delete browserOpenRef.current[tab.controlId || tab.id];
+        const wasActive = activeIdRef.current === tab.id;
+        setTabs((old) => old.filter((t) => t.id !== tab.id));
+        // Clearing the chat you are looking at should land you in the fresh one, not on the
+        // project start screen; addTab only auto-focuses when nothing was just closed.
+        if (wasActive) { setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root); }
+        notify("Chat cleared. Fresh conversation started.");
+      })().catch((e) => notify(e.message));
+    };
+    if (tab.busy || tab.messages.length)
+      setConfirmation({
+        title: "Clear this chat?",
+        text: "This closes the current conversation and starts a fresh one. Saved files stay put; the old transcript is no longer shown.",
+        action,
+      });
+    else action();
+  };
+  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat, onClearChat: clearChat, onExportChat: (tab: Tab) => void exportChat(tab) };
   const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
   const sessionActions = <div className="tab-actions">
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
@@ -1725,7 +1842,7 @@ export default function App() {
       <div className="app-body" style={{ "--projects-panel-width": `${visibleSidebar ? sidebarWidth : 0}px`, "--workspace-panel-width": `${visibleExplorer ? explorerWidth : 0}px` } as CSSProperties}>
         <nav className="rail" aria-label="Workspace panels">
           <div>
-            <button ref={projectsToggle} className={`icon-button ${visibleSidebar ? "active" : ""}`} aria-label={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={visibleSidebar} aria-controls="projects-sidebar" onClick={() => setSidebar(!visibleSidebar)}><Files size={21} /></button>
+            <button ref={projectsToggle} className={`icon-button ${visibleSidebar ? "active" : ""}`} aria-label={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} title={visibleSidebar ? "Hide projects sidebar" : "Show projects sidebar"} aria-expanded={visibleSidebar} aria-controls="projects-sidebar" onClick={toggleProjects}><Files size={21} /></button>
             <button
               className={`icon-button ${panel === "git" && visibleExplorer ? "active" : ""}`}
               aria-label="Source control"
@@ -1898,7 +2015,8 @@ export default function App() {
                       attachment={attachment}
                       onAttach={() => void addAttachments("choose")}
                       onPasteAttachments={() => void addAttachments("clipboard")}
-                      onDropAttachments={(files) => void addAttachments(files)}
+                      onDropAttachments={(files) => void dropPaths(files)}
+                      onClearChat={() => clearChat(active)}
                       onTerminal={() => {
                         if (["claude", "grok"].includes(active.agent) && !active.nativeOwned && !active.terminalId) { void switchView(); return; }
                         setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, terminalOpen: true, terminalReady: !tab.terminalId || tab.terminalReady } : tab));

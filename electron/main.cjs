@@ -601,6 +601,7 @@ startup.then(async (start) => {
   );
   handle("files:create", (root, file) => workspace.create(root, file));
   handle("files:search", (root, query) => workspace.searchFiles(root, query));
+  handle("files:mentions", (root, query) => workspace.mentionFiles(root, query));
   handle("git:status", (root) => workspace.status(root));
   handle("git:action", (root, action, payload) =>
     workspace.action(root, action, payload),

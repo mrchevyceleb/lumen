@@ -20,8 +20,9 @@ import {
 } from "lucide-react";
 import { Busy, CopyButton, IconButton } from "./Components";
 import ContextIndicator from "./ContextIndicator";
-import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand } from "./types";
+import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand, type Entry, type MentionResults } from "./types";
 import CommandMenu from "./CommandMenu";
+import FileMentionMenu from "./FileMentionMenu";
 import ModelControls, { type ControlPanel } from "./ModelControls";
 import SessionControls, { lumenCommands, parseThreshold } from "./SessionControls";
 import type { SessionControlsState } from "./types";
@@ -30,6 +31,24 @@ import { agentNames, foregroundFor } from "./settings";
 import { ChatLink, LinkText, externalLink, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
 import { StreamingMarkdown } from "./stream-fade";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
+// react-markdown renders a fenced block as <pre><code class="language-x">…</code></pre>. Pull the
+// raw text and language out of that tree so the copy button copies the code itself, never the
+// react-markdown element tree.
+const codeOf = (node: unknown): string => {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(codeOf).join("");
+  if (node && typeof node === "object" && "props" in node) return codeOf((node as { props?: { children?: unknown } }).props?.children);
+  return "";
+};
+const languageOf = (node: unknown): string => {
+  if (Array.isArray(node)) return node.map(languageOf).find(Boolean) || "";
+  if (node && typeof node === "object" && "props" in node) {
+    const props = (node as { props?: { className?: string; children?: unknown } }).props;
+    const match = /language-([\w-]+)/.exec(props?.className || "");
+    return match ? match[1] : languageOf(props?.children);
+  }
+  return "";
+};
 export function AgentMark({
   agent,
   color,
@@ -79,6 +98,7 @@ export default function Conversation({
   onSignIn,
   onPasteAttachments,
   onDropAttachments,
+  onClearChat,
   onTerminal,
   onForceStop,
   onContinue,
@@ -102,6 +122,7 @@ export default function Conversation({
   onSignIn: () => void;
   onPasteAttachments: () => void;
   onDropAttachments: (files: string[]) => void;
+  onClearChat: () => void;
   onTerminal: () => void;
   onForceStop: () => void;
   onContinue: () => void;
@@ -115,6 +136,8 @@ export default function Conversation({
   const [sessionError, setSessionError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const submitLock = useRef(false);
+  const compactLock = useRef(false);
+  const [compactPending, setCompactPending] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const historyPosition = useRef(-1), historyDraft = useRef("");
@@ -132,10 +155,79 @@ export default function Conversation({
   const menuOpen = tab.agent !== "shell" && !tab.busy && !controlPanel && !sessionPanel && focused && !dismissedCommands && !!commandToken &&
     (commandToken[1] === "/" || tab.agent === "codex") && caret > 0 && caret <= commandToken[2].length + 1;
   const query = commandToken?.[2].toLowerCase() || "";
-  const localCommands = tab.agent === "google" ? [] : lumenCommands;
+  const localCommands = tab.agent === "google" ? lumenCommands.filter((command) => command.name === "clear") : lumenCommands;
   const commands = [...localCommands, ...inventory.commands.filter((c) => !localCommands.some((local) => local.name === c.name))].filter((c) => `${c.name} ${c.description}`.toLowerCase().includes(query)).sort((a, b) =>
     Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)) || a.name.localeCompare(b.name));
   const selection = Math.min(selectedCommand, Math.max(0, commands.length - 1));
+  // @ mentions: an @ at the start of the draft or after whitespace opens the file picker for
+  // the workspace the chat lives in. The menu lists repo files and folders; picking one (or
+  // pressing Tab on the ghost completion) tags it as @path in the draft.
+  const mentionRoot = tab.cwd || tab.root;
+  const mentionToken = (() => {
+    if (tab.agent === "shell" || tab.busy || tab.nativeOwned || !mentionRoot) return null;
+    const before = input.slice(0, caret);
+    const match = before.match(/(^|\s)@([^@\s"'`{}\[\]()<>]+)$/);
+    if (!match) return null;
+    return { start: caret - match[2].length - 1, query: match[2] };
+  })();
+  const [mentionEntries, setMentionEntries] = useState<Entry[]>([]);
+  const [mentionSelected, setMentionSelected] = useState(0);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const [mentionError, setMentionError] = useState("");
+  const [mentionTruncated, setMentionTruncated] = useState(false);
+  const [dismissedMentions, setDismissedMentions] = useState(false);
+  const mentionRequest = useRef(0);
+  // A Tab/Enter pressed while the current results are still loading is an explicit
+  // completion intent, not a key to throw away. Keep it with the exact draft/caret it was
+  // made against; when current results land, complete once. Any later edit supersedes it.
+  const queuedMentionAccept = useRef<{ input: string; caret: number } | null>(null);
+  const mentionOpen = !!mentionToken && !menuOpen && focused && !dismissedMentions && !controlPanel && !sessionPanel;
+  const mentionQuery = mentionToken?.query || "";
+  const [mentionResultQuery, setMentionResultQuery] = useState("");
+  // Results only count for the query they were fetched with; a stale list must never be
+  // accepted with Tab, or fast typing tags whatever the previous search found.
+  const mentionFresh = mentionResultQuery === mentionQuery;
+  const shownMentionEntries = mentionFresh ? mentionEntries : [];
+  const mentionSelection = Math.min(mentionSelected, Math.max(0, shownMentionEntries.length - 1));
+  // Ghost completion: the top match shown faded after what was typed (full path for fuzzy hits).
+  const ghostEntry = mentionOpen ? shownMentionEntries[mentionSelection] : undefined;
+  const ghost = ghostEntry && mentionQuery && ghostEntry.path.toLowerCase().startsWith(mentionQuery.toLowerCase()) && ghostEntry.path.length > mentionQuery.length
+    ? { before: mentionQuery, rest: ghostEntry.path.slice(mentionQuery.length) + (ghostEntry.directory ? "/" : "") }
+    : null;
+  useEffect(() => { setMentionSelected(0); }, [mentionQuery, tab.id]);
+  useEffect(() => {
+    if (!mentionOpen) return;
+    const current = ++mentionRequest.current;
+    setMentionLoading(true);
+    const timer = setTimeout(() => {
+      api<MentionResults>("files:mentions", mentionRoot, mentionQuery)
+        .then((result) => { if (mentionRequest.current !== current) return; setMentionEntries(result.entries); setMentionResultQuery(mentionQuery); setMentionTruncated(result.truncated); setMentionError(""); })
+        .catch((e: any) => { if (mentionRequest.current === current) { setMentionEntries([]); setMentionResultQuery(mentionQuery); setMentionError(e.message || "Could not search this workspace."); } })
+        .finally(() => { if (mentionRequest.current === current) setMentionLoading(false); });
+    }, 60);
+    return () => { clearTimeout(timer); if (mentionRequest.current === current) mentionRequest.current++; };
+  }, [mentionOpen, mentionQuery, mentionRoot]);
+  const selectMention = (entry: Entry) => {
+    if (!mentionToken) return;
+    queuedMentionAccept.current = null;
+    const tagged = `${entry.path}${entry.directory ? "/" : ""}`;
+    const mention = /\s/.test(tagged) ? `@"${tagged.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"` : `@${tagged}`;
+    const next = input.slice(0, mentionToken.start) + mention + " " + input.slice(caret);
+    setInput(next);
+    setDismissedMentions(true);
+    const nextCaret = mentionToken.start + mention.length + 1;
+    setCaret(nextCaret);
+    requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(nextCaret, nextCaret); });
+  };
+  const queuedMentionSettled = !mentionLoading && mentionFresh;
+  useEffect(() => {
+    const queued = queuedMentionAccept.current;
+    if (!queued || !queuedMentionSettled) return;
+    // The key was queued against one exact draft and caret. A later edit is a newer intent.
+    if (queued.input !== input || queued.caret !== caret || !mentionOpen) { queuedMentionAccept.current = null; return; }
+    queuedMentionAccept.current = null;
+    if (shownMentionEntries.length) selectMention(shownMentionEntries[mentionSelection]);
+  }, [caret, input, mentionOpen, mentionSelection, queuedMentionSettled, shownMentionEntries]);
   const loadCommands = async (refresh = false) => {
     if (loadingCommands.current) return;
     loadingCommands.current = true;
@@ -172,6 +264,8 @@ export default function Conversation({
   };
   const stick = useRef(true);
   const [away, setAway] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const dragDepth = useRef(0);
   const sending = sendingMessage(tab);
   const messages = useMemo<Message[]>(() => sending && !tab.messages.some((message) => message.id === sending.id)
     ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, delivery: "send", deliveryState: "sending" }]
@@ -200,9 +294,38 @@ export default function Conversation({
     inputRef.current?.focus();
   }, [tab.id]);
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
-  const isLocalCommand = !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
+  const hostCommandName = input.trim().split(/\s+/, 1)[0];
+  const isHostCommand = tab.agent !== "shell" && (hostCommandName === "/clear" || hostCommandName === "/compact");
+  const isLocalCommand = tab.agent === "google"
+    ? hostCommandName === "/clear" || hostCommandName === "/compact"
+    : !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact|compact|clear)(?:\s|$)/.test(input.trim());
+  // Manual compact: one code path for the /compact command, the Compact button and the
+  // context panel. Claude has a real /compact and runs it as its own turn; the rest go
+  // through the session-controls RPC. Google only compacts inside its own CLI.
+  const compactNow = async () => {
+    if (compactLock.current) throw new Error("Compaction is already running for this chat.");
+    compactLock.current = true;
+    setCompactPending(true);
+    try {
+      if (tab.busy || tab.agent === "shell" || tab.nativeOwned || tab.recoveryError || controlPending) throw new Error("Finish this turn before compacting.");
+      if (tab.agent === "google") throw new Error("Antigravity compacts inside its own CLI. Open native view and run /compact there.");
+      if (tab.agent === "claude") {
+        if (!await onSend("/compact")) throw new Error("Claude did not accept /compact. Try again.");
+        return;
+      }
+      const next = await api<SessionControlsState>("session:controls-change", tab.id, { compact: true });
+      onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow });
+      // `notice` is the compact outcome itself (for example "nothing to compact yet").
+      // The generic control warning belongs in SessionControls and must not be toasted
+      // as though this tap produced it.
+      if (next.notice) onNotice(next.notice);
+    } finally {
+      compactLock.current = false;
+      setCompactPending(false);
+    }
+  };
   const submit = async () => {
-    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && commandLoading)) return;
+    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && !isHostCommand && commandLoading)) return;
     submitLock.current = true;
     try {
     const hostCommand = input.trim();
@@ -211,6 +334,20 @@ export default function Conversation({
       if (isCommandInput) { setSessionError("Queue a normal message while the agent works. Run CLI commands after this turn finishes."); return; }
       setSubmitting(true);
       if (await onSend(input)) { setInput(""); setCaret(0); stick.current = true; }
+      return;
+    }
+    if (hostCommandName === "/clear") {
+      if (hostCommand !== "/clear") { setSessionError("Use /clear without extra text."); return; }
+      setSessionPanel(null);
+      onClearChat();
+      return;
+    }
+    if (hostCommandName === "/compact") {
+      if (hostCommand !== "/compact") { setSessionError("Use /compact without extra text."); return; }
+      setSubmitting(true);
+      try { await compactNow(); setInput(""); setCaret(0); setDismissedCommands(true); }
+      catch (e: any) { setSessionError(e.message); }
+      finally { setSubmitting(false); }
       return;
     }
     if (isLocalCommand) {
@@ -260,8 +397,11 @@ export default function Conversation({
     <div
       className={`conversation ${settings.compact ? "compact" : ""}`}
       style={{ "--agent-color": color, "--agent-foreground": foregroundFor(color) } as CSSProperties}
-      onDragOver={(event) => { if (tab.agent !== "shell" && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
-      onDrop={(event) => { if (tab.agent === "shell") return; event.preventDefault(); const files = Array.from(event.dataTransfer.files).map((file) => window.lumen.filePath(file)).filter(Boolean); if (files.length) onDropAttachments(files); }}>
+      onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { dragDepth.current++; setDraggingFiles(true); } }}
+      onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDraggingFiles(false); }}
+      onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => { event.preventDefault(); dragDepth.current = 0; setDraggingFiles(false); const files = Array.from(event.dataTransfer.files).map((file) => window.lumen.filePath(file)).filter(Boolean); if (files.length) onDropAttachments(files); }}>
+      {draggingFiles && <div className="drop-overlay" aria-hidden="true"><Paperclip size={22} /><span>Drop to add the path</span></div>}
       {tab.recoveryError && <div className="recovery-banner" role="alert"><span>{tab.recoveryError}</span><button onClick={onReconnect}>Retry connection</button></div>}
       {tab.nativeOwned && <div className="recovery-banner"><span>Native CLI is still open. Exit it when ready; Readable will reconnect to this conversation.</span><button onClick={onTerminal}>Show terminal</button></div>}
       {tab.interrupted && !tab.busy && !tab.recoveryError && <div className="recovery-banner"><span>{tab.agent === "shell" ? "This shell was interrupted. Open its terminal or enter a new command." : "This turn was interrupted. Your conversation is restored."}</span><button onClick={tab.agent === "shell" ? onTerminal : onContinue}>{tab.agent === "shell" ? "Open terminal" : "Continue"}</button></div>}
@@ -413,6 +553,8 @@ export default function Conversation({
         {menuOpen && <CommandMenu commands={commands} selected={selection} loading={commandLoading} error={commandError}
           warning={inventory.warning} origin={inventory.origin} agent={agentNames[tab.agent]}
           onSelect={selectCommand} onHover={setSelectedCommand} onRefresh={() => void loadCommands(true)} onNative={() => onNative()} />}
+        {mentionOpen && <FileMentionMenu entries={shownMentionEntries} selected={mentionSelection} loading={mentionLoading || !mentionFresh} error={mentionError} query={mentionQuery}
+          truncated={mentionTruncated} ghost={ghost} onSelect={selectMention} onHover={setMentionSelected} />}
         <div className="composer">
           {!!tab.draftAttachments?.length && <div className="image-attachments">{tab.draftAttachments.map((image) => <div key={image.id}><img src={image.preview} alt={image.name} /><span>{image.name}</span><button aria-label={`Remove ${image.name}`} onClick={() => onConfig({ draftAttachments: tab.draftAttachments?.filter((value) => value.id !== image.id) })}>×</button></div>)}</div>}
           {attachment && (
@@ -430,16 +572,16 @@ export default function Conversation({
             rows={1}
             role={tab.agent === "shell" ? undefined : "combobox"}
             aria-autocomplete={tab.agent === "shell" ? undefined : "list"}
-            aria-expanded={tab.agent === "shell" ? undefined : menuOpen}
-            aria-controls={menuOpen ? "slash-commands" : undefined}
-            aria-activedescendant={menuOpen && commands.length > 0 ? `slash-command-${selection}` : undefined}
+            aria-expanded={tab.agent === "shell" ? undefined : menuOpen || mentionOpen}
+            aria-controls={menuOpen ? "slash-commands" : mentionOpen ? "file-mentions" : undefined}
+            aria-activedescendant={menuOpen && commands.length > 0 ? `slash-command-${selection}` : mentionOpen && shownMentionEntries.length > 0 ? `file-mention-${mentionSelection}` : undefined}
             aria-label={
               tab.agent === "shell" ? "Shell command" : "Message agent"
             }
             placeholder={
               tab.agent === "shell"
                 ? "Run a command…"
-                : "Ask, build, or explore… / for commands"
+                : "Ask, build, or explore… / commands · @ files"
             }
             value={input}
             disabled={(tab.busy && tab.agent === "shell") || submitting || tab.nativeOwned || !!tab.recoveryError}
@@ -449,8 +591,9 @@ export default function Conversation({
                 event.preventDefault(); onPasteAttachments();
               }
             }}
-            onChange={(e) => { historyPosition.current = -1; setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); }}
+            onChange={(e) => { queuedMentionAccept.current = null; historyPosition.current = -1; setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); setDismissedMentions(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+            onClick={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
             onKeyDown={(e) => {
@@ -462,6 +605,25 @@ export default function Conversation({
                   historyPosition.current = Math.min(historyPosition.current + 1, history.length - 1); setInput(history[historyPosition.current]);
                 } else if (e.key === "ArrowDown" && historyPosition.current >= 0) { e.preventDefault(); historyPosition.current--; setInput(historyPosition.current < 0 ? historyDraft.current : history[historyPosition.current]); }
                 return;
+              }
+              if (mentionOpen && e.key === "Escape") { queuedMentionAccept.current = null; e.preventDefault(); e.stopPropagation(); setDismissedMentions(true); return; }
+              if (mentionOpen && ["ArrowDown", "ArrowUp"].includes(e.key)) {
+                queuedMentionAccept.current = null;
+                e.preventDefault();
+                if (shownMentionEntries.length) setMentionSelected((mentionSelection + (e.key === "ArrowDown" ? 1 : shownMentionEntries.length - 1)) % shownMentionEntries.length);
+                return;
+              }
+              if (mentionOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && ["Enter", "Tab"].includes(e.key)) {
+                // While results are still loading there is nothing safe to accept yet, but
+                // the key must not fall through to the browser: Tab would jump focus to the
+                // Send button and Enter would send a half-typed mention. Queue that intent
+                // for the current draft instead of discarding it; only current-query
+                // results may satisfy it.
+                if (mentionLoading || !mentionFresh) { e.preventDefault(); queuedMentionAccept.current = { input, caret }; return; }
+                if (shownMentionEntries.length) { e.preventDefault(); selectMention(shownMentionEntries[mentionSelection]); return; }
+              }
+              if (mentionOpen && e.key === "ArrowRight" && ghost && caret === input.length) {
+                e.preventDefault(); selectMention(shownMentionEntries[mentionSelection]); return;
               }
               if (menuOpen && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setDismissedCommands(true); return; }
               if (menuOpen && ["ArrowDown", "ArrowUp"].includes(e.key)) {
@@ -512,13 +674,16 @@ export default function Conversation({
                 setCaret(1); setDismissedCommands(false); setFocused(true);
                 requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(1, 1); });
               }}><span className="composer-slash">/</span></IconButton>}
+          {tab.agent !== "shell" && tab.agent !== "google" && <button className="model-control compact-control" aria-label="Compact this chat now" title="Compact this chat now · /compact" disabled={tab.busy || tab.phase === "compacting" || compactPending || submitting || controlPending || tab.nativeOwned || !!tab.recoveryError} onClick={() => { void compactNow().catch((e: any) => setSessionError(e.message)); }}>
+            <Shrink size={13} /><span>Compact</span>
+          </button>}
           {tab.agent !== "shell" && <ModelControls tab={tab} panel={controlPanel} setPanel={setControlPanel}
             onConfig={onConfig} onPending={setControlPending} onNative={(draft) => onNative(draft ? `${draft}${input.trim() ? `\n\n${input}` : ""}` : input.trim() || undefined)}
             onPlanDraft={() => { setInput(input.startsWith("/plan") ? input : `/plan${input.trim() ? ` ${input}` : " "}`); setDismissedCommands(true);
               requestAnimationFrame(() => inputRef.current?.focus()); }} />}
           {!["shell", "google"].includes(tab.agent) && <>
             <IconButton label="MCPs & context" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={14} /></IconButton>
-            <button className="model-control compact-control" aria-label={compactLabel} title={compactLabel}
+            <button className="model-control auto-compact-control" aria-label={compactLabel} title={compactLabel}
               disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>
               <Shrink size={13} /><span>{tab.autoCompactTokens ? `${(tab.autoCompactTokens / 1000).toLocaleString()}k` : "Auto-compact"}</span>
             </button>
@@ -535,7 +700,7 @@ export default function Conversation({
         </div>
         {statusCaption && <div className="composer-caption" role="status">{statusCaption}</div>}
       </div>
-      {sessionPanel && <SessionControls tab={tab} onConfig={onConfig} focusContext={sessionPanel === "context"} onSignIn={onSignIn}
+      {sessionPanel && <SessionControls tab={tab} onConfig={onConfig} focusContext={sessionPanel === "context"} onSignIn={onSignIn} onCompact={compactNow}
         onNative={() => { setSessionPanel(null); if (tab.agent === "pi") void onSend("/mcp"); else onNative("/mcp"); }}
         onClose={() => { setSessionPanel(null); requestAnimationFrame(() => inputRef.current?.focus()); }} />}
     </div>
@@ -603,7 +768,14 @@ function MessageView({
       <div className="error-message">
         <AlertCircle size={16} />
         <div>
-          {tab.agent !== "shell" && authError(m.text) ? <>
+          {tab.agent !== "shell" && authError(m.text) ? tab.agent === "pi" && (m.provider || m.model) ? <>
+            {/* Pi names the provider on its errors, so point at that provider's saved credential,
+                never at a generic Pi sign-in: re-running the wrong login was the sign-in loop. */}
+            <strong>{m.provider ? `${m.provider} ` : ""}rejected its saved sign-in{m.model ? ` for ${m.model}` : ""}</strong>
+            <p>Pi is still signed in. Update the {m.provider || "provider"} credential or saved sign-in under Settings → Accounts → Pi, or pick a different model, then retry your message.</p>
+            <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Update {m.provider || "provider"} sign-in</button>
+            <details className="auth-error-details"><summary>Error details</summary><p><LinkText text={m.text} onWeb={onWeb} onError={onError} /></p></details>
+          </> : <>
             <strong>{agentNames[tab.agent]} needs you to sign in again</strong>
             <p>Your chat is saved. Sign in here, then retry your message.</p>
             <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Sign in to {agentNames[tab.agent]}</button>
@@ -648,11 +820,18 @@ function MessageView({
               a: ({ href, children }) => (
                 <ChatLink href={href} onWeb={onWeb} onError={onError} onNotice={onNotice} onFile={onFile} onFileMenu={onFileMenu}>{children}</ChatLink>
               ),
-              pre: ({ children }) => (
-                <div className="code-block">
-                  <pre>{children}</pre>
-                </div>
-              ),
+              pre: ({ children }) => {
+                const language = languageOf(children);
+                return (
+                  <div className="code-block">
+                    <div className="code-block-bar">
+                      <span className="code-block-lang">{language}</span>
+                      <CopyButton text={codeOf(children)} />
+                    </div>
+                    <pre>{children}</pre>
+                  </div>
+                );
+              },
             }}
           />
         </div>

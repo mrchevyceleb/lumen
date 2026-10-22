@@ -777,22 +777,65 @@ class Runtime {
     if (result.stopReason && !["end_turn", "cancelled"].includes(result.stopReason)) o.event(s, { type: "diagnostic", text: `Grok finished: ${result.stopReason}.` });
     o.finish(s, result.stopReason === "cancelled" ? 130 : 0);
   }
+  // Manual compact from the /compact command and the Compact button. Claude runs its own
+  // /compact as a normal prompt turn (the renderer sends it); Pi goes through its bridge and
+  // Codex/Grok expose real RPCs, driven from here.
+  async compactNow() {
+    const { s, owner: o } = this;
+    if (this.compacting) throw new Error("Compaction is already running for this chat.");
+    if (s.agent === "grok") {
+      if (!s.sessionRef) throw new Error("Start the conversation before compacting.");
+      this.compacting = true;
+      try {
+        const used = await this.contextUsage().catch(() => null);
+        this.phase(true);
+        try {
+          await this.request("_x.ai/compact_conversation", { sessionId: s.sessionRef }, 300000);
+          this.lastCompactedUsage = await this.contextUsage() ?? used;
+          await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: this.lastCompactedUsage }));
+          o.event(s, { type: "diagnostic", key: "auto-compact", text: "Context compacted. This conversation is ready to continue." });
+        } finally { this.phase(false); }
+      } finally { this.compacting = false; }
+      return;
+    }
+    if (s.agent === "codex") {
+      if (!s.sessionRef) throw new Error("Start the conversation before compacting.");
+      this.compacting = true;
+      this.phase(true);
+      try {
+        await this.request("thread/compact/start", { threadId: s.sessionRef }, 300000);
+        // Codex emits contextCompaction item started/completed around the actual work;
+        // the item handler owns clearing this live phase once the start is accepted.
+      } catch (error) {
+        // If Codex rejected the start RPC, its item handler may never run, so the live
+        // compacting phase must be cleared here instead of stranding the chat.
+        this.phase(false);
+        throw error;
+      } finally { this.compacting = false; }
+      return;
+    }
+    throw new Error("This agent compacts from its own controls.");
+  }
   async grokCompact() {
     const { s, owner: o } = this;
-    const used = await this.contextUsage().catch(() => null);
-    if (!s.autoCompactTokens) return;
-    if (used !== null && used < s.autoCompactTokens && this.lastCompactedUsage !== null) {
-      this.lastCompactedUsage = null;
-      await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: null }));
-    }
-    if (used === null || used < s.autoCompactTokens || (this.lastCompactedUsage != null && used < this.lastCompactedUsage + Math.max(1000, s.autoCompactTokens * .1))) return;
-    this.phase(true);
+    if (this.compacting || this.autoCompacting) return;
+    this.autoCompacting = true;
     try {
-      await this.request("_x.ai/compact_conversation", { sessionId: s.sessionRef }, 300000);
-      this.lastCompactedUsage = await this.contextUsage() ?? used;
-      await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: this.lastCompactedUsage }));
-      o.event(s, { type: "diagnostic", key: "auto-compact", text: "Context compacted. This conversation is ready to continue." });
-    } finally { this.phase(false); }
+      const used = await this.contextUsage().catch(() => null);
+      if (!s.autoCompactTokens) return;
+      if (used !== null && used < s.autoCompactTokens && this.lastCompactedUsage !== null) {
+        this.lastCompactedUsage = null;
+        await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: null }));
+      }
+      if (used === null || used < s.autoCompactTokens || (this.lastCompactedUsage != null && used < this.lastCompactedUsage + Math.max(1000, s.autoCompactTokens * .1))) return;
+      this.phase(true);
+      try {
+        await this.request("_x.ai/compact_conversation", { sessionId: s.sessionRef }, 300000);
+        this.lastCompactedUsage = await this.contextUsage() ?? used;
+        await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: this.lastCompactedUsage }));
+        o.event(s, { type: "diagnostic", key: "auto-compact", text: "Context compacted. This conversation is ready to continue." });
+      } finally { this.phase(false); }
+    } finally { this.autoCompacting = false; }
   }
   // One calm line in the chat when a configured local MCP server was closed, so
   // an agent that suddenly lacks a tool has a visible reason.

@@ -219,6 +219,12 @@ export default function lumenControls(pi) {
     for (const event of ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "session_compact", "model_select", "ui_prompt_start", "ui_prompt_end"])
       pi.on(event, (message, ctx) => { context = ctx;
         const delivery = message.message?.role === "user" && [...deliveries.values()].find((request) => request.rpc ? !request.confirming : message.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") === request.message);
+        // The session JSONL records each assistant message's provider and model, so tag an
+        // errored assistant message with them: a provider 401 then names the exact credential
+        // at fault instead of blaming the whole Pi sign-in.
+        if (ctx.mode !== "rpc" && event === "message_end" && message.message?.role === "assistant" && message.message.errorMessage && message.message.provider) {
+          output({ type: "pi_assistant_error", provider: message.message.provider, model: message.message.model || "", errorMessage: message.message.errorMessage });
+        }
         if (delivery) {
           delivery.started = true;
           if (ctx.mode !== "rpc") output({ ...message, clientId: delivery.clientId });
@@ -277,16 +283,27 @@ export default function lumenControls(pi) {
     compacting = true;
     lastCompactedUsage = tokens;
     contextEvent(ctx, { contextTokens: tokens, compacting: true });
-    ctx.compact({
-      onComplete: (result) => { compacting = false; lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
-        contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); },
-      onError: (error) => { compacting = false;
-        saveWatermark();
-        contextEvent(ctx, { contextTokens: tokens, compacting: false, error: error.message }); },
-    });
+    let settled = false;
+    const complete = (result) => { if (settled) return; settled = true; clearTimeout(timer); compacting = false; lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
+      contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); };
+    const fail = (error, retryWatermark = true) => { if (settled) return; settled = true; clearTimeout(timer); compacting = false;
+      // A failed compaction never proved the context shrank, so the previous watermark
+      // stays: the next agent_settled sees tokens still above threshold and retries.
+      // A timeout is different: the summary may still land late and reload that watermark
+      // after the retry, so the retry waits for explicit context growth instead.
+      if (!retryWatermark) { lastCompactedUsage = tokens; saveWatermark(); }
+      contextEvent(ctx, { contextTokens: tokens, compacting: false, error: error?.message || "Pi compaction failed." }); };
+    // A stuck compaction must never fake a result: after five minutes report an
+    // honest timeout instead of settling as though the context was compacted.
+    const timer = setTimeout(() => fail(new Error("Auto-compaction timed out after 5 minutes. The context was left unchanged."), false), 5 * 60 * 1000);
+    timer.unref?.();
+    try {
+      ctx.compact({ onComplete: complete, onError: fail });
+    } catch (error) { fail(error); }
   });
   const controlsHandler = async (args, ctx) => {
       const request = JSON.parse(args);
+      let compactOutcome;
       try {
         const available = ctx.modelRegistry.getAvailable();
         const scoped = ctx.scopedModels.filter((s) => available.some((m) => m.provider === s.model.provider && m.id === s.model.id));
@@ -309,8 +326,46 @@ export default function lumenControls(pi) {
         } else if (request.action === "autocompact") {
           threshold = request.tokens ?? null;
           if (request.reset) { lastCompactedUsage = null; saveWatermark(); }
+        } else if (request.action === "compact") {
+          if (compacting) throw new Error("Compaction is already running.");
+          compacting = true;
+          const tokens = ctx.getContextUsage()?.tokens ?? null;
+          contextEvent(ctx, { contextTokens: tokens, compacting: true });
+          // The controls reply below must wait for compaction to settle, otherwise the host
+          // releases its turn gate and closes the panel while compaction is still running.
+          compactOutcome = await new Promise((resolve, reject) => {
+            let settled = false;
+            const succeed = (result) => { if (settled) return; settled = true; clearTimeout(timer); compacting = false;
+              lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
+              contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); resolve(); };
+            const fail = (error, retryWatermark = true) => {
+              if (settled) return; settled = true; clearTimeout(timer); compacting = false;
+              // Errors can arrive as strings or nothing at all; normalize once so this
+              // handler never throws and strands the promise until the timer fires.
+              const message = error?.message || String(error || "Pi compaction failed.");
+              // A chat too small to compact is a friendly no-op, not a failure: report it
+              // like a success so Lumen confirms the tap instead of raising an error.
+              if (/nothing to compact/i.test(message)) {
+                contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? tokens, compacting: false });
+                resolve("Nothing to compact yet. This chat is still small.");
+                return;
+              }
+              // A timeout leaves a late summary possible; hold this token count as the
+              // watermark so the next agent_settled does not relaunch it immediately.
+              if (!retryWatermark) { lastCompactedUsage = tokens; saveWatermark(); }
+              contextEvent(ctx, { contextTokens: tokens, compacting: false, error: message }); reject(new Error(message));
+            };
+            // A stuck compaction must never fake a result: after five minutes report an
+            // honest timeout instead of settling as though the context was compacted.
+            const timer = setTimeout(() => fail(new Error("Compaction timed out after 5 minutes. The context was left unchanged."), false), 5 * 60 * 1000);
+            timer.unref?.();
+            try {
+              ctx.compact({ onComplete: succeed, onError: fail });
+            } catch (error) { fail(error); }
+          });
         } else if (request.action !== "state") throw new Error("Unknown Lumen control.");
         ctx.ui.notify("LUMEN_CONTROLS:" + JSON.stringify({ id: request.id,
+          ...(typeof compactOutcome === "string" ? { notice: compactOutcome } : {}),
           favorites: scoped.map((s) => `${s.model.provider}/${s.model.id}`),
         }), "info");
       } catch (error) {

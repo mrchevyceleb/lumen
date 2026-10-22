@@ -78,12 +78,17 @@ export interface Entry {
   path: string;
   directory: boolean;
 }
+export interface MentionResults { entries: Entry[]; truncated: boolean }
 export interface AttachmentImport { images: ImageAttachment[]; references: string[] }
 export interface Message {
   id: string;
   role: "user" | "assistant" | "tool" | "error" | "notice";
   text: string;
   title?: string;
+  // Pi error events carry the provider/model that produced the error so the card can name
+  // the exact credential at fault instead of blaming the whole Pi sign-in.
+  provider?: string;
+  model?: string;
   state?: string;
   turn?: string;
   time?: number;
@@ -152,7 +157,7 @@ export interface McpConnection {
 }
 export interface SessionControlsState {
   servers: McpConnection[]; contextTokens: number | null; contextWindow?: number | null; autoCompactTokens: number | null;
-  mcpOverrides: Record<string, boolean>; warning: string; minimumTokens: number; maximumTokens: number;
+  mcpOverrides: Record<string, boolean>; warning: string; notice?: string; minimumTokens: number; maximumTokens: number;
 }
 export interface Doc {
   root: string;
@@ -212,6 +217,7 @@ export interface SessionEvent {
   detail?: string;
   state?: string;
   message?: string;
+  provider?: string;
   code?: number;
   sessionRef?: string;
   cwd?: string;
