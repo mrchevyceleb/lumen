@@ -6,7 +6,9 @@ import { agentNames } from "./settings";
 
 export const lumenCommands = [
   { name: "mcp", insertText: "/mcp", description: "Manage MCP access for this chat", argumentHint: "", source: "Lumen", scope: "Session", native: false },
+  { name: "compact", insertText: "/compact", description: "Compact this chat's context now", argumentHint: "", source: "Lumen", scope: "Session", native: false },
   { name: "autocompact", insertText: "/autocompact", description: "Automatically compact this chat at a token threshold", argumentHint: "[tokens | auto]", source: "Lumen", scope: "Session", native: false },
+  { name: "clear", insertText: "/clear", description: "Clear this chat and start fresh (keeps the workspace)", argumentHint: "", source: "Lumen", scope: "Session", native: false },
 ];
 export function parseThreshold(text: string): number | null {
   if (["auto", "default", "off"].includes(text.toLowerCase())) return null;
@@ -19,9 +21,9 @@ const statusLabel = (status: string) => ({ authenticationRequired: "Needs sign-i
   connected: "Connected", ready: "Connected", notStarted: "Not started", configured: "Configured", pending: "Connecting", setuprequired: "Needs setup", failed: "Connection failed", unavailable: "Unavailable", disabled: "Disabled", disconnected: "Disconnected", "session-token-rejected": "Claude login expired" }[status] || status);
 const needsAuth = (status: string) => ["needs-auth", "authenticationRequired"].includes(status);
 
-export default function SessionControls({ tab, onConfig, onClose, focusContext = false, onNative, onSignIn }: {
+export default function SessionControls({ tab, onConfig, onClose, focusContext = false, onNative, onSignIn, onCompact }: {
   tab: Tab; onConfig: (change: Partial<Tab>) => void; onClose: () => void; focusContext?: boolean;
-  onNative: () => void; onSignIn: () => void;
+  onNative: () => void; onSignIn: () => void; onCompact?: () => Promise<void>;
 }) {
   const [info, setInfo] = useState<SessionControlsState | null>(null);
   const [pending, setPending] = useState(false);
@@ -79,6 +81,7 @@ export default function SessionControls({ tab, onConfig, onClose, focusContext =
             <button className="primary" disabled={pending || tab.busy} type="submit">Apply</button></div>
         </form>
         <div className="context-policy-footer"><code>/autocompact 160k</code><button disabled={pending || tab.busy} onClick={() => { setThreshold(""); void change({ autoCompactTokens: null }); }}>Use CLI default</button></div>
+        {onCompact && <div className="context-policy-footer"><code>/compact</code><button className="primary" disabled={pending || tab.busy} onClick={() => { void (async () => { try { await onCompact(); onClose(); } catch (e: any) { setError(e.message); } })(); }}>Compact now</button></div>}
         <p className="session-fine-print">{tab.agent === "claude" ? "Claude supports 100k–1M tokens." : "Choose 1k–2M tokens."} Blank restores the CLI’s automatic threshold.</p>
         {saved && <div className="session-saved" role="status"><Check size={13} />{saved}</div>}
       </section>

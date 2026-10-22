@@ -1005,6 +1005,31 @@ export default function App() {
       clearTimeout(fallback);
     };
   }, []);
+  // Dragging files in from Explorer: images and videos keep attaching the way they always
+  // have; every other file (and folders) lands in the draft as an @path the agent can open.
+  // Paths with spaces are quoted so the tag stays one mention.
+  const dropPaths = async (files: string[]) => {
+    if (!active) return;
+    if (!files.length) { notify("That drop did not include a file path I can use."); return; }
+    const target = active.id;
+    const media = files.filter((file) => /\.(png|jpe?g|webp|mp4|webm|mov|mkv|avi|m4v)$/i.test(file));
+    const rest = files.filter((file) => !media.includes(file));
+    try {
+      let references: string[] = [];
+      if (media.length) {
+        const imported = await api<AttachmentImport>("attachments:import", target, media);
+        if (imported.images.length) setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), ...imported.images].slice(0, 8) } : tab));
+        references = imported.references;
+      }
+      if (rest.length || references.length) {
+        const tag = (file: string) => /\s/.test(file) ? `@"${file}"` : `@${file}`;
+        const tags = [...references, ...rest].map(tag).join(" ");
+        setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draft: tab.draft ? `${tab.draft.replace(/\s+$/, "")} ${tags} ` : `${tags} ` } : tab));
+      }
+      await settleControl();
+      await persist();
+    } catch (error: any) { notify(error.message); }
+  };
   const addAttachments = async (source: "clipboard" | "choose" | string[]) => {
     if (!active || active.agent === "shell") return;
     const target = active.id;
@@ -1478,7 +1503,30 @@ export default function App() {
     if (!next) leaveHiddenView();
     setShowArchived(next);
   };
-  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat };
+  // Clear = close this chat for good and open a fresh one with the same agent in the same
+  // place. The old CLI history file stays on disk; Lumen just stops showing it.
+  const clearChat = (tab: Tab) => {
+    const action = () => {
+      void api("session:close", tab.id).then(async () => {
+        delete browserOpenRef.current[tab.controlId || tab.id];
+        const wasActive = activeIdRef.current === tab.id;
+        setTabs((old) => old.filter((t) => t.id !== tab.id));
+        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides });
+        // Clearing the chat you are looking at should land you in the fresh one, not on the
+        // project start screen; addTab only auto-focuses when nothing was just closed.
+        if (created && wasActive) { setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root); }
+        notify("Chat cleared. Fresh conversation started.");
+      }).catch((e) => notify(e.message));
+    };
+    if (tab.busy || tab.messages.length)
+      setConfirmation({
+        title: "Clear this chat?",
+        text: "This closes the current conversation and starts a fresh one. Saved files stay put; the old transcript is no longer shown.",
+        action,
+      });
+    else action();
+  };
+  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat, onClearChat: clearChat };
   const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
   const sessionActions = <div className="tab-actions">
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
@@ -1763,7 +1811,8 @@ export default function App() {
                       attachment={attachment}
                       onAttach={() => void addAttachments("choose")}
                       onPasteAttachments={() => void addAttachments("clipboard")}
-                      onDropAttachments={(files) => void addAttachments(files)}
+                      onDropAttachments={(files) => void dropPaths(files)}
+                      onClearChat={() => clearChat(active)}
                       onTerminal={() => {
                         if (["claude", "grok"].includes(active.agent) && !active.nativeOwned && !active.terminalId) { void switchView(); return; }
                         setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, terminalOpen: true, terminalReady: !tab.terminalId || tab.terminalReady } : tab));

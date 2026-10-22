@@ -15,6 +15,7 @@ const channels = new Set([
   "files:save",
   "files:create",
   "files:search",
+  "files:mentions",
   "git:status",
   "git:action",
   "git:diff",

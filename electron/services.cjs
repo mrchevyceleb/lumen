@@ -345,6 +345,37 @@ class WorkspaceService {
     await visit("", 0);
     return result.slice(0, 100);
   }
+  // Repo entries (files and folders) for @ mentions in the composer. Fuzzy subsequence
+  // matching on the relative path, with exact substring matches ranked first, then shorter
+  // paths. One BFS pass fills the pool; the walk is capped so huge repos stay responsive.
+  async mentionFiles(root, query) {
+    this.root(root);
+    const q = String(query || "").toLowerCase();
+    const pool = [];
+    let visited = 0;
+    let truncated = false;
+    const queue = [""];
+    while (queue.length) {
+      const rel = queue.shift();
+      if (rel && rel.split("/").length > 12) continue;
+      for (const entry of await this.tree(root, rel)) {
+        if (++visited > 30000) { truncated = true; break; }
+        pool.push(entry);
+        if (entry.directory) queue.push(entry.path);
+      }
+      if (truncated) break;
+    }
+    const fuzzy = (path) => {
+      let i = 0;
+      for (const ch of path) if (ch === q[i]) i++;
+      return i === q.length;
+    };
+    const ranked = q
+      ? pool.map((entry) => ({ entry, hit: entry.path.toLowerCase().includes(q) ? 0 : fuzzy(entry.path.toLowerCase()) ? 1 : 2 })).filter((row) => row.hit < 2)
+      : pool.map((entry) => ({ entry, hit: 0 }));
+    ranked.sort((a, b) => a.hit - b.hit || Number(a.entry.directory) - Number(b.entry.directory) || a.entry.path.length - b.entry.path.length || a.entry.path.localeCompare(b.entry.path));
+    return { entries: ranked.slice(0, 40).map((row) => row.entry), truncated };
+  }
   gitAt(cwd, args, options = {}) {
     const maxBuffer = options.maxBuffer || 8 * 1024 * 1024;
     return execute("git", ["-C", cwd, ...args], {
@@ -722,6 +753,15 @@ class Sessions {
     s.setting = true;
     let reconnectWarning = "";
     try {
+      if (change.compact === true) {
+        // Claude compacts through its own /compact prompt turn; see Conversation's /compact.
+        if (s.agent === "claude" || s.agent === "google") throw new Error("Use /compact in this chat to compact with the CLI's own summary.");
+        if (s.agent === "pi") {
+          this.event(s, { type: "phase", phase: "compacting" });
+          try { await this.piBridge(s, "compact", {}); } catch (error) { this.event(s, { type: "phase", phase: undefined }); throw error; }
+        } else await (await ensureRuntime(this, s)).compactNow();
+        return await this.readControls(s);
+      }
       if (change.resetMcps === true) {
         await this.resetRuntime(s);
         await resetMcpPreferences(s);

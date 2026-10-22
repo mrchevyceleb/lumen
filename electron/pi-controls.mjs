@@ -309,6 +309,17 @@ export default function lumenControls(pi) {
         } else if (request.action === "autocompact") {
           threshold = request.tokens ?? null;
           if (request.reset) { lastCompactedUsage = null; saveWatermark(); }
+        } else if (request.action === "compact") {
+          if (compacting) throw new Error("Compaction is already running.");
+          compacting = true;
+          const tokens = ctx.getContextUsage()?.tokens ?? null;
+          contextEvent(ctx, { contextTokens: tokens, compacting: true });
+          ctx.compact({
+            onComplete: (result) => { compacting = false; lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
+              contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); },
+            onError: (error) => { compacting = false;
+              contextEvent(ctx, { contextTokens: tokens, compacting: false, error: error.message }); },
+          });
         } else if (request.action !== "state") throw new Error("Unknown Lumen control.");
         ctx.ui.notify("LUMEN_CONTROLS:" + JSON.stringify({ id: request.id,
           favorites: scoped.map((s) => `${s.model.provider}/${s.model.id}`),

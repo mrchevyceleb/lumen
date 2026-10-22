@@ -78,6 +78,7 @@ export interface Entry {
   path: string;
   directory: boolean;
 }
+export interface MentionResults { entries: Entry[]; truncated: boolean }
 export interface AttachmentImport { images: ImageAttachment[]; references: string[] }
 export interface Message {
   id: string;

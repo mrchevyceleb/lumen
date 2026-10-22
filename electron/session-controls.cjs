@@ -720,6 +720,30 @@ class Runtime {
     if (result.stopReason && !["end_turn", "cancelled"].includes(result.stopReason)) o.event(s, { type: "diagnostic", text: `Grok finished: ${result.stopReason}.` });
     o.finish(s, result.stopReason === "cancelled" ? 130 : 0);
   }
+  // Manual compact from the /compact command and the Compact button. Claude runs its own
+  // /compact as a normal prompt turn (the renderer sends it); Pi goes through its bridge and
+  // Codex/Grok expose real RPCs, driven from here.
+  async compactNow() {
+    const { s, owner: o } = this;
+    if (s.agent === "grok") {
+      if (!s.sessionRef) throw new Error("Start the conversation before compacting.");
+      const used = await this.contextUsage().catch(() => null);
+      this.phase(true);
+      try {
+        await this.request("_x.ai/compact_conversation", { sessionId: s.sessionRef }, 300000);
+        this.lastCompactedUsage = await this.contextUsage() ?? used;
+        await atomicWrite(path.join(s.grokHome, "lumen-context.json"), JSON.stringify({ lastCompactedUsage: this.lastCompactedUsage }));
+        o.event(s, { type: "diagnostic", key: "auto-compact", text: "Context compacted. This conversation is ready to continue." });
+      } finally { this.phase(false); }
+      return;
+    }
+    if (s.agent === "codex") {
+      if (!s.sessionRef) throw new Error("Start the conversation before compacting.");
+      await this.request("thread/compact/start", { threadId: s.sessionRef }, 300000);
+      return;
+    }
+    throw new Error("This agent compacts from its own controls.");
+  }
   async grokCompact() {
     const { s, owner: o } = this;
     const used = await this.contextUsage().catch(() => null);

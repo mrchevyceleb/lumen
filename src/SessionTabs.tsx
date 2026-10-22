@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { Archive, MoreHorizontal, Sparkles, X } from "lucide-react";
 import { IconButton } from "./Components";
 import { AgentMark } from "./Conversation";
@@ -10,20 +11,41 @@ export interface SessionTabActions {
   onRename: (tab: Tab, name: string) => void;
   onClose: (tab: Tab) => void;
   onArchiveChat: (tab: Tab) => void;
+  onClearChat: (tab: Tab) => void;
 }
-export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat }: SessionTabActions & {
+export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat, onClearChat }: SessionTabActions & {
   tabs: Tab[]; activeId: string; settings: Settings; vertical?: boolean; label: string;
 }) {
   const nav = useRef<HTMLElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const menuItem = useRef<HTMLButtonElement>(null);
+  const menuOpener = useRef<HTMLElement | null>(null);
   const cancelRename = useRef(false);
   const focusAfter = useRef("");
   const [menu, setMenu] = useState("");
-  const [menuBox, setMenuBox] = useState<{ top: number; left: number } | null>(null);
+  const [menuBox, setMenuBox] = useState<{ top: number; left: number; flipX?: number; flipY?: number } | null>(null);
+  // One placement path for the right-click and … openers; the menu is portaled to the app root
+  // because the sidebar clips and filters fixed descendants, then measured and clamped.
+  const openMenu = (tab: Tab, point: { x: number; y: number }, fallback?: { right: number; top: number }) => {
+    if (!menuOpener.current) menuOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setMenuBox({ top: point.y, left: point.x, flipX: fallback?.right, flipY: fallback ? fallback.top - 4 : undefined });
+    setMenu(tab.id);
+  };
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!menu || !el || !menuBox) return;
+    const rect = el.getBoundingClientRect();
+    let top = menuBox.top, left = menuBox.left;
+    if (menuBox.flipY !== undefined && top + rect.height > window.innerHeight - 8) top = menuBox.flipY - rect.height;
+    if (menuBox.flipX !== undefined && left + rect.width > window.innerWidth - 8) left = Math.max(8, menuBox.flipX - rect.width);
+    top = Math.max(8, Math.min(top, Math.max(8, window.innerHeight - rect.height - 8)));
+    left = Math.max(8, Math.min(left, Math.max(8, window.innerWidth - rect.width - 8)));
+    if (top !== menuBox.top || left !== menuBox.left) setMenuBox({ top, left });
+  });
   const [renaming, setRenaming] = useState("");
   const [name, setName] = useState("");
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!nav.current?.contains(event.target as Node)) setMenu(""); };
+    const close = (event: PointerEvent) => { if (!nav.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) setMenu(""); };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, []);
@@ -51,7 +73,7 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
   return <nav className={vertical ? "vertical-chats" : "session-tabs"} aria-label={label} ref={nav}>
     {tabs.map((tab) => <div className={`session-tab ${activeId === tab.id ? "selected" : ""} ${tab.archived ? "archived" : ""}`} key={tab.id}
       style={{ "--tab-color": settings.coloredTabs ? tab.color || settings.agents[tab.agent].color : settings.border } as CSSProperties}
-      onContextMenu={renaming !== tab.id ? (event) => { event.preventDefault(); const rect = (event.currentTarget as HTMLElement).getBoundingClientRect(); setMenuBox({ top: rect.bottom + 4, left: Math.max(8, rect.right - 168) }); setMenu(tab.id); } : undefined}>
+      onContextMenu={renaming !== tab.id ? (event) => { event.preventDefault(); onSelect(tab); openMenu(tab, { x: event.clientX, y: event.clientY }); } : undefined}>
       {renaming === tab.id ? <input className="chat-rename" aria-label={`Rename ${tab.name}`} maxLength={100} value={name} autoFocus onFocus={(event) => event.currentTarget.select()}
         onChange={(event) => setName(event.target.value)} onBlur={() => finishRename(tab)}
         onKeyDown={(event) => {
@@ -67,12 +89,15 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
         {tab.busy ? tab.phase ? <span className="chat-phase" title={tab.phase}>…</span> : <span className="tiny-pulse" /> : tab.mode === "native" ? <span className="native-tag">CLI</span> : null}
       </button>}
       <span className="screen-reader-only" id={`chat-status-${tab.id}`}>{`${tab.archived ? "Archived. " : ""}${tab.busy ? tab.phase || "Working" : tab.mode === "native" ? "Native CLI" : "Readable session"}`}</span>
-      {renaming !== tab.id && <button type="button" className="chat-options" aria-label={`Options for ${tab.name}`} aria-haspopup="menu" aria-expanded={menu === tab.id} aria-controls={menu === tab.id ? `chat-menu-${tab.id}` : undefined} onClick={(event) => { if (menu === tab.id) { setMenu(""); return; } const rect = event.currentTarget.getBoundingClientRect(); setMenuBox({ top: rect.bottom + 4, left: Math.max(8, rect.right - 168) }); setMenu(tab.id); }}><MoreHorizontal size={12} /></button>}
+      {renaming !== tab.id && <button type="button" className="chat-options" aria-label={`Options for ${tab.name}`} aria-haspopup="menu" aria-expanded={menu === tab.id} aria-controls={menu === tab.id ? `chat-menu-${tab.id}` : undefined} onClick={(event) => { if (menu === tab.id) { setMenu(""); return; } menuOpener.current = event.currentTarget; const r = event.currentTarget.getBoundingClientRect(); openMenu(tab, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={12} /></button>}
       {renaming !== tab.id && <IconButton label={`Close ${tab.name} tab`} onClick={() => onClose(tab)}><X size={12} /></IconButton>}
-      {menu === tab.id && <div className="chat-menu" id={`chat-menu-${tab.id}`} role="menu" style={!vertical && menuBox ? { top: menuBox.top, left: menuBox.left } : undefined} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(""); nav.current?.querySelector<HTMLButtonElement>(`[aria-controls="chat-menu-${CSS.escape(tab.id)}"]`)?.focus(); } }}>
+      {menu === tab.id && createPortal(<div className="chat-menu" id={`chat-menu-${tab.id}`} ref={menuRef} role="menu" style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(""); const opener = menuOpener.current; menuOpener.current = null; if (opener?.isConnected) opener.focus(); else nav.current?.querySelector<HTMLButtonElement>(`[data-chat-id="${CSS.escape(tab.id)}"]`)?.focus(); } }}>
         <button ref={menuItem} role="menuitem" onClick={() => beginRename(tab)}>Rename chat</button>
+        <button role="menuitem" onClick={() => { onCustomize(tab); setMenu(""); }}>Customize chat…</button>
         <button role="menuitem" onClick={() => { onArchiveChat(tab); setMenu(""); }}>{tab.archived ? "Restore chat" : "Archive chat"}</button>
-      </div>}
+        <button role="menuitem" onClick={() => { onClearChat(tab); setMenu(""); }}>Clear chat…</button>
+        <button role="menuitem" onClick={() => { onClose(tab); setMenu(""); }}>Close chat</button>
+      </div>, nav.current?.closest(".app") || document.body)}
     </div>)}
   </nav>;
 }
