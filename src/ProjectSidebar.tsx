@@ -36,7 +36,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   // anchor when it would spill off the bottom). The menu is portaled to the app root because
   // the sidebar's backdrop-filter and overflow would otherwise shift and clip a fixed menu.
   const openMenu = (root: string, point: { x: number; y: number }, fallback?: { right: number; top: number }) => {
-    if (!menuOpener.current) menuOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menuOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setMenuBox({ top: point.y, left: point.x, flipX: fallback?.right, flipY: fallback ? fallback.top - 4 : undefined });
     setMenu(root);
   };
@@ -54,7 +54,15 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
       const opener = menuOpener.current;
       menuOpener.current = null;
       if (opener?.isConnected) opener.focus();
+      else {
+        const project = projects.find((item) => item.root === menu);
+        if (project) container.current?.querySelector<HTMLButtonElement>(`[title="${CSS.escape(project.root)}"]`)?.focus();
+      }
     }
+  };
+  const focusMenuItem = (index: number) => {
+    const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])];
+    items[(index + items.length) % items.length]?.focus();
   };
   useLayoutEffect(() => {
     const el = menuRef.current;
@@ -75,7 +83,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   const container = useRef<HTMLDivElement>(null);
   const dragProject = useRef("");
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) { setMenu(""); setAdding(false); } };
+    const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) { closeMenu(true); setAdding(false); } };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, []);
@@ -87,9 +95,9 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
       const target = event.target as Node;
       if (menuRef.current?.contains(target)) return;
       if ((target as Element).closest?.(".project-row")?.querySelector(".project-open")?.getAttribute("title") === menu) return;
-      setMenu("");
+      closeMenu(true);
     };
-    const dismiss = () => setMenu("");
+    const dismiss = () => closeMenu(true);
     window.addEventListener("pointerdown", close);
     window.addEventListener("resize", dismiss);
     const scroller = container.current?.querySelector(".project-scroll");
@@ -182,12 +190,12 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
           {renaming === project.root ? <input autoFocus aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => rename(project)} onKeyDown={(e) => { if (e.key === "Enter") rename(project); if (e.key === "Escape") setRenaming(""); }} /> : <button className="project-open" title={project.root} aria-current={sameProject(activeRoot, project.root) ? "true" : undefined} disabled={!ready} onClick={() => onOpen(project)}><FolderOpen size={16} /><span>{project.name}</span>{pinned && <Pin className="project-pin-mark" size={10} aria-label="Pinned" />}{!!counts[project.root] && <small>{counts[project.root]}</small>}</button>}
           {vertical && <button className="project-options" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} aria-expanded={newChatRoot !== undefined && sameProject(newChatRoot, project.root)} aria-controls={newChatRoot !== undefined && sameProject(newChatRoot, project.root) ? "new-chat-menu" : undefined} disabled={!ready} onClick={() => onNewChat(project.root)}><Plus size={13} /></button>}
           <button className="project-options" aria-label={`Options for ${project.name}`} aria-haspopup="menu" aria-expanded={menu === project.root} onClick={(e) => { if (menu === project.root) { closeMenu(true); return; } const r = e.currentTarget.getBoundingClientRect(); menuOpener.current = e.currentTarget; openMenu(project.root, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={13} /></button>
-          {menu === project.root && createPortal(<div className="project-menu" ref={menuRef} role="menu" aria-label={`Options for ${project.name}`} style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } }}><button autoFocus onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, pinned: !p.pinned } : p)); setMenu(""); }}>{project.pinned ? "Unpin project" : "Pin project"}</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button><button onClick={() => moveWithin(project, -1)}>Move up</button><button onClick={() => moveWithin(project, 1)}>Move down</button>
+          {menu === project.root && createPortal(<div className="project-menu" ref={menuRef} role="menu" aria-label={`Options for ${project.name}`} style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(e) => { const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])]; const index = items.indexOf(document.activeElement as HTMLButtonElement); if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } else if (e.key === "ArrowDown") { e.preventDefault(); focusMenuItem(index + 1); } else if (e.key === "ArrowUp") { e.preventDefault(); focusMenuItem(index - 1); } else if (e.key === "Home") { e.preventDefault(); focusMenuItem(0); } else if (e.key === "End") { e.preventDefault(); focusMenuItem(items.length - 1); } }}><button autoFocus role="menuitem" onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, pinned: !p.pinned } : p)); setMenu(""); }}>{project.pinned ? "Unpin project" : "Pin project"}</button><button role="menuitem" onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button><button role="menuitem" onClick={() => moveWithin(project, -1)}>Move up</button><button role="menuitem" onClick={() => moveWithin(project, 1)}>Move down</button>
             <span className="project-color-label">Project color</span><div className="project-colors" role="group" aria-label={`Color for ${project.name}`}>
               {projectColors.map(([label, color]) => <button key={color} aria-label={`${label} project color`} title={label} aria-pressed={project.color === color} style={{ background: color }} onClick={() => colorProject(project, color)} />)}
               <input type="color" aria-label={`Custom project color for ${project.name}`} title="Custom color" value={project.color || "#60a5fa"} onChange={(e) => colorProject(project, e.target.value)} />
-            </div><button onClick={() => colorProject(project)}>Reset color</button>
-            <button className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>, container.current?.closest(".app") || document.body)}
+            </div><button role="menuitem" onClick={() => colorProject(project)}>Reset color</button>
+            <button role="menuitem" className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>, container.current?.closest(".app") || document.body)}
         </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
           <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onClearChat={onClearChat} onExportChat={onExportChat} />
         </div>}</div>)}
@@ -203,7 +211,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
           {renaming === project.root ? <input autoFocus aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => rename(project)} onKeyDown={(e) => { if (e.key === "Enter") rename(project); if (e.key === "Escape") setRenaming(""); }} /> : <button className="project-open" title={project.root} aria-current={sameProject(activeRoot, project.root) ? "true" : undefined} disabled={!ready} onClick={() => onOpen(project, false)}><FolderOpen size={16} /><span>{project.name}</span>{!!counts[project.root] && <small>{counts[project.root]}</small>}</button>}
           {vertical && <button className="project-options" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} aria-expanded={newChatRoot !== undefined && sameProject(newChatRoot, project.root)} aria-controls={newChatRoot !== undefined && sameProject(newChatRoot, project.root) ? "new-chat-menu" : undefined} disabled={!ready} onClick={() => onNewChat(project.root)}><Plus size={13} /></button>}
           <button className="project-options" aria-label={`Options for ${project.name}`} aria-haspopup="menu" aria-expanded={menu === project.root} onClick={(e) => { if (menu === project.root) { closeMenu(true); return; } const r = e.currentTarget.getBoundingClientRect(); menuOpener.current = e.currentTarget; openMenu(project.root, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={13} /></button>
-          {menu === project.root && createPortal(<div className="project-menu" ref={menuRef} role="menu" aria-label={`Options for ${project.name}`} style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } }}><button autoFocus onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, hidden: false, collapsed: false } : p)); setMenu(""); }}>Restore project</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button></div>, container.current?.closest(".app") || document.body)}
+          {menu === project.root && createPortal(<div className="project-menu" ref={menuRef} role="menu" aria-label={`Options for ${project.name}`} style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(e) => { const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])]; const index = items.indexOf(document.activeElement as HTMLButtonElement); if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } else if (e.key === "ArrowDown") { e.preventDefault(); focusMenuItem(index + 1); } else if (e.key === "ArrowUp") { e.preventDefault(); focusMenuItem(index - 1); } else if (e.key === "Home") { e.preventDefault(); focusMenuItem(0); } else if (e.key === "End") { e.preventDefault(); focusMenuItem(items.length - 1); } }}><button autoFocus role="menuitem" onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, hidden: false, collapsed: false } : p)); setMenu(""); }}>Restore project</button><button role="menuitem" onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button></div>, container.current?.closest(".app") || document.body)}
         </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
           <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Archived chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onClearChat={onClearChat} onExportChat={onExportChat} />
         </div>}</div>)}

@@ -158,6 +158,7 @@ class RecoveryStore {
       let message = tab.messages.find((value) => value.id === id);
       if (!message) { message = { id, turn: tab.turn, role: event.type === "text" ? "assistant" : event.type === "tool" ? "tool" : event.type === "error" ? "error" : "notice", text: "" }; tab.messages.push(message); }
       message.text = event.type === "tool" ? event.detail || message.text || "" : event.type === "error" ? event.message || "" : event.replace ? event.text || "" : message.text + (event.text || "");
+      if (event.type === "error") { message.provider = event.provider; message.model = event.model; }
       message.title = event.title === "Tool result" && message.title ? message.title : event.title || message.title; message.state = event.state;
     }
   }

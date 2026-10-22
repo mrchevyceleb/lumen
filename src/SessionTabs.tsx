@@ -28,7 +28,7 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
   // One placement path for the right-click and … openers; the menu is portaled to the app root
   // because the sidebar clips and filters fixed descendants, then measured and clamped.
   const openMenu = (tab: Tab, point: { x: number; y: number }, fallback?: { right: number; top: number }) => {
-    if (!menuOpener.current) menuOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menuOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setMenuBox({ top: point.y, left: point.x, flipX: fallback?.right, flipY: fallback ? fallback.top - 4 : undefined });
     setMenu(tab.id);
   };
@@ -45,6 +45,22 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
   });
   const [renaming, setRenaming] = useState("");
   const [name, setName] = useState("");
+  const closeMenu = (restoreFocus = false) => {
+    setMenu("");
+    if (restoreFocus) {
+      const opener = menuOpener.current;
+      menuOpener.current = null;
+      if (opener?.isConnected) opener.focus();
+      else {
+        const tab = tabs.find((item) => item.id === menu);
+        if (tab) nav.current?.querySelector<HTMLButtonElement>(`[data-chat-id="${CSS.escape(tab.id)}"]`)?.focus();
+      }
+    }
+  };
+  const focusMenuItem = (index: number) => {
+    const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])];
+    items[(index + items.length) % items.length]?.focus();
+  };
   useEffect(() => {
     if (!menu) return;
     // The menu belongs to one row: any pointer down outside the menu and that row (including
@@ -54,9 +70,9 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
       const target = event.target as Node;
       if (menuRef.current?.contains(target)) return;
       if ((target as Element).closest?.(".session-tab")?.querySelector(`[data-chat-id="${CSS.escape(menu)}"]`)) return;
-      setMenu("");
+      closeMenu(true);
     };
-    const dismiss = () => setMenu("");
+    const dismiss = () => closeMenu(true);
     window.addEventListener("pointerdown", close);
     window.addEventListener("resize", dismiss);
     nav.current?.closest(".project-scroll, .session-tabs")?.addEventListener("scroll", dismiss, { passive: true });
@@ -105,7 +121,7 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
       <span className="screen-reader-only" id={`chat-status-${tab.id}`}>{`${tab.archived ? "Archived. " : ""}${tab.busy ? tab.phaseText || tab.phase || "Working" : tab.mode === "native" ? "Native CLI" : "Readable session"}`}</span>
       {renaming !== tab.id && <button type="button" className="chat-options" aria-label={`Options for ${tab.name}`} aria-haspopup="menu" aria-expanded={menu === tab.id} aria-controls={menu === tab.id ? `chat-menu-${tab.id}` : undefined} onClick={(event) => { if (menu === tab.id) { setMenu(""); return; } menuOpener.current = event.currentTarget; const r = event.currentTarget.getBoundingClientRect(); openMenu(tab, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={12} /></button>}
       {renaming !== tab.id && <IconButton label={`Close ${tab.name} tab`} onClick={() => onClose(tab)}><X size={12} /></IconButton>}
-      {menu === tab.id && createPortal(<div className="chat-menu" id={`chat-menu-${tab.id}`} ref={menuRef} role="menu" style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(""); const opener = menuOpener.current; menuOpener.current = null; if (opener?.isConnected) opener.focus(); else nav.current?.querySelector<HTMLButtonElement>(`[data-chat-id="${CSS.escape(tab.id)}"]`)?.focus(); } }}>
+      {menu === tab.id && createPortal(<div className="chat-menu" id={`chat-menu-${tab.id}`} ref={menuRef} role="menu" style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(event) => { const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])]; const index = items.indexOf(document.activeElement as HTMLButtonElement); if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeMenu(true); } else if (event.key === "ArrowDown") { event.preventDefault(); focusMenuItem(index + 1); } else if (event.key === "ArrowUp") { event.preventDefault(); focusMenuItem(index - 1); } else if (event.key === "Home") { event.preventDefault(); focusMenuItem(0); } else if (event.key === "End") { event.preventDefault(); focusMenuItem(items.length - 1); } }}>
         <button ref={menuItem} role="menuitem" onClick={() => beginRename(tab)}>Rename chat</button>
         <button role="menuitem" onClick={() => { onCustomize(tab); setMenu(""); }}>Customize chat…</button>
         <button role="menuitem" onClick={() => { onExportChat(tab); setMenu(""); }}>Export chat…</button>

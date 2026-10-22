@@ -360,24 +360,25 @@ class WorkspaceService {
   }
   // Repo entries (files and folders) for @ mentions in the composer. Fuzzy subsequence
   // matching on the relative path, with exact substring matches ranked first, then shorter
-  // paths. One BFS pass fills the pool; the walk is capped so huge repos stay responsive.
+  // paths. Scans are cached briefly per workspace and shared by concurrent searches, so fast
+  // typing does not make Electron walk the same huge tree repeatedly.
   async mentionFiles(root, query) {
     root = this.registeredAncestor(root) || this.root(root);
     const q = String(query || "").toLowerCase();
-    const pool = [];
-    let visited = 0;
-    let truncated = false;
-    const queue = [""];
-    while (queue.length) {
-      const rel = queue.shift();
-      if (rel && rel.split("/").length > 12) continue;
-      for (const entry of await this.tree(root, rel)) {
-        if (++visited > 30000) { truncated = true; break; }
-        pool.push(entry);
-        if (entry.directory) queue.push(entry.path);
-      }
-      if (truncated) break;
+    const now = Date.now();
+    this.mentionScans ||= new Map();
+    let cached = this.mentionScans.get(root);
+    if (!cached || (cached.promise ? now - cached.started > 5 * 60 * 1000 : now >= cached.expires)) {
+      cached = { started: now, promise: null };
+      cached.promise = this.scanMentionFiles(root);
+      cached.promise.then((result) => {
+        if (this.mentionScans.get(root) === cached) this.mentionScans.set(root, { ...result, expires: Date.now() + 5000 });
+      }, () => {
+        if (this.mentionScans.get(root) === cached) this.mentionScans.delete(root);
+      });
+      this.mentionScans.set(root, cached);
     }
+    const { pool, truncated } = cached.promise ? await cached.promise : cached;
     const fuzzy = (path) => {
       let i = 0;
       for (const ch of path) if (ch === q[i]) i++;
@@ -388,6 +389,23 @@ class WorkspaceService {
       : pool.map((entry) => ({ entry, hit: 0 }));
     ranked.sort((a, b) => a.hit - b.hit || Number(a.entry.directory) - Number(b.entry.directory) || a.entry.path.length - b.entry.path.length || a.entry.path.localeCompare(b.entry.path));
     return { entries: ranked.slice(0, 40).map((row) => row.entry), truncated };
+  }
+  async scanMentionFiles(root) {
+    const pool = [];
+    let visited = 0;
+    let truncated = false;
+    const queue = [""];
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const rel = queue[cursor];
+      if (rel && rel.split("/").length > 12) continue;
+      for (const entry of await this.tree(root, rel)) {
+        if (++visited > 30000) { truncated = true; break; }
+        pool.push(entry);
+        if (entry.directory) queue.push(entry.path);
+      }
+      if (truncated) break;
+    }
+    return { pool, truncated };
   }
   gitAt(cwd, args, options = {}) {
     const maxBuffer = options.maxBuffer || 8 * 1024 * 1024;
@@ -771,8 +789,14 @@ class Sessions {
         if (s.agent === "claude" || s.agent === "google") throw new Error("Use /compact in this chat to compact with the CLI's own summary.");
         if (s.agent === "pi") {
           this.event(s, { type: "phase", phase: "compacting" });
-          try { await this.piBridge(s, "compact", {}); }
+          let outcome;
+          try { outcome = await this.piBridge(s, "compact", {}); }
           finally { this.event(s, { type: "phase", phase: undefined }); }
+          const controls = await this.readControls(s);
+          // The extension reports a friendly no-op (for example "nothing to compact yet")
+          // as a notice so the renderer can toast exactly that outcome. Keep it separate
+          // from the persistent MCP/context warning shown inside SessionControls.
+          return typeof outcome?.notice === "string" ? { ...controls, notice: outcome.notice } : controls;
         } else await (await ensureRuntime(this, s)).compactNow();
         return await this.readControls(s);
       }
@@ -822,7 +846,7 @@ class Sessions {
   }
   async piMcp(s, name) {
     if (name !== undefined) throw new Error("This Pi MCP manager uses native widgets. Open /mcp in the terminal to change its connections.");
-    return { servers: [], warning: "Open Pi’s MCP manager below to inspect or change connections in Readable." };
+    return { servers: [], warning: "Use Open Pi MCP manager to inspect or change connections." };
   }
   async ensurePiPolicy(s) {
     await this.ensurePi(s);
@@ -1683,7 +1707,12 @@ class Sessions {
       this.event(s, { type: "error", message: e.error || "Pi extension failed." });
       return;
     }
-    if (s.piRpcProcess && e.type === "extension_ui_request" && e.method === "notify" && (e.notificationType || e.notifyType) === "error") {
+    // Lumen's own control replies travel on Pi's notify channel too. They must reach the
+    // control-reply interception below even when Pi tags them "error": the generic error
+    // conversion here would leak the raw LUMEN_CONTROLS JSON as a fake chat turn.
+    const isLumenControl = e.type === "extension_ui_request" && e.method === "notify" &&
+      (e.message?.startsWith("LUMEN_CONTROLS:") || e.message?.startsWith("LUMEN_CONTEXT:"));
+    if (s.piRpcProcess && !isLumenControl && e.type === "extension_ui_request" && e.method === "notify" && (e.notificationType || e.notifyType) === "error") {
       s.piCommandFailed = true;
       this.event(s, { type: "error", message: strip(e.message || "Pi command failed.") });
       return;

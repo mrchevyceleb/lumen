@@ -1978,7 +1978,7 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .native-command-draft code { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .native-command-draft button { display: grid; place-items: center; padding: 4px; }
 .native-terminal.has-command-draft > .terminal-host { height: calc(100% - 42px); }
-@media (prefers-reduced-motion: reduce) { .command-menu, .command-refreshing { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .command-menu, .command-refreshing, .jump-bottom { animation: none; } }
 .file-mention-menu .command-name { display: flex; align-items: center; gap: 6px; }
 .file-mention-menu .command-name svg { color: var(--muted); flex-shrink: 0; }
 .mention-ghost { padding: 7px 15px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2049,6 +2049,15 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   height: 28px;
   flex-shrink: 0;
 }
+@media (max-width: 719px) {
+  /* The composer itself carries the compaction action; at phone width the context summary
+     remains in SessionControls, keeping this toolbar from becoming a four-row control pile. */
+  .composer-toolbar .auto-compact-control,
+  .composer-toolbar .context-indicator {
+    display: none;
+  }
+}
+
 @container (max-width: 380px) {
   /* Wrap instead of scrolling: a narrow composer must fit its controls, never hide them behind a
      horizontal scrollbar where they cannot be reached with the mouse wheel. */
@@ -3206,7 +3215,9 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 }
 .toast {
   position: fixed;
-  bottom: 43px;
+  /* Sit above the composer, not on it: 43px is the status bar, and the composer zone floats
+     ~120px tall over the conversation, so anchor clear of both. */
+  bottom: calc(43px + 128px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 200;

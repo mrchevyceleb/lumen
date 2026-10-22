@@ -136,6 +136,8 @@ export default function Conversation({
   const [sessionError, setSessionError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const submitLock = useRef(false);
+  const compactLock = useRef(false);
+  const [compactPending, setCompactPending] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const historyPosition = useRef(-1), historyDraft = useRef("");
@@ -175,6 +177,10 @@ export default function Conversation({
   const [mentionTruncated, setMentionTruncated] = useState(false);
   const [dismissedMentions, setDismissedMentions] = useState(false);
   const mentionRequest = useRef(0);
+  // A Tab/Enter pressed while the current results are still loading is an explicit
+  // completion intent, not a key to throw away. Keep it with the exact draft/caret it was
+  // made against; when current results land, complete once. Any later edit supersedes it.
+  const queuedMentionAccept = useRef<{ input: string; caret: number } | null>(null);
   const mentionOpen = !!mentionToken && !menuOpen && focused && !dismissedMentions && !controlPanel && !sessionPanel;
   const mentionQuery = mentionToken?.query || "";
   const [mentionResultQuery, setMentionResultQuery] = useState("");
@@ -203,6 +209,7 @@ export default function Conversation({
   }, [mentionOpen, mentionQuery, mentionRoot]);
   const selectMention = (entry: Entry) => {
     if (!mentionToken) return;
+    queuedMentionAccept.current = null;
     const tagged = `${entry.path}${entry.directory ? "/" : ""}`;
     const mention = /\s/.test(tagged) ? `@"${tagged.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"` : `@${tagged}`;
     const next = input.slice(0, mentionToken.start) + mention + " " + input.slice(caret);
@@ -212,6 +219,15 @@ export default function Conversation({
     setCaret(nextCaret);
     requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(nextCaret, nextCaret); });
   };
+  const queuedMentionSettled = !mentionLoading && mentionFresh;
+  useEffect(() => {
+    const queued = queuedMentionAccept.current;
+    if (!queued || !queuedMentionSettled) return;
+    // The key was queued against one exact draft and caret. A later edit is a newer intent.
+    if (queued.input !== input || queued.caret !== caret || !mentionOpen) { queuedMentionAccept.current = null; return; }
+    queuedMentionAccept.current = null;
+    if (shownMentionEntries.length) selectMention(shownMentionEntries[mentionSelection]);
+  }, [caret, input, mentionOpen, mentionSelection, queuedMentionSettled, shownMentionEntries]);
   const loadCommands = async (refresh = false) => {
     if (loadingCommands.current) return;
     loadingCommands.current = true;
@@ -287,14 +303,26 @@ export default function Conversation({
   // context panel. Claude has a real /compact and runs it as its own turn; the rest go
   // through the session-controls RPC. Google only compacts inside its own CLI.
   const compactNow = async () => {
-    if (tab.busy || tab.agent === "shell" || tab.nativeOwned || tab.recoveryError || controlPending) throw new Error("Finish this turn before compacting.");
-    if (tab.agent === "google") throw new Error("Antigravity compacts inside its own CLI. Open native view and run /compact there.");
-    if (tab.agent === "claude") {
-      if (!await onSend("/compact")) throw new Error("Claude did not accept /compact. Try again.");
-      return;
+    if (compactLock.current) throw new Error("Compaction is already running for this chat.");
+    compactLock.current = true;
+    setCompactPending(true);
+    try {
+      if (tab.busy || tab.agent === "shell" || tab.nativeOwned || tab.recoveryError || controlPending) throw new Error("Finish this turn before compacting.");
+      if (tab.agent === "google") throw new Error("Antigravity compacts inside its own CLI. Open native view and run /compact there.");
+      if (tab.agent === "claude") {
+        if (!await onSend("/compact")) throw new Error("Claude did not accept /compact. Try again.");
+        return;
+      }
+      const next = await api<SessionControlsState>("session:controls-change", tab.id, { compact: true });
+      onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow });
+      // `notice` is the compact outcome itself (for example "nothing to compact yet").
+      // The generic control warning belongs in SessionControls and must not be toasted
+      // as though this tap produced it.
+      if (next.notice) onNotice(next.notice);
+    } finally {
+      compactLock.current = false;
+      setCompactPending(false);
     }
-    const next = await api<SessionControlsState>("session:controls-change", tab.id, { compact: true });
-    onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow });
   };
   const submit = async () => {
     if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && !isHostCommand && commandLoading)) return;
@@ -563,7 +591,7 @@ export default function Conversation({
                 event.preventDefault(); onPasteAttachments();
               }
             }}
-            onChange={(e) => { historyPosition.current = -1; setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); setDismissedMentions(false); }}
+            onChange={(e) => { queuedMentionAccept.current = null; historyPosition.current = -1; setInput(e.target.value); setCaret(e.target.selectionStart); setDismissedCommands(false); setDismissedMentions(false); }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onClick={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => setFocused(true)}
@@ -578,14 +606,21 @@ export default function Conversation({
                 } else if (e.key === "ArrowDown" && historyPosition.current >= 0) { e.preventDefault(); historyPosition.current--; setInput(historyPosition.current < 0 ? historyDraft.current : history[historyPosition.current]); }
                 return;
               }
-              if (mentionOpen && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setDismissedMentions(true); return; }
+              if (mentionOpen && e.key === "Escape") { queuedMentionAccept.current = null; e.preventDefault(); e.stopPropagation(); setDismissedMentions(true); return; }
               if (mentionOpen && ["ArrowDown", "ArrowUp"].includes(e.key)) {
+                queuedMentionAccept.current = null;
                 e.preventDefault();
                 if (shownMentionEntries.length) setMentionSelected((mentionSelection + (e.key === "ArrowDown" ? 1 : shownMentionEntries.length - 1)) % shownMentionEntries.length);
                 return;
               }
-              if (mentionOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && ["Enter", "Tab"].includes(e.key) && shownMentionEntries.length) {
-                e.preventDefault(); selectMention(shownMentionEntries[mentionSelection]); return;
+              if (mentionOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && ["Enter", "Tab"].includes(e.key)) {
+                // While results are still loading there is nothing safe to accept yet, but
+                // the key must not fall through to the browser: Tab would jump focus to the
+                // Send button and Enter would send a half-typed mention. Queue that intent
+                // for the current draft instead of discarding it; only current-query
+                // results may satisfy it.
+                if (mentionLoading || !mentionFresh) { e.preventDefault(); queuedMentionAccept.current = { input, caret }; return; }
+                if (shownMentionEntries.length) { e.preventDefault(); selectMention(shownMentionEntries[mentionSelection]); return; }
               }
               if (mentionOpen && e.key === "ArrowRight" && ghost && caret === input.length) {
                 e.preventDefault(); selectMention(shownMentionEntries[mentionSelection]); return;
@@ -639,7 +674,7 @@ export default function Conversation({
                 setCaret(1); setDismissedCommands(false); setFocused(true);
                 requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(1, 1); });
               }}><span className="composer-slash">/</span></IconButton>}
-          {tab.agent !== "shell" && tab.agent !== "google" && <button className="model-control compact-control" aria-label="Compact this chat now" title="Compact this chat now · /compact" disabled={tab.busy || tab.phase === "compacting" || submitting || controlPending || tab.nativeOwned || !!tab.recoveryError} onClick={() => { void compactNow().catch((e: any) => setSessionError(e.message)); }}>
+          {tab.agent !== "shell" && tab.agent !== "google" && <button className="model-control compact-control" aria-label="Compact this chat now" title="Compact this chat now · /compact" disabled={tab.busy || tab.phase === "compacting" || compactPending || submitting || controlPending || tab.nativeOwned || !!tab.recoveryError} onClick={() => { void compactNow().catch((e: any) => setSessionError(e.message)); }}>
             <Shrink size={13} /><span>Compact</span>
           </button>}
           {tab.agent !== "shell" && <ModelControls tab={tab} panel={controlPanel} setPanel={setControlPanel}
@@ -648,7 +683,7 @@ export default function Conversation({
               requestAnimationFrame(() => inputRef.current?.focus()); }} />}
           {!["shell", "google"].includes(tab.agent) && <>
             <IconButton label="MCPs & context" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={14} /></IconButton>
-            <button className="model-control compact-control" aria-label={compactLabel} title={compactLabel}
+            <button className="model-control auto-compact-control" aria-label={compactLabel} title={compactLabel}
               disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>
               <Shrink size={13} /><span>{tab.autoCompactTokens ? `${(tab.autoCompactTokens / 1000).toLocaleString()}k` : "Auto-compact"}</span>
             </button>
@@ -736,8 +771,8 @@ function MessageView({
           {tab.agent !== "shell" && authError(m.text) ? tab.agent === "pi" && (m.provider || m.model) ? <>
             {/* Pi names the provider on its errors, so point at that provider's saved credential,
                 never at a generic Pi sign-in: re-running the wrong login was the sign-in loop. */}
-            <strong>{m.provider ? `${m.provider} ` : ""}rejected its saved API key{m.model ? ` for ${m.model}` : ""}</strong>
-            <p>Pi is still signed in. Replace the {m.provider || "provider"} API key under Settings → Accounts → Pi, or pick a different model, then retry your message.</p>
+            <strong>{m.provider ? `${m.provider} ` : ""}rejected its saved sign-in{m.model ? ` for ${m.model}` : ""}</strong>
+            <p>Pi is still signed in. Update the {m.provider || "provider"} credential or saved sign-in under Settings → Accounts → Pi, or pick a different model, then retry your message.</p>
             <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Update {m.provider || "provider"} sign-in</button>
             <details className="auth-error-details"><summary>Error details</summary><p><LinkText text={m.text} onWeb={onWeb} onError={onError} /></p></details>
           </> : <>
@@ -791,7 +826,7 @@ function MessageView({
                   <div className="code-block">
                     <div className="code-block-bar">
                       <span className="code-block-lang">{language}</span>
-                      <CopyButton text={codeOf(children).replace(/\n$/, "")} />
+                      <CopyButton text={codeOf(children)} />
                     </div>
                     <pre>{children}</pre>
                   </div>

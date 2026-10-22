@@ -157,7 +157,7 @@ export interface McpConnection {
 }
 export interface SessionControlsState {
   servers: McpConnection[]; contextTokens: number | null; contextWindow?: number | null; autoCompactTokens: number | null;
-  mcpOverrides: Record<string, boolean>; warning: string; minimumTokens: number; maximumTokens: number;
+  mcpOverrides: Record<string, boolean>; warning: string; notice?: string; minimumTokens: number; maximumTokens: number;
 }
 export interface Doc {
   root: string;
