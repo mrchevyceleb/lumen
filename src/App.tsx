@@ -63,6 +63,18 @@ import {
   type BrowserPage,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
+
+// Two chats from the same agent both called "Claude Code" are impossible to tell apart in the
+// sidebar (and their browsers both read "Claude Code's browser"), so a new chat takes the next
+// free number instead of repeating a name that is already on screen.
+const uniqueChatName = (base: string, tabs: { id: string; name: string }[], exceptId = "") => {
+  const taken = new Set(tabs.filter((tab) => tab.id !== exceptId).map((tab) => tab.name));
+  if (!taken.has(base)) return base;
+  const stem = base.replace(/ \d+$/, "");
+  // No upper bound: giving up would hand back a name that is already taken, which is the exact
+  // thing this exists to prevent.
+  for (let n = 2; ; n += 1) if (!taken.has(`${stem} ${n}`)) return `${stem} ${n}`;
+};
 import { Modal, IconButton, FileTree, FileIcon, Busy } from "./Components";
 import SettingsPanel from "./SettingsPanel";
 import Conversation, { AgentMark } from "./Conversation";
@@ -77,6 +89,7 @@ import BrowserPane from "./BrowserPane";
 import PiCustomControl from "./PiCustomControl";
 import SessionStart from "./SessionStart";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
+import { chatText } from "./chat-export";
 const EditorPane = lazy(() => import("./EditorPane"));
 const agents: Agent[] = ["shell", "pi", "codex", "claude", "grok", "google"];
 const docKey = (doc: { root: string; path: string }) =>
@@ -173,6 +186,9 @@ export default function App() {
   const MIN_PANEL = 48;
   // A conversation needs real room to be readable; panels wrap and shrink instead of eating it.
   const MIN_MAIN = 340;
+  // Below this a side pane is a sliver, not a page: links go to the main browser
+  // instead of squeezing the chat to nothing on a small window.
+  const MIN_BROWSER_PANE = 320;
   const RAIL_WIDTH = 44;
   const [panelPreferences] = useState(() => { try { return JSON.parse(localStorage.getItem("lumen.panels") || "{}") || {}; } catch { return {}; } });
   const [panel, setPanel] = useState<"files" | "git">(panelPreferences.panel === "git" ? "git" : "files");
@@ -223,15 +239,22 @@ export default function App() {
   }, [maxTerminalHeight, terminalHeight]);
   const visibleExplorer = explorer && !explorerHidden;
   const visibleSidebar = sidebar;
-  const panelWidthsRef = useRef({ sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen });
-  panelWidthsRef.current = { sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen };
+  // Room the browser pane would actually get once the conversation keeps its
+  // minimum. On a narrow window that is a sliver, so the pane stays out of the
+  // way and links go to the system browser instead.
+  const browserRoom = viewportWidth - RAIL_WIDTH - MIN_MAIN
+    - (visibleExplorer ? Math.max(MIN_PANEL, explorerWidth) : 0)
+    - (visibleSidebar ? Math.max(MIN_PANEL, sidebarWidth) : 0);
+  const browserVisible = browserOpen && browserRoom >= MIN_BROWSER_PANE;
+  const panelWidthsRef = useRef({ sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen, browserVisible });
+  panelWidthsRef.current = { sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen, browserVisible };
   // Width to come back to after the explorer is auto-hidden for lack of room; the clamp would
   // otherwise leave it at its minimum and save that narrow width for the next launch.
   const explorerRestoreRef = useRef(0);
   useEffect(() => {
     const openKeys: Array<"sidebar" | "browser" | "explorer"> = [];
     if (visibleSidebar) openKeys.push("sidebar");
-    if (browserOpen) openKeys.push("browser");
+    if (browserVisible) openKeys.push("browser");
     if (visibleExplorer) openKeys.push("explorer");
     if (!openKeys.length) return;
     const maxTotal = Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN);
@@ -265,7 +288,7 @@ export default function App() {
       panelWidthsRef.current.explorer = nextWidths.explorer;
       setExplorerWidth(nextWidths.explorer);
     }
-  }, [viewportWidth, visibleSidebar, browserOpen, visibleExplorer]);
+  }, [viewportWidth, visibleSidebar, browserVisible, visibleExplorer]);
   // Three panes beside a usable conversation do not fit on a small window, and squeezing all of
   // them to slivers is what made a 900px window feel broken. The file explorer is the least
   // essential of the three: hide it (only when we are the ones hiding it) and bring it back when
@@ -274,18 +297,18 @@ export default function App() {
     if (!visibleExplorer || explorerPinned.current) return;
     // Room left for the explorer itself once the conversation keeps its own minimum: below one
     // pane minimum there is nothing usable to show, so hide it instead of squeezing all three.
-    const room = viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? sidebarWidth : 0) - (browserOpen ? browserWidth : 0);
+    const room = viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? sidebarWidth : 0) - (browserVisible ? browserWidth : 0);
     if (room < MIN_PANEL) {
       if (!explorerRestoreRef.current) explorerRestoreRef.current = explorerWidth;
       setExplorerHidden(true);
     }
-  }, [browserOpen, viewportWidth, visibleExplorer, visibleSidebar, sidebarWidth, browserWidth, explorerWidth]);
+  }, [browserVisible, viewportWidth, visibleExplorer, visibleSidebar, sidebarWidth, browserWidth, explorerWidth]);
   useEffect(() => {
     if (!explorerHidden) return;
-    if (browserOpen && viewportWidth < 1180) return;
+    if (browserVisible && viewportWidth < 1180) return;
     setExplorerHidden(false); explorerPinned.current = false;
     if (explorerRestoreRef.current) { setExplorerWidth(explorerRestoreRef.current); explorerRestoreRef.current = 0; }
-  }, [browserOpen, viewportWidth, explorerHidden]);
+  }, [browserVisible, viewportWidth, explorerHidden]);
   const verticalChats = settings.chatLayout === "vertical" && visibleSidebar;
   useLayoutEffect(() => {
     const element = contextBar.current;
@@ -305,6 +328,12 @@ export default function App() {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocKey, setActiveDocKey] = useState("");
   const [editorExpanded, setEditorExpanded] = useState(false);
+  // True only when the narrow-window rule expanded the editor; a manual expand
+  // is the person's choice and must survive resizing.
+  const autoExpandedRef = useRef(false);
+  useEffect(() => {
+    if (viewportWidth >= 900 && autoExpandedRef.current) { autoExpandedRef.current = false; setEditorExpanded(false); }
+  }, [viewportWidth]);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [worktreeFocus, setWorktreeFocus] = useState("");
   const [signIn, setSignIn] = useState<SignInProfile | null>(null);
@@ -401,16 +430,33 @@ export default function App() {
   );
   const active = tabs.find((t) => t.id === activeId);
   const browserOpenRef = useRef<Record<string, boolean>>({});
+  // Per chat: every real pane change bumps that chat's toggle counter, so a
+  // failed link open only ever undoes the pane it opened itself, and activity
+  // in another chat cannot keep it from cleaning up.
+  const browserPanes = useRef<Record<string, { opens: number; toggles: number }>>({});
+  const paneState = (key: string) => browserPanes.current[key] ||= { opens: 0, toggles: 0 };
+  const setBrowserOpenFor = (chat: Tab, open: boolean) => {
+    const key = chat.controlId || chat.id;
+    const current = browserOpenRef.current[key] ?? chat.browserOpen === true;
+    if (open === current) return;
+    paneState(key).toggles++;
+    browserOpenRef.current[key] = open;
+    setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: open } : tab));
+    void updateTab(chat.id, { browserOpen: open });
+  };
   const setBrowserOpen = (open: boolean | ((value: boolean) => boolean)) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat first, then its browser stays with that chat."); return; }
     const key = chat.controlId || chat.id;
     const current = browserOpenRef.current[key] ?? chat.browserOpen === true;
     const next = typeof open === "function" ? open(current) : open;
-    if (next === current) return;
-    browserOpenRef.current[key] = next;
-    setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: next } : tab));
-    void updateTab(chat.id, { browserOpen: next });
+    if (next && browserRoom < MIN_BROWSER_PANE) {
+      // Say why nothing appeared, but keep the chat's saved choice: widening the
+      // window brings the pane back instead of losing it for good.
+      notify("The browser pane needs a wider window. On a window this narrow, links open in your main browser.");
+      return;
+    }
+    setBrowserOpenFor(chat, next);
   };
   if (active && !active.projectless) projectTabsRef.current[active.root] = active.id;
   const root = active?.projectless ? "" : active?.root || selectedRoot;
@@ -478,10 +524,37 @@ export default function App() {
   const openWeb = (url: string) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat before opening its browser."); return; }
+    // Same room calculation the pane clamps itself with. When the window cannot
+    // give the pane a readable width, the system browser is the honest answer.
+    if (browserRoom < MIN_BROWSER_PANE) {
+      void api("external:open", url).then(
+        () => notify("Opened in your main browser."),
+        (error) => notify(`Could not open that link: ${error.message || "the system browser refused it"}`),
+      );
+      return;
+    }
     const chatId = chat.controlId || chat.id;
     const workspace = chat.cwd && chat.cwd !== chat.root ? chat.cwd : chat.projectless ? "" : chat.root;
-    setBrowserOpen(true);
-    void api("browser:action", { action: "open", url, chatId, workspace }).catch((error) => notify(error.message));
+    const pane = paneState(chatId);
+    const request = ++pane.opens;
+    // Read the pane state from the same per-chat ref the setter uses, not the
+    // render closure: the person may have opened it since this render.
+    const wasBrowserOpen = browserOpenRef.current[chatId] ?? chat.browserOpen === true;
+    setBrowserOpenFor(chat, true);
+    const paneToken = pane.toggles;
+    void api("browser:action", { action: "open", url, chatId, workspace, reuse: true }).catch((error) => {
+      // A link that cannot use the pane still should not feel dead: hand it to
+      // the system browser instead, and if that fails too, put the pane back
+      // the way it was and say what went wrong. Only the newest request may put
+      // the pane back: an older failure must not close a browser a newer link
+      // has just opened.
+      const restore = () => { if (pane.opens === request && pane.toggles === paneToken && !wasBrowserOpen) setBrowserOpenFor(chat, false); };
+      void api("external:open", url).then(restore, (fallbackError) => {
+        if (pane.opens !== request) return;
+        restore();
+        notify(`Could not open that link: ${fallbackError.message || error.message}`);
+      });
+    });
   };
   const updateTab = (id: string, change: Partial<Tab>) => {
     const tab = tabsRef.current.find((value) => value.id === id);
@@ -611,7 +684,11 @@ export default function App() {
         browserOpen: resume?.browserOpen === true,
       };
       browserOpenRef.current[created.controlId] = tab.browserOpen === true;
-      setTabs((old) => [...old.filter((value) => value.controlId !== tab.controlId), tab]);
+      setTabs((old) => {
+        const rest = old.filter((value) => value.controlId !== tab.controlId);
+        const name = tab.nameCustom ? tab.name : uniqueChatName(tab.name, rest);
+        return [...rest, name === tab.name ? tab : { ...tab, name }];
+      });
       const selectionUnchanged = rootRef.current === selection.root && activeIdRef.current === selection.id;
       const canFocusArchived = showArchivedRef.current || resume?.archived !== true;
       const canFocusProject = created.projectless || showArchivedRef.current || !isHiddenProject(created.root);
@@ -633,7 +710,11 @@ export default function App() {
       if (control) throw e;
       if (resume?.controlId && resume.agent) {
         const retained = { ...resume, id: resume.controlId, mode: "rich", busy: false, recoveryError: e.message, messages: resume.messages || [], name: resume.name || agentNames[resume.agent] } as Tab;
-        setTabs((old) => [...old.filter((value) => value.controlId !== retained.controlId), retained]);
+        setTabs((old) => {
+          const rest = old.filter((value) => value.controlId !== retained.controlId);
+          const name = retained.nameCustom ? retained.name : uniqueChatName(retained.name, rest, retained.controlId);
+          return [...rest, name === retained.name ? retained : { ...retained, name }];
+        });
         setActiveId(retained.id);
         return retained;
       }
@@ -900,6 +981,7 @@ export default function App() {
               t.busy = true;
               t.interrupted = false;
               t.phase = undefined;
+              t.phaseText = undefined;
               t.turn = e.turn;
               t.started = Date.now();
             } else if (e.type === "done") {
@@ -908,6 +990,7 @@ export default function App() {
               t.forceStopAvailable = false;
               t.interrupted = e.code === 130;
               t.phase = undefined;
+              t.phaseText = undefined;
               t.exitCode = e.code;
               t.duration = Date.now() - (t.started || Date.now());
               if (e.sessionRef) t.sessionRef = e.sessionRef;
@@ -923,7 +1006,7 @@ export default function App() {
             else if (e.type === "view") { if (e.mode) t.mode = e.mode; if (e.sessionRef) t.sessionRef = e.sessionRef; }
             else if (e.type === "history") t.messages = e.messages || t.messages;
             else if (e.type === "reconnected") { t.recoveryError = undefined; t.exited = false; }
-            else if (e.type === "phase") t.phase = e.phase;
+            else if (e.type === "phase") { t.phase = e.phase; t.phaseText = e.text; }
             else if (e.type === "session") t.sessionRef = e.sessionRef;
             else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
@@ -984,7 +1067,8 @@ export default function App() {
           setUiRequests((old) => [...old.filter((value) => value.session !== e.id || value.request.id !== request.id), { session: e.id, request }]);
         else if (request.method === "notify") notify(request.message || "Pi notification");
         else if (request.method === "set_editor_text") setTabs((old) => old.map((tab) => tab.id === e.id ? { ...tab, draft: request.text || "" } : tab));
-        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id && !tab.nameCustom ? { ...tab, name: request.title || tab.name } : tab));
+        // An agent that names two chats the same thing leaves them indistinguishable too.
+        else if (request.method === "setTitle") setTabs((old) => old.map((tab) => tab.id === e.id && !tab.nameCustom && request.title ? { ...tab, name: uniqueChatName(request.title, old, tab.id) } : tab));
         // Pi's footer status updates are routine, not popup notifications.
         else if (request.method === "setStatus") return;
         else if (request.method === "setWidget") {
@@ -1188,25 +1272,66 @@ export default function App() {
     await settleControl(); persist();
     return { ...view(find() || tab), ...(action === "message" ? { messageId: body.id } : {}) };
   });
-  const openFile = async (file: string, folder = root) => {
-    if (!folder) return;
-    const normalized = file
-      .replace(/^file:\/\//, "")
-      .replace(/^\//, "")
-      .split("#")[0];
+  const openEditorDoc = async (normalized: string, folder: string) => {
+    // A split only makes sense with room for both halves. On a narrow window the
+    // split squeezed the chat into an unreadable strip, so the editor takes the
+    // whole width and the expand toggle brings the chat back. Widening the
+    // window again puts the split back.
+    if (viewportWidth < 720) { setEditorExpanded(true); autoExpandedRef.current = true; }
     const existing = docs.find((d) => samePath(d.root, folder) && d.path === normalized);
     if (existing) {
       setActiveDocKey(docKey(existing));
       return;
     }
+    const result = await api("files:read", folder, normalized);
+    const doc: Doc = { root: folder, ...result, saved: result.content };
+    setDocs((old) => [...old, doc]);
+    setActiveDocKey(docKey(doc));
+  };
+  const showUnsupported = (result: { error?: string }) => {
+    notify(result.error ? `${result.error} It is selected in your file manager.` : "That file could not be opened.");
+  };
+  const linkName = (value: string, decode = false) => {
+    // Only an href is percent-encoded; a real file path is the name itself, so
+    // a file literally called a%20b.pdf keeps its name.
+    let name = value;
+    if (decode) { try { name = decodeURIComponent(value); } catch { /* keep the raw name */ } }
+    return name.split(/[\\/]/).filter(Boolean).pop() || name;
+  };
+  // An external app takes over the screen, so say in the app what just opened:
+  // a click should never feel like it did nothing.
+  const showOpened = (result: { kind?: string; folder?: string; path?: string }, file: string) => {
+    const target = result.path || file;
+    if (result.kind === "external") notify(`Opened ${result.path ? linkName(result.path) : linkName(file, true)}`);
+    else if (result.kind === "folder") notify(`Showed ${linkName(result.folder || target)} in your file manager.`);
+    else if (result.kind === "copied") notify(`Copied ${target}`);
+  };
+  // Chat links point at all sorts of files: text in the workspace, images and
+  // models on the Desktop, whole folders. Let the main process pick the right
+  // way to open it instead of assuming everything is an editor file.
+  const openFile = async (file: string, folder = root) => {
     try {
-      const result = await api("files:read", folder, normalized);
-      const doc: Doc = { root: folder, ...result, saved: result.content };
-      setDocs((old) => [...old, doc]);
-      setActiveDocKey(docKey(doc));
+      const result = await api<{ kind: "editor" | "external" | "unsupported" | "folder" | "cancel"; relative?: string; error?: string; folder?: string; path?: string }>(
+        "file:open-link",
+        file,
+        folder || "",
+      );
+      if (result.kind === "editor" && result.relative && folder) await openEditorDoc(result.relative, folder);
+      else if (result.kind === "unsupported") showUnsupported(result);
+      else showOpened(result, file);
     } catch (e: any) {
       notify(e.message);
     }
+  };
+  const fileMenu = (file: string, folder = root) => {
+    void api<{ kind?: string; relative?: string; error?: string; folder?: string; path?: string }>("file:link-menu", file, folder || "")
+      .then((result) => {
+        if (result?.kind === "editor" && result.relative && folder) return openEditorDoc(result.relative, folder);
+        if (result?.kind === "unsupported") showUnsupported(result);
+        else if (result?.kind === "error") notify(result.error || "That file could not be opened.");
+        else showOpened(result || {}, file);
+      })
+      .catch((e) => notify(e.message));
   };
   const saveFile = async () => {
     if (!activeDoc) return;
@@ -1310,7 +1435,7 @@ export default function App() {
       if ((e.target as HTMLElement)?.closest(".modal")) return;
       if (!(e.ctrlKey || e.metaKey)) return;
       if (e.shiftKey && e.key.toLowerCase() === "b") {
-        e.preventDefault(); setBrowserOpen((value) => !value);
+        e.preventDefault(); setBrowserOpen(!browserVisible);
       } else if (e.altKey && e.key.toLowerCase() === "t") {
         e.preventDefault(); void addTab("shell", "rich", "");
       } else if (e.shiftKey && e.key.toLowerCase() === "t") {
@@ -1346,17 +1471,17 @@ export default function App() {
   const applySidebarWidth = (desired: number, hostWidth = window.innerWidth) => {
     const state = panelWidthsRef.current;
     const maxTotal = Math.max(MIN_PANEL, hostWidth - RAIL_WIDTH - MIN_MAIN);
-    const maxSidebar = Math.max(MIN_PANEL, maxTotal - (state.browserOpen ? MIN_PANEL : 0) - (state.explorerOpen ? MIN_PANEL : 0));
+    const maxSidebar = Math.max(MIN_PANEL, maxTotal - (state.browserVisible ? MIN_PANEL : 0) - (state.explorerOpen ? MIN_PANEL : 0));
     const next = Math.min(maxSidebar, Math.max(MIN_PANEL, Math.round(desired)));
     state.sidebar = next;
     setSidebarWidth(next);
     let remaining = maxTotal - next;
     if (state.explorerOpen) {
-      const nextExp = Math.min(state.explorer, Math.max(MIN_PANEL, remaining - (state.browserOpen ? MIN_PANEL : 0)));
+      const nextExp = Math.min(state.explorer, Math.max(MIN_PANEL, remaining - (state.browserVisible ? MIN_PANEL : 0)));
       if (nextExp !== state.explorer) { state.explorer = nextExp; setExplorerWidth(nextExp); }
       remaining -= nextExp;
     }
-    if (state.browserOpen) {
+    if (state.browserVisible) {
       const nextBrow = Math.min(state.browser, Math.max(MIN_PANEL, remaining));
       if (nextBrow !== state.browser) { state.browser = nextBrow; setBrowserWidth(nextBrow); }
     }
@@ -1364,17 +1489,17 @@ export default function App() {
   const applyExplorerWidth = (desired: number, hostWidth = window.innerWidth) => {
     const state = panelWidthsRef.current;
     const maxTotal = Math.max(MIN_PANEL, hostWidth - RAIL_WIDTH - MIN_MAIN);
-    const maxExplorer = Math.max(MIN_PANEL, maxTotal - (state.sidebarOpen ? MIN_PANEL : 0) - (state.browserOpen ? MIN_PANEL : 0));
+    const maxExplorer = Math.max(MIN_PANEL, maxTotal - (state.sidebarOpen ? MIN_PANEL : 0) - (state.browserVisible ? MIN_PANEL : 0));
     const next = Math.min(maxExplorer, Math.max(MIN_PANEL, Math.round(desired)));
     state.explorer = next;
     setExplorerWidth(next);
     let remaining = maxTotal - next;
     if (state.sidebarOpen) {
-      const nextSide = Math.min(state.sidebar, Math.max(MIN_PANEL, remaining - (state.browserOpen ? MIN_PANEL : 0)));
+      const nextSide = Math.min(state.sidebar, Math.max(MIN_PANEL, remaining - (state.browserVisible ? MIN_PANEL : 0)));
       if (nextSide !== state.sidebar) { state.sidebar = nextSide; setSidebarWidth(nextSide); }
       remaining -= nextSide;
     }
-    if (state.browserOpen) {
+    if (state.browserVisible) {
       const nextBrow = Math.min(state.browser, Math.max(MIN_PANEL, remaining));
       if (nextBrow !== state.browser) { state.browser = nextBrow; setBrowserWidth(nextBrow); }
     }
@@ -1486,6 +1611,14 @@ export default function App() {
     if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
   };
   const listedTab = (tab: Tab) => !tab.archived && (tab.projectless || !isHiddenProject(tab.root));
+  const exportChat = async (tab: Tab) => {
+    const text = chatText(tab);
+    if (!text) { notify("This chat has nothing to export yet."); return; }
+    try {
+      const result = await api<{ kind: "saved" | "canceled"; path?: string }>("chat:export", { name: tab.name, text });
+      if (result?.kind === "saved" && result.path) notify(`Chat saved to ${result.path.split(/[\\/]/).pop()}`);
+    } catch (error: any) { notify(error.message); }
+  };
   const archiveChat = (tab: Tab) => {
     const archived = !tab.archived;
     setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, archived } : t));
@@ -1541,7 +1674,7 @@ export default function App() {
       });
     else action();
   };
-  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat, onClearChat: clearChat };
+  const tabActions = { onSelect: selectTab, onCustomize: (tab: Tab) => { selectTab(tab); setDialog("tab"); }, onRename: (tab: Tab, name: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name, nameCustom: true } : t)), onClose: closeTab, onArchiveChat: archiveChat, onClearChat: clearChat, onExportChat: (tab: Tab) => void exportChat(tab) };
   const toggleChatLayout = () => { setSettings((s) => ({ ...s, chatLayout: s.chatLayout === "vertical" ? "horizontal" : "vertical" })); setSidebar(true); };
   const sessionActions = <div className="tab-actions">
     <IconButton label={settings.chatLayout === "vertical" ? "Use horizontal tabs" : "Use vertical chats"} onClick={toggleChatLayout}>{settings.chatLayout === "vertical" ? <PanelTop size={16} /> : <ListTree size={16} />}</IconButton>
@@ -1621,7 +1754,7 @@ export default function App() {
         </div>
         <span className="titlebar-caption">a little more room to think</span>
         <div className="titlebar-right">
-          <button className={`icon-button ${browserOpen ? "active" : ""}`} aria-label={browserOpen ? "Hide browser" : "Show browser"} title="Browser (Ctrl Shift B)" aria-expanded={browserOpen} aria-controls="browser-panel" onClick={() => setBrowserOpen(!browserOpen)}><Globe size={17} /></button>
+          <button className={`icon-button ${browserVisible ? "active" : ""}`} aria-label={browserVisible ? "Hide browser" : "Show browser"} title="Browser (Ctrl Shift B)" aria-expanded={browserVisible} aria-controls="browser-panel" onClick={() => setBrowserOpen(!browserVisible)}><Globe size={17} /></button>
           <button ref={explorerToggle} className={`icon-button ${visibleExplorer && panel === "files" ? "active" : ""}`} aria-label={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} title={visibleExplorer && panel === "files" ? "Hide file explorer" : "Show file explorer"} aria-expanded={visibleExplorer && panel === "files"} aria-controls="workspace-panel" onClick={() => { setPanel("files"); toggleExplorer(!(visibleExplorer && panel === "files")); }}>
             {visibleExplorer && panel === "files" ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
           </button>
@@ -1681,7 +1814,7 @@ export default function App() {
             <IconButton label="New terminal" onClick={() => addTab("shell")}>
               <TerminalSquare size={21} />
             </IconButton>
-            <IconButton label="Browser (Ctrl Shift B)" active={browserOpen} onClick={() => setBrowserOpen(!browserOpen)}><Globe size={21} /></IconButton>
+            <IconButton label="Browser (Ctrl Shift B)" active={browserVisible} onClick={() => setBrowserOpen(!browserVisible)}><Globe size={21} /></IconButton>
           </div>
           <div>
             <IconButton
@@ -1724,7 +1857,7 @@ export default function App() {
               aria-label="Resize projects sidebar"
               aria-orientation="vertical"
               aria-valuemin={MIN_PANEL}
-              aria-valuemax={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (browserOpen ? MIN_PANEL : 0) - (visibleExplorer ? MIN_PANEL : 0))}
+              aria-valuemax={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (browserVisible ? MIN_PANEL : 0) - (visibleExplorer ? MIN_PANEL : 0))}
               aria-valuenow={Math.round(sidebarWidth)}
               tabIndex={0}
               onPointerDown={(e) => resize(e, "sidebar")}
@@ -1817,9 +1950,11 @@ export default function App() {
                           notify(e.message),
                         )
                       }
-                      onFile={openFile}
+                      onFile={(file) => void openFile(file, root || active.root)}
+                      onFileMenu={(file) => fileMenu(file, root || active.root)}
                       onWeb={openWeb}
                       onError={notify}
+                      onNotice={notify}
                       onSignIn={() => void signInChat(active.id)}
                       onFollowFolder={openWorkspace}
                       onNative={(draft) => typeof draft === "string" ? openNativeCommand(draft) : switchView()}
@@ -1977,8 +2112,8 @@ export default function App() {
             </div>
           )}
         </main>
-        <BrowserPane chatId={active?.controlId || activeId} chatName={active?.name || ""} workspace={checkoutPath} open={browserOpen} blocked={resizing || !!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
-          width={browserWidth} maxWidth={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleExplorer ? explorerWidth : 0) - (visibleSidebar ? MIN_PANEL : 0))}
+        <BrowserPane chatId={active?.controlId || activeId} chatName={active?.name || ""} workspace={checkoutPath} open={browserVisible} blocked={resizing || !!(dialog || signIn || confirmation || piRequest || diff || agentMenu)}
+          width={browserWidth} maxWidth={Math.max(MIN_PANEL, browserRoom)}
           onWidth={applyBrowserWidth} onClose={() => setBrowserOpen(false)} onAttach={attachBrowser}
           canAttach={!!active && active.agent !== "shell" && active.mode === "rich" && !active.recoveryError} onError={notify} />
         {visibleExplorer && (
@@ -1989,7 +2124,7 @@ export default function App() {
               aria-label="Resize workspace panel"
               aria-orientation="vertical"
               aria-valuemin={MIN_PANEL}
-              aria-valuemax={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? MIN_PANEL : 0) - (browserOpen ? MIN_PANEL : 0))}
+              aria-valuemax={Math.max(MIN_PANEL, viewportWidth - RAIL_WIDTH - MIN_MAIN - (visibleSidebar ? MIN_PANEL : 0) - (browserVisible ? MIN_PANEL : 0))}
               aria-valuenow={Math.round(explorerWidth)}
               tabIndex={0}
               onPointerDown={(e) => resize(e, "explorer")}
@@ -2163,7 +2298,7 @@ export default function App() {
           {boot.administrator.supported && <button className={boot.administrator.elevated ? "administrator-active" : ""} title={boot.administrator.elevated ? "Agents and terminals have Windows administrator access" : "Restart Lumen with Windows administrator access"}
             onClick={() => { setSettingsSection("behavior"); setDialog("settings"); }}><ShieldCheck size={12} />{boot.administrator.elevated ? "Administrator" : "Run as administrator"}</button>}
           {active?.busy ? (
-              active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
+              active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "retrying" ? (active.phaseText || "Reconnecting…") : active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
           ) : (
             <>
               <Circle size={9} />
@@ -2348,7 +2483,7 @@ export default function App() {
       {notice && (
         // The native browser page sits above everything the app draws, so the toast keeps to
         // the column the app actually owns instead of sliding under the pane.
-        <div className="toast" role="status" style={browserOpen ? { left: `calc((100% - ${browserWidth + 24}px) / 2)`, maxWidth: `min(680px, calc(100% - ${browserWidth + 48}px))` } : undefined}>
+        <div className="toast" role="status" style={browserVisible ? { left: `calc((100% - ${browserWidth + 24}px) / 2)`, maxWidth: `min(680px, calc(100% - ${browserWidth + 48}px))` } : undefined}>
           <span>{notice}</span>
           <button
             aria-label="Dismiss notification"

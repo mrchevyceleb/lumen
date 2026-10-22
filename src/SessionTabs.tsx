@@ -12,8 +12,9 @@ export interface SessionTabActions {
   onClose: (tab: Tab) => void;
   onArchiveChat: (tab: Tab) => void;
   onClearChat: (tab: Tab) => void;
+  onExportChat: (tab: Tab) => void;
 }
-export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat, onClearChat }: SessionTabActions & {
+export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat, onClearChat, onExportChat }: SessionTabActions & {
   tabs: Tab[]; activeId: string; settings: Settings; vertical?: boolean; label: string;
 }) {
   const nav = useRef<HTMLElement>(null);
@@ -99,14 +100,15 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
         <span>{tab.name}{tab.accountId ? ` · ${tab.accountName}` : ""}</span>
         {tab.archived && <span className="archived-tag"><Archive size={10} aria-hidden="true" />Archived</span>}
         {tab.managedBy && <Sparkles size={11} aria-label="Agent controlled task" />}
-        {tab.busy ? tab.phase ? <span className="chat-phase" title={tab.phase}>…</span> : <span className="tiny-pulse" /> : tab.mode === "native" ? <span className="native-tag">CLI</span> : null}
+        {tab.busy ? tab.phase ? <span className="chat-phase" title={tab.phaseText || tab.phase}>…</span> : <span className="tiny-pulse" /> : tab.mode === "native" ? <span className="native-tag">CLI</span> : null}
       </button>}
-      <span className="screen-reader-only" id={`chat-status-${tab.id}`}>{`${tab.archived ? "Archived. " : ""}${tab.busy ? tab.phase || "Working" : tab.mode === "native" ? "Native CLI" : "Readable session"}`}</span>
+      <span className="screen-reader-only" id={`chat-status-${tab.id}`}>{`${tab.archived ? "Archived. " : ""}${tab.busy ? tab.phaseText || tab.phase || "Working" : tab.mode === "native" ? "Native CLI" : "Readable session"}`}</span>
       {renaming !== tab.id && <button type="button" className="chat-options" aria-label={`Options for ${tab.name}`} aria-haspopup="menu" aria-expanded={menu === tab.id} aria-controls={menu === tab.id ? `chat-menu-${tab.id}` : undefined} onClick={(event) => { if (menu === tab.id) { setMenu(""); return; } menuOpener.current = event.currentTarget; const r = event.currentTarget.getBoundingClientRect(); openMenu(tab, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={12} /></button>}
       {renaming !== tab.id && <IconButton label={`Close ${tab.name} tab`} onClick={() => onClose(tab)}><X size={12} /></IconButton>}
       {menu === tab.id && createPortal(<div className="chat-menu" id={`chat-menu-${tab.id}`} ref={menuRef} role="menu" style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(""); const opener = menuOpener.current; menuOpener.current = null; if (opener?.isConnected) opener.focus(); else nav.current?.querySelector<HTMLButtonElement>(`[data-chat-id="${CSS.escape(tab.id)}"]`)?.focus(); } }}>
         <button ref={menuItem} role="menuitem" onClick={() => beginRename(tab)}>Rename chat</button>
         <button role="menuitem" onClick={() => { onCustomize(tab); setMenu(""); }}>Customize chat…</button>
+        <button role="menuitem" onClick={() => { onExportChat(tab); setMenu(""); }}>Export chat…</button>
         <button role="menuitem" onClick={() => { onArchiveChat(tab); setMenu(""); }}>{tab.archived ? "Restore chat" : "Archive chat"}</button>
         <button role="menuitem" onClick={() => { onClearChat(tab); setMenu(""); }}>Clear chat…</button>
         <button role="menuitem" onClick={() => { onClose(tab); setMenu(""); }}>Close chat</button>

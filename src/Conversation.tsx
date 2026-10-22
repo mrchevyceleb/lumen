@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import Markdown, { defaultUrlTransform } from "react-markdown";
+import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   ArrowDown,
@@ -28,7 +28,8 @@ import SessionControls, { lumenCommands, parseThreshold } from "./SessionControl
 import type { SessionControlsState } from "./types";
 import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames, foregroundFor } from "./settings";
-import { ChatLink, LinkText, rehypeWebLinks, webLink } from "./ChatLinks";
+import { ChatLink, LinkText, externalLink, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
+import { StreamingMarkdown } from "./stream-fade";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 // react-markdown renders a fenced block as <pre><code class="language-x">…</code></pre>. Pull the
 // raw text and language out of that tree so the copy button copies the code itself, never the
@@ -84,8 +85,10 @@ export default function Conversation({
   onSend,
   onStop,
   onFile,
+  onFileMenu,
   onWeb,
   onError,
+  onNotice,
   onNative,
   onFollowFolder,
   attachment,
@@ -106,8 +109,10 @@ export default function Conversation({
   onSend: (text: string) => Promise<boolean>;
   onStop: () => void;
   onFile: (path: string) => void;
+  onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
   onError: (message: string) => void;
+  onNotice: (message: string) => void;
   onNative: (draft?: string) => void;
   onFollowFolder: (folder: string) => void;
   attachment?: string;
@@ -249,6 +254,17 @@ export default function Conversation({
   const messages = useMemo<Message[]>(() => sending && !tab.messages.some((message) => message.id === sending.id)
     ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, delivery: "send", deliveryState: "sending" }]
     : tab.messages, [tab.messages, sending]);
+  // Only the reply being written right now fades word by word; everything
+  // already on screen stays still. The reply must sit after the newest user
+  // turn, or a send in flight would replay the previous answer's fade before
+  // the new one exists.
+  const streamingId = useMemo(() => {
+    if (!tab.busy) return undefined;
+    let lastUser = -1;
+    for (let index = messages.length - 1; index >= 0; index--) if (messages[index].role === "user") { lastUser = index; break; }
+    for (let index = messages.length - 1; index > lastUser; index--) if (messages[index].role === "assistant") return messages[index].id;
+    return undefined;
+  }, [tab.busy, messages]);
   useEffect(() => {
     if (stick.current)
       scroll.current?.scrollTo({
@@ -421,21 +437,24 @@ export default function Conversation({
                 key={message.id}
                 message={message}
                 tab={tab}
+                streaming={message.id === streamingId}
                 color={color}
                 onFile={onFile}
+                onFileMenu={onFileMenu}
                 onWeb={onWeb}
                 onError={onError}
+                onNotice={onNotice}
                 onSignIn={onSignIn}
               />
             ))}
             {tab.busy && (
-              <div className="working-indicator">
+              <div className="working-indicator" role="status" aria-live="polite">
                 {tab.phase ? <TerminalSquare size={13} /> : <span className="thinking-dots">
                   <i />
                   <i />
                   <i />
                 </span>}{" "}
-                {tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
+                {tab.phase === "retrying" ? (tab.phaseText || "Reconnecting…") : tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
                   ? "Running command"
                   : `${agentNames[tab.agent]} is working`}
               </div>
@@ -462,23 +481,26 @@ export default function Conversation({
           </div>
         )}
       </div>
-      {away && (
-        <button
-          className="jump-bottom"
-          aria-label="Jump to latest message"
-          onClick={() => {
-            stick.current = true;
-            scroll.current?.scrollTo({
-              top: scroll.current.scrollHeight,
-              behavior: "smooth",
-            });
-            setAway(false);
-          }}
-        >
-          <ArrowDown size={18} />
-        </button>
-      )}
       <div className="composer-wrap">
+        {/* Anchored to the composer, not the window: when the toolbar wraps on a
+            narrow chat the composer grows, and a fixed offset would land the
+            arrow on top of the model picker. */}
+        {away && (
+          <button
+            className="jump-bottom"
+            aria-label="Jump to latest message"
+            onClick={() => {
+              stick.current = true;
+              scroll.current?.scrollTo({
+                top: scroll.current.scrollHeight,
+                behavior: "smooth",
+              });
+              setAway(false);
+            }}
+          >
+            <ArrowDown size={18} />
+          </button>
+        )}
         {tab.agent !== "shell" && <QueuedMessages tab={tab} onConfig={onConfig} />}
         {tab.agent === "shell" && tab.cwd && tab.cwd !== tab.root && (
           <button
@@ -644,17 +666,23 @@ function MessageView({
   message: m,
   tab,
   color,
+  streaming,
   onFile,
+  onFileMenu,
   onWeb,
   onError,
+  onNotice,
   onSignIn,
 }: {
   message: Message;
   tab: Tab;
   color: string;
+  streaming: boolean;
   onFile: (path: string) => void;
+  onFileMenu: (path: string) => void;
   onWeb: (url: string) => void;
   onError: (message: string) => void;
+  onNotice: (message: string) => void;
   onSignIn: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -733,13 +761,20 @@ function MessageView({
         </pre>
       ) : (
         <div className="prose">
-          <Markdown
+          <StreamingMarkdown
+            text={m.text}
+            animate={streaming}
+            animationKey={m.id}
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeWebLinks]}
-            urlTransform={(url) => webLink(url) || defaultUrlTransform(url)}
+            // defaultUrlTransform drops things like C:/Users/... because it reads
+            // "C:" as an unknown protocol, and it drops tel: outright. A file path
+            // and a phone number are what ChatLink knows how to open, so keep both
+            // intact and let it decide.
+            urlTransform={(url) => webLink(url) || externalLink(url) || filePathFromHref(url) || defaultUrlTransform(url)}
             components={{
               a: ({ href, children }) => (
-                <ChatLink href={href} onWeb={onWeb} onError={onError} onFile={onFile}>{children}</ChatLink>
+                <ChatLink href={href} onWeb={onWeb} onError={onError} onNotice={onNotice} onFile={onFile} onFileMenu={onFileMenu}>{children}</ChatLink>
               ),
               pre: ({ children }) => {
                 const language = languageOf(children);
@@ -754,9 +789,7 @@ function MessageView({
                 );
               },
             }}
-          >
-            {m.text}
-          </Markdown>
+          />
         </div>
       )}
     </div>

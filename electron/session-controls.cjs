@@ -6,13 +6,62 @@ const TOML = require("@iarna/toml");
 const net = require("node:net");
 const WebSocket = require("ws");
 const { cliOptions } = require("./models.cjs");
-const { codexAccountOptions } = require("./accounts.cjs");
+const { codexAccountOptions, renameWithRetry } = require("./accounts.cjs");
 const uuid = () => crypto.randomUUID();
 const withoutNulls = (value) => Array.isArray(value) ? value.map(withoutNulls) : value && typeof value === "object" ?
   Object.fromEntries(Object.entries(value).filter(([, v]) => v !== null).map(([k, v]) => [k, withoutNulls(v)])) : value;
+// A local MCP server (Unity's bridge at 127.0.0.1:8091 is the usual one) can be
+// closed while its entry stays in Codex's config. Codex then keeps retrying the
+// dead socket and the chat stalls behind it. Probe local endpoints before the
+// thread starts and leave out only the ones that are not listening; a server
+// that is running passes through untouched. Nothing on disk is changed.
+const LOCAL_MCP_TIMEOUT_MS = 350;
+function localMcpAddress(value) {
+  let url;
+  try { url = new URL(String(value)); } catch { return null; }
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) return null;
+  let host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/^::ffff:/, "");
+  if (host === "localhost") {
+    // Most servers answer on one family only; let the resolver try both.
+  } else if (host === "0.0.0.0") host = "127.0.0.1";
+  else if (!/^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1)$/.test(host)) return null;
+  const secure = url.protocol === "https:" || url.protocol === "wss:";
+  const port = Number(url.port || (secure ? 443 : 80));
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) return null;
+  return { host, port };
+}
+function mcpListening({ host, port }) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port, autoSelectFamily: true });
+    const finish = (listening) => { socket.destroy(); resolve(listening); };
+    socket.setTimeout(LOCAL_MCP_TIMEOUT_MS, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+async function withoutClosedLocalServers(servers) {
+  const result = { ...servers }, skipped = [];
+  await Promise.all(Object.entries(servers).map(async ([name, server]) => {
+    if (!server || typeof server !== "object" || server.enabled === false) return;
+    const address = localMcpAddress(server.url);
+    if (!address || await mcpListening(address)) return;
+    result[name] = { ...server, enabled: false };
+    skipped.push(name);
+  }));
+  return { servers: result, skipped: skipped.sort() };
+}
+async function codexThreadServers(s, loaded) {
+  const probed = await withoutClosedLocalServers(loaded);
+  const servers = probed.servers;
+  for (const [name, enabled] of Object.entries(s.mcpOverrides)) if (servers[name]) servers[name] = { ...servers[name], enabled };
+  // The probe is current and an override is a memory, so a server that is not
+  // listening now stays out even if it was switched on in an earlier visit.
+  for (const name of probed.skipped) if (servers[name]) servers[name] = { ...servers[name], enabled: false };
+  return { servers, skipped: probed.skipped, any: Object.keys(s.mcpOverrides).length > 0 || probed.skipped.length > 0 };
+}
 const exists = (file) => fs.stat(file).then(() => true, () => false);
 const jsonFile = (file) => fs.readFile(file, "utf8").then(JSON.parse).catch((error) => { if (error.code === "ENOENT") return {}; throw error; });
-const atomicWrite = async (file, text) => { const temporary = file + "." + uuid() + ".tmp"; await fs.writeFile(temporary, text, { mode: 0o600 }); await fs.rename(temporary, file); };
+const atomicWrite = async (file, text) => { const temporary = file + "." + uuid() + ".tmp"; await fs.writeFile(temporary, text, { mode: 0o600 }); await renameWithRetry(temporary, file); };
 const inFolder = (root, child) => { const relative = path.relative(root, child); return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative); };
 const sessionId = (value) => typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
 
@@ -328,9 +377,14 @@ class Runtime {
     } else if (s.agent === "codex") this.codexEvent(e);
     else this.grokEvent(e);
   }
-  phase(compacting) {
-    this.s.phase = compacting ? "compacting" : undefined;
-    this.owner.event(this.s, { type: "phase", phase: this.s.phase });
+  // The phase is the live status the composer shows under a running turn. It is
+  // separate from messages on purpose: a transport hiccup that Codex retries
+  // belongs in the status line, not in the transcript as a failure card.
+  phase(value, text) {
+    const next = value === true ? "compacting" : value || undefined;
+    this.s.phase = ["compacting", "retrying", "waiting", "finishing"].includes(next) ? next : undefined;
+    this.s.phaseText = this.s.phase && typeof text === "string" ? text : undefined;
+    this.owner.event(this.s, { type: "phase", phase: this.s.phase, text: this.s.phaseText });
   }
   async initialize() {
     const { owner: o, s } = this;
@@ -402,11 +456,14 @@ class Runtime {
       await this.request("initialize", { clientInfo: { name: "lumen", version: require("../package.json").version }, capabilities: { experimentalApi: true } });
       this.write({ method: "initialized" });
       const loaded = withoutNulls((await this.request("config/read", { cwd: s.cwd, includeLayers: false })).config?.mcp_servers || {});
+      this.loadedServers = loaded;
       this.localServers = Object.keys(loaded);
       s.codexLocalServers = this.localServers;
-      const servers = { ...loaded };
-      for (const [name, enabled] of Object.entries(s.mcpOverrides)) if (servers[name]) servers[name] = { ...servers[name], enabled };
-      const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", config: { ...codexConfig(s), ...(Object.keys(s.mcpOverrides).length ? { mcp_servers: servers } : {}) }, ...(s.model ? { model: s.model } : {}) };
+      const servers = await codexThreadServers(s, loaded);
+      this.threadServers = servers.servers;
+      this.skippedServers = servers.skipped;
+      if (servers.skipped.length) this.noteClosedServers(servers.skipped);
+      const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", config: { ...codexConfig(s), ...(servers.any ? { mcp_servers: servers.servers } : {}) }, ...(s.model ? { model: s.model } : {}) };
       const resuming = !!s.sessionRef;
       // The installed daemon's paginated-history implementation does not yet
       // persist empty threads reliably. Legacy history can materialize an empty
@@ -464,7 +521,7 @@ class Runtime {
       s.codexPluginIds = Object.fromEntries(raw.filter((r) => r.pluginId).map((r) => [r.name, r.pluginId]));
       if (s.mcpOverrides.codex_apps === false && !raw.some((r) => r.name === "codex_apps")) raw.push({ name: "codex_apps", runtimeStatus: "disabled", tools: {} });
       return raw.map((r) => ({ name: r.name, status: r.runtimeStatus || (r.authStatus === "notLoggedIn" ? "needs-auth" : "configured"),
-        enabled: s.mcpOverrides[r.name] ?? r.runtimeStatus !== "disabled", tools: r.tools ? Object.keys(r.tools).length : null, source: r.pluginId ? "Plugin" : "Codex", canToggle: r.name === "codex_apps" || !!r.pluginId || this.localServers.includes(r.name) }));
+        enabled: this.skippedServers?.includes(r.name) ? false : s.mcpOverrides[r.name] ?? r.runtimeStatus !== "disabled", tools: r.tools ? Object.keys(r.tools).length : null, source: r.pluginId ? "Plugin" : "Codex", canToggle: r.name === "codex_apps" || !!r.pluginId || this.localServers.includes(r.name) }));
     }
     raw = (await this.request("_x.ai/mcp/list", { sessionId: s.sessionRef, cache: true })).servers || [];
     this.rawServers = raw;
@@ -761,9 +818,48 @@ class Runtime {
       o.event(s, { type: "diagnostic", key: "auto-compact", text: "Context compacted. This conversation is ready to continue." });
     } finally { this.phase(false); }
   }
+  // One calm line in the chat when a configured local MCP server was closed, so
+  // an agent that suddenly lacks a tool has a visible reason.
+  noteClosedServers(names) {
+    const list = names.join(", ");
+    this.owner.event(this.s, { type: "diagnostic", key: "mcp-closed", replace: true, title: "MCP server not running",
+      text: `${list} ${names.length > 1 ? "are" : "is"} not running, so this chat started without ${names.length > 1 ? "them" : "it"}. Start ${names.length > 1 ? "them" : "it"} and ${names.length > 1 ? "they come" : "it comes"} back on your next message.` });
+  }
+  // A chat that was already running when a local MCP server closed keeps
+  // retrying it. Probe once on the first retry; if a server that this thread
+  // actually had is closed now, the next message reconfigures without it. A
+  // server that was already left out is not a new problem and stays quiet.
+  async replanClosedServers() {
+    const { s } = this;
+    if (this.closed || s.codexReconfigure || !this.threadServers || this.probingServers) return;
+    this.probingServers = true;
+    try {
+      const { skipped } = await withoutClosedLocalServers(this.threadServers);
+      if (!skipped.length) return;
+      s.codexReconfigure = true;
+      this.owner.event(s, { type: "diagnostic", key: "mcp-closed", replace: true, title: "MCP server not running",
+        text: `${skipped.join(", ")} ${skipped.length > 1 ? "are" : "is"} not running. Your next message continues without ${skipped.length > 1 ? "them" : "it"}.` });
+    } finally { this.probingServers = false; }
+  }
+  // Before a turn, a server that was left out because it was closed gets
+  // another look: if it is listening now, the thread is rebuilt with it.
+  async reopenedServers() {
+    if (!this.skippedServers?.length || !this.loadedServers) return;
+    for (const name of this.skippedServers) {
+      const address = localMcpAddress(this.loadedServers[name]?.url);
+      if (address && await mcpListening(address)) { this.s.codexReconfigure = true; return; }
+    }
+  }
   codexEvent(e) {
     const { owner: o, s } = this, p = e.params || {};
     if (p.threadId && p.threadId !== s.sessionRef) return;
+    // Codex retries a dropped model stream on its own. The first real output of
+    // this turn means the stream is back, so the retrying status has done its
+    // job. Only this turn's output counts: a late event from an older turn is
+    // rejected below and must not hide an in-progress reconnect.
+    const turnId = p.turn?.id || p.turnId;
+    if (s.phase === "retrying" && turnId && turnId === this.activeTurnId &&
+      ["item/started", "item/completed", "item/agentMessage/delta", "item/reasoning/textDelta"].includes(e.method)) this.phase(false);
     if (e.method === "serverRequest/resolved") for (const [id, requestId] of this.serverUiRequests) if (requestId === p.requestId) {
       this.serverUiRequests.delete(id); this.uiRequests.delete(id); o.event(s, { type: "agent_ui_cancel", request: { id } });
     }
@@ -779,7 +875,18 @@ class Runtime {
       if (item?.type === "contextCompaction") this.phase(e.method === "item/started");
     }
     if (e.method === "thread/tokenUsage/updated") { this.context = p.tokenUsage?.last?.totalTokens ?? null; this.contextWindow = p.tokenUsage?.modelContextWindow ?? null; this.reportContext(); }
-    if (e.method === "error") { if (require("./auth.cjs").authError(JSON.stringify(p.error))) { this.authFailed = true; s.authInvalid = true; } o.event(s, { type: "error", message: p.error?.message || "Codex turn failed." }); }
+    if (e.method === "error") {
+      if (require("./auth.cjs").authError(JSON.stringify(p.error))) { this.authFailed = true; s.authInvalid = true; }
+      const message = p.error?.message || "Codex turn failed.";
+      // willRetry means Codex is reconnecting by itself and the turn is still
+      // alive. A red failure card for each attempt buried real answers under
+      // "Something needs attention" whenever the connection blinked.
+      if (p.willRetry) {
+        this.phase("retrying", message);
+        o.event(s, { type: "diagnostic", key: "codex-retry", replace: true, title: "Codex is reconnecting", text: message });
+        void this.replanClosedServers().catch(() => {});
+      } else { this.phase(false); o.event(s, { type: "error", message }); }
+    }
     if (e.method === "turn/completed") {
       if (p.turn?.id && this.activeTurnId && p.turn.id !== this.activeTurnId) return;
       this.activeTurnId = null;
@@ -830,11 +937,14 @@ class Runtime {
     const { s } = this;
     await this.waitForRollout();
     const loaded = withoutNulls((await this.request("config/read", { cwd: s.cwd, includeLayers: false })).config?.mcp_servers || {});
-    const servers = { ...loaded };
-    for (const [name, enabled] of Object.entries(s.mcpOverrides)) if (servers[name]) servers[name] = { ...servers[name], enabled };
+    this.loadedServers = loaded;
+    const servers = await codexThreadServers(s, loaded);
+    this.threadServers = servers.servers;
+    this.skippedServers = servers.skipped;
+    if (servers.skipped.length) this.noteClosedServers(servers.skipped);
     await this.request("thread/unsubscribe", { threadId: s.sessionRef });
     const result = await this.request("thread/resume", { threadId: s.sessionRef, cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", excludeTurns: true,
-      config: { ...codexConfig(s), ...(Object.keys(s.mcpOverrides).length ? { mcp_servers: servers } : {}) }, ...(s.model ? { model: s.model } : {}) });
+      config: { ...codexConfig(s), ...(servers.any ? { mcp_servers: servers.servers } : {}) }, ...(s.model ? { model: s.model } : {}) });
     if (result.thread.id !== s.sessionRef) throw new Error("Codex returned a different conversation. The saved chat has been retained.");
     this.rolloutPath = result.thread.path;
     s.codexReconfigure = false;
@@ -895,6 +1005,7 @@ async function ensureRuntime(owner, s) {
   s.authChanged = false;
   if (s.runtime) {
     await s.runtime.ready;
+    if (s.agent === "codex" && !s.codexReconfigure) await s.runtime.reopenedServers().catch(() => {});
     if (s.agent !== "codex" || !s.codexReconfigure) return s.runtime;
     await s.runtime.reconfigureCodex();
     return s.runtime;
