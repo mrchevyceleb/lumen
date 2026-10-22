@@ -50,6 +50,10 @@ const chatScope = (chatId) => {
   return CHAT_SCOPE_PREFIX + chatId.toLowerCase();
 };
 // Built-in phone widths (CSS px at devicePixelRatio 3, Chrome mobile user agents).
+// The smallest device-emulation scale Chromium actually honours. Measured on this build: a fitted
+// scale of 0.51 draws the whole page, 0.42 is silently ignored and the page is drawn cropped at
+// 1:1 inside the smaller box (heading and bottom bar fall outside it). Stay just above the floor.
+const MIN_EMULATION_SCALE = 0.52;
 const DEVICE_PROFILES = {
   iphone: { width: 390, height: 844, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1" },
   pixel: { width: 412, height: 915, userAgent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36" },
@@ -158,10 +162,19 @@ class BrowserService {
         remaining -= tabs.length;
         const store = legacy ? this.legacy : this.groups, key = legacy ? workspace : scope;
         const current = store.get(key);
+        // Profiles saved before duplicate clicks were merged can hold the same
+        // page several times; restoring one of each keeps the saved tab list
+        // honest instead of bringing the duplicates back forever.
+        const seen = new Set((current?.tabs || []).map((tab) => tab.url));
+        const unique = tabs.filter((tab) => {
+          if (tab.url !== "about:blank" && seen.has(tab.url)) return false;
+          if (tab.url !== "about:blank") seen.add(tab.url);
+          return true;
+        });
         if (current) {
-          current.tabs.push(...tabs);
-          if (!current.activeId) current.activeId = tabs[group.activeIndex]?.id || tabs[0]?.id || "";
-        } else store.set(key, { tabs, activeId: tabs[group.activeIndex]?.id || tabs[0]?.id || "" });
+          current.tabs.push(...unique);
+          if (!current.activeId) current.activeId = unique[group.activeIndex]?.id || unique[0]?.id || "";
+        } else store.set(key, { tabs: unique, activeId: unique[group.activeIndex]?.id || unique[0]?.id || "" });
       }
     } catch { /* A new profile starts with an empty browser. */ }
     window.webContents.on("did-start-loading", () => this.layout(null));
@@ -391,6 +404,23 @@ class BrowserService {
     if (!size || !this.bounds?.width || !this.bounds?.height) return 1;
     return Math.min(1, this.bounds.width / size.width, this.bounds.height / size.height);
   }
+  // Chromium silently refuses a device-emulation scale below roughly a quarter, keeping the
+  // override at its floor. The view then holds a scaled-down box while the page inside still lays
+  // out at full device width, so the phone view showed a cropped sliver of the page (heading and
+  // bottom bar outside the box) in a narrow pane. Emulating a proportionally smaller phone keeps
+  // the requested scale above that floor, so the whole page always fits.
+  emulatedView(size) {
+    const fit = this.fitScale(size);
+    if (fit >= MIN_EMULATION_SCALE) return { size, scale: fit };
+    const ratio = fit / MIN_EMULATION_SCALE;
+    return {
+      size: {
+        width: Math.max(1, Math.round(size.width * ratio)),
+        height: Math.max(1, Math.round(size.height * ratio)),
+      },
+      scale: MIN_EMULATION_SCALE,
+    };
+  }
   deviceSize(view) {
     const normalized = normalizeView(view);
     if (normalized.mode !== "mobile") return null;
@@ -405,7 +435,8 @@ class BrowserService {
     const size = this.deviceSize(tab.view);
     if (!size) return "desktop";
     const view = normalizeView(tab.view);
-    return `${view.device}:${view.orientation}:${Math.round(this.fitScale(size) * 1000)}`;
+    const fitted = this.emulatedView(size);
+    return `${view.device}:${view.orientation}:${Math.round(fitted.scale * 1000)}:${fitted.size.width}x${fitted.size.height}`;
   }
   applyEmulation(tab) {
     if (!tab.nativeView || tab.nativeView.webContents.isDestroyed()) return;
@@ -452,10 +483,10 @@ class BrowserService {
     try {
       // No userAgent option on this Electron: set it on the contents itself.
       contents.setUserAgent(profile.userAgent);
-      const scale = this.fitScale(size);
-      contents.enableDeviceEmulation({ screenPosition: "mobile", screenSize: size, viewPosition: { x: 0, y: 0 }, viewSize: size,
-        deviceScaleFactor: 3, scale });
-      tab.appliedScale = scale;
+      const fitted = this.emulatedView(size);
+      contents.enableDeviceEmulation({ screenPosition: "mobile", screenSize: fitted.size, viewPosition: { x: 0, y: 0 }, viewSize: fitted.size,
+        deviceScaleFactor: 3, scale: fitted.scale });
+      tab.appliedScale = fitted.scale;
     } catch { try { contents.disableDeviceEmulation(); } catch { /* Keep desktop rendering. */ } }
   }
   markEmulationReady(tab, contents) {
@@ -604,9 +635,9 @@ class BrowserService {
     const device = this.deviceSize(tab.view);
     if (!device) { view.setBounds(this.bounds); }
     else {
-      const scale = this.fitScale(device);
-      const width = Math.max(1, Math.round(device.width * scale));
-      const height = Math.min(this.bounds.height, Math.max(1, Math.round(device.height * scale)));
+      const fitted = this.emulatedView(device);
+      const width = Math.max(1, Math.min(this.bounds.width, Math.round(fitted.size.width * fitted.scale)));
+      const height = Math.min(this.bounds.height, Math.max(1, Math.round(fitted.size.height * fitted.scale)));
       view.setBounds({ x: this.bounds.x + Math.floor((this.bounds.width - width) / 2), y: this.bounds.y + Math.max(0, Math.floor((this.bounds.height - height) / 2)), width, height });
     }
     // Emulation has to land after the view holds its final size: Chromium drops an override
@@ -771,7 +802,23 @@ class BrowserService {
       if (!scope) throw bad("Choose a chat before using its browser.");
       if (Object.hasOwn(body, "workspace") && typeof body.workspace !== "string") throw bad("Invalid browser workspace.");
       this.adoptLegacy(scope, typeof body.workspace === "string" ? body.workspace : "");
-      return this.create(scope, body.url ?? "about:blank");
+      // A person clicking the same chat link twice means "show me that page",
+      // not "give me another copy of it". Only link clicks ask for reuse; the
+      // agent browser actions still open the new tab they asked for.
+      const target = body.url ?? "about:blank";
+      if (body.reuse === true) {
+        const normalized = browserURL(target), group = this.groups.get(scope);
+        const open = normalized !== "about:blank" && group?.tabs.find((tab) => tab.url === normalized || tab.pendingURL === normalized);
+        if (open) {
+          group.activeId = open.id;
+          // A page that failed last time gets another try instead of leaving the
+          // link pointing at its error screen.
+          if (open.error) { open.error = ""; this.load(open, normalized); }
+          this.sync(); this.emit(true);
+          return this.metadata(open);
+        }
+      }
+      return this.create(scope, target);
     }
     // Validate the action before looking the tab up, so an unknown action names itself instead
     // of borrowing the misleading "That browser tab is closed" message.

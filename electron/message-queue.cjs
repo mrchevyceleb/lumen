@@ -44,7 +44,15 @@ class MessageQueue {
   }
   async action(id, action) {
     if (this.closed || this.pending || this.s.stopping || this.s.transitioning) throw new Error("Wait for the current message action to finish.");
-    if (action === "resume") { if (this.s.mode !== "rich") throw new Error("Return to readable view to send queued messages."); this.paused = false; this.emit(); void this.drain(); return this.state(); }
+    if (action === "resume") {
+      if (this.s.mode !== "rich") throw new Error("Return to readable view to send queued messages.");
+      // Resume is the explicit retry: the user has seen the delivery warning and
+      // chose to send this message again. Without clearing the flag, drain paused
+      // straight back and the button could never do anything.
+      const head = this.items[0];
+      if (head?.deliveryUncertain) { head.deliveryUncertain = false; head.state = "queued"; }
+      this.paused = false; this.emit(); void this.drain(); return this.state();
+    }
     const entry = this.items.find((m) => m.id === id);
     if (!entry) throw new Error("This message has already left the queue.");
     if (action === "remove") { if (entry.deliveryUncertain) this.owner.event(this.s, { type: "message-delivery-state", messageId: entry.id, deliveryState: "uncertain" }); this.items = this.items.filter((m) => m !== entry); this.emit(); return this.state(); }

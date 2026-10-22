@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { Archive, FolderOpen, Plus, Pin, MoreHorizontal, GripVertical, ChevronRight, ChevronDown, ListTree, PanelTop, PanelLeftClose, TerminalSquare, Sparkles } from "lucide-react";
 import SessionTabs, { type SessionTabActions } from "./SessionTabs";
 import type { Settings, Tab } from "./types";
@@ -16,7 +17,7 @@ export function normalizeProjects(values: unknown): Project[] {
   return values.filter((p, i) => p && typeof p.root === "string" && typeof p.name === "string" && !values.slice(0, i).some((q) => q && typeof q.root === "string" && sameProject(p.root, q.root))).map((p) => ({ root: p.root, name: p.name, pinned: p.pinned === true, hidden: p.hidden === true, collapsed: p.collapsed === true, color: typeof p.color === "string" && /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : undefined }));
 }
 
-export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onTerminal, onScratch, onChange, onArchive, tabs, activeId, settings, onSelect, onCustomize, onRename, onClose, onArchiveChat, onLayout, onNewChat, newChatRoot, onCollapse, showArchived, onToggleArchived, onLeaveHidden }: SessionTabActions & {
+export default function ProjectSidebar({ projects, activeRoot, counts, ready, onOpen, onAdd, onTerminal, onScratch, onChange, onArchive, tabs, activeId, settings, onSelect, onCustomize, onRename, onClose, onArchiveChat, onClearChat, onExportChat, onLayout, onNewChat, newChatRoot, onCollapse, showArchived, onToggleArchived, onLeaveHidden }: SessionTabActions & {
   projects: Project[]; activeRoot: string; counts: Record<string, number>; ready: boolean;
   tabs: Tab[]; activeId: string; settings: Settings; onLayout: () => void; onNewChat: (root: string) => void; newChatRoot?: string;
   onOpen: (project: Project, reveal?: boolean) => void; onAdd: () => void; onTerminal: () => void; onScratch: () => void; onChange: (projects: Project[]) => void; onArchive: (project: Project) => void; onCollapse: () => void;
@@ -27,6 +28,53 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   const scratch = tabs.filter((tab) => tab.projectless && (showArchived || !tab.archived));
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState("");
+  const [menuBox, setMenuBox] = useState<{ top: number; left: number; flipX?: number; flipY?: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuOpener = useRef<HTMLElement | null>(null);
+  // One placement path for the right-click and … openers: put the menu by the pointer or the
+  // button, then measure it after mount and clamp it into the viewport (flipping above the
+  // anchor when it would spill off the bottom). The menu is portaled to the app root because
+  // the sidebar's backdrop-filter and overflow would otherwise shift and clip a fixed menu.
+  const openMenu = (root: string, point: { x: number; y: number }, fallback?: { right: number; top: number }) => {
+    menuOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setMenuBox({ top: point.y, left: point.x, flipX: fallback?.right, flipY: fallback ? fallback.top - 4 : undefined });
+    setMenu(root);
+  };
+  const openContextMenu = (event: React.MouseEvent, project: Project) => {
+    event.preventDefault();
+    // Only the row's own controls are off limits: renaming must keep the native text menu,
+    // and the … button keeps its own toggle. Right-clicking the row or its open button opens.
+    if (renaming === project.root || (event.target as HTMLElement).closest("input, .project-options, .project-menu")) return;
+    onOpen(project, false);
+    openMenu(project.root, { x: event.clientX, y: event.clientY });
+  };
+  const closeMenu = (restoreFocus = false) => {
+    setMenu("");
+    if (restoreFocus) {
+      const opener = menuOpener.current;
+      menuOpener.current = null;
+      if (opener?.isConnected) opener.focus();
+      else {
+        const project = projects.find((item) => item.root === menu);
+        if (project) container.current?.querySelector<HTMLButtonElement>(`[title="${CSS.escape(project.root)}"]`)?.focus();
+      }
+    }
+  };
+  const focusMenuItem = (index: number) => {
+    const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])];
+    items[(index + items.length) % items.length]?.focus();
+  };
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!menu || !el || !menuBox) return;
+    const rect = el.getBoundingClientRect();
+    let top = menuBox.top, left = menuBox.left;
+    if (menuBox.flipY !== undefined && top + rect.height > window.innerHeight - 8) top = menuBox.flipY - rect.height;
+    if (menuBox.flipX !== undefined && left + rect.width > window.innerWidth - 8) left = Math.max(8, menuBox.flipX - rect.width);
+    top = Math.max(8, Math.min(top, Math.max(8, window.innerHeight - rect.height - 8)));
+    left = Math.max(8, Math.min(left, Math.max(8, window.innerWidth - rect.width - 8)));
+    if (top !== menuBox.top || left !== menuBox.left) setMenuBox({ top, left });
+  });
   const [adding, setAdding] = useState(false);
   const [renaming, setRenaming] = useState("");
   const [name, setName] = useState("");
@@ -35,10 +83,27 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   const container = useRef<HTMLDivElement>(null);
   const dragProject = useRef("");
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node)) { setMenu(""); setAdding(false); } };
+    const close = (event: PointerEvent) => { if (!container.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) { closeMenu(true); setAdding(false); } };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, []);
+  useEffect(() => {
+    if (!menu) return;
+    // Same rule as the chat menus: a pointer down on a different row, or any scroll or
+    // resize, closes the project menu instead of leaving it aimed at the wrong project.
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target)) return;
+      if ((target as Element).closest?.(".project-row")?.querySelector(".project-open")?.getAttribute("title") === menu) return;
+      closeMenu(true);
+    };
+    const dismiss = () => closeMenu(true);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", dismiss);
+    const scroller = container.current?.querySelector(".project-scroll");
+    scroller?.addEventListener("scroll", dismiss, { passive: true });
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", dismiss); scroller?.removeEventListener("scroll", dismiss); };
+  }, [menu]);
   useEffect(() => { if (projects.length <= 4) setQuery(""); }, [projects.length]);
   useEffect(() => {
     if (showArchived) return;
@@ -118,36 +183,37 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
           onDragOver={(e) => { if (isProjectDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setOver(project.root); } }}
           onDragEnter={(e) => { if (isProjectDrag(e)) { e.preventDefault(); setOver(project.root); } }}
           onDragLeave={(e) => { if (e.currentTarget === e.target) setOver(""); }}
-          onDrop={(e) => { e.preventDefault(); dropProject(e, project); }}>
+          onDrop={(e) => { e.preventDefault(); dropProject(e, project); }}
+          onContextMenu={(e) => openContextMenu(e, project)}>
           <span className="project-grip" role="button" tabIndex={0} aria-label={`Drag to reorder ${project.name}`} draggable onDragStart={(e) => startProjectDrag(e, project)} onDragEnd={finishProjectDrag} onKeyDown={(e) => { if (e.key === "ArrowUp") { e.preventDefault(); moveWithin(project, -1); } if (e.key === "ArrowDown") { e.preventDefault(); moveWithin(project, 1); } }} title="Drag to reorder, or use arrow keys"><GripVertical size={12} /></span>
           {vertical && <button className="project-collapse" aria-label={`${project.collapsed ? "Expand" : "Collapse"} chats for ${project.name}`} aria-expanded={!project.collapsed} aria-controls={`chats-${encodeURIComponent(project.root)}`} onClick={() => onChange(projects.map((p) => p.root === project.root ? { ...p, collapsed: !p.collapsed } : p))}>{project.collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>}
           {renaming === project.root ? <input autoFocus aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => rename(project)} onKeyDown={(e) => { if (e.key === "Enter") rename(project); if (e.key === "Escape") setRenaming(""); }} /> : <button className="project-open" title={project.root} aria-current={sameProject(activeRoot, project.root) ? "true" : undefined} disabled={!ready} onClick={() => onOpen(project)}><FolderOpen size={16} /><span>{project.name}</span>{pinned && <Pin className="project-pin-mark" size={10} aria-label="Pinned" />}{!!counts[project.root] && <small>{counts[project.root]}</small>}</button>}
           {vertical && <button className="project-options" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} aria-expanded={newChatRoot !== undefined && sameProject(newChatRoot, project.root)} aria-controls={newChatRoot !== undefined && sameProject(newChatRoot, project.root) ? "new-chat-menu" : undefined} disabled={!ready} onClick={() => onNewChat(project.root)}><Plus size={13} /></button>}
-          <button className="project-options" aria-label={`Options for ${project.name}`} aria-expanded={menu === project.root} onClick={() => setMenu(menu === project.root ? "" : project.root)}><MoreHorizontal size={13} /></button>
-          {menu === project.root && <div className="project-menu"><button onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, pinned: !p.pinned } : p)); setMenu(""); }}>{project.pinned ? "Unpin project" : "Pin project"}</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button><button onClick={() => moveWithin(project, -1)}>Move up</button><button onClick={() => moveWithin(project, 1)}>Move down</button>
+          <button className="project-options" aria-label={`Options for ${project.name}`} aria-haspopup="menu" aria-expanded={menu === project.root} onClick={(e) => { if (menu === project.root) { closeMenu(true); return; } const r = e.currentTarget.getBoundingClientRect(); menuOpener.current = e.currentTarget; openMenu(project.root, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={13} /></button>
+          {menu === project.root && createPortal(<div className="project-menu" ref={menuRef} role="menu" aria-label={`Options for ${project.name}`} style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(e) => { const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])]; const index = items.indexOf(document.activeElement as HTMLButtonElement); if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } else if (e.key === "ArrowDown") { e.preventDefault(); focusMenuItem(index + 1); } else if (e.key === "ArrowUp") { e.preventDefault(); focusMenuItem(index - 1); } else if (e.key === "Home") { e.preventDefault(); focusMenuItem(0); } else if (e.key === "End") { e.preventDefault(); focusMenuItem(items.length - 1); } }}><button autoFocus role="menuitem" onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, pinned: !p.pinned } : p)); setMenu(""); }}>{project.pinned ? "Unpin project" : "Pin project"}</button><button role="menuitem" onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button><button role="menuitem" onClick={() => moveWithin(project, -1)}>Move up</button><button role="menuitem" onClick={() => moveWithin(project, 1)}>Move down</button>
             <span className="project-color-label">Project color</span><div className="project-colors" role="group" aria-label={`Color for ${project.name}`}>
               {projectColors.map(([label, color]) => <button key={color} aria-label={`${label} project color`} title={label} aria-pressed={project.color === color} style={{ background: color }} onClick={() => colorProject(project, color)} />)}
               <input type="color" aria-label={`Custom project color for ${project.name}`} title="Custom color" value={project.color || "#60a5fa"} onChange={(e) => colorProject(project, e.target.value)} />
-            </div><button onClick={() => colorProject(project)}>Reset color</button>
-            <button className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>}
+            </div><button role="menuitem" onClick={() => colorProject(project)}>Reset color</button>
+            <button role="menuitem" className="remove-project" disabled={!ready} onClick={() => archive(project)}>Archive project<small>Keep files and chats · restore anytime</small></button></div>, container.current?.closest(".app") || document.body)}
         </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
-          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} />
+          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onClearChat={onClearChat} onExportChat={onExportChat} />
         </div>}</div>)}
       </section>)}
       {vertical && <div className="scratch-chats"><div className="scratch-heading"><button aria-label={`${scratchCollapsed ? "Expand" : "Collapse"} chats without a workspace`} aria-expanded={!scratchCollapsed} onClick={() => scratch.length ? setScratchCollapsed(!scratchCollapsed) : onScratch()}>{scratchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}<FolderOpen size={15} /><span>No workspace</span><small>{scratch.length}</small></button><button aria-label="New chat without workspace" disabled={!ready} aria-expanded={newChatRoot === ""} aria-controls={newChatRoot === "" ? "new-chat-menu" : undefined} onClick={() => onNewChat("")}><Plus size={13} /></button></div>
-        <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} /></div>
+        <div hidden={scratchCollapsed}><SessionTabs tabs={scratch} activeId={activeId} settings={settings} vertical label="Chats without a workspace" onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onClearChat={onClearChat} onExportChat={onExportChat} /></div>
       </div>}
       {revealArchived && !!archived.length && <section className="archived-projects" aria-label="Archived projects">
         {!!archivedMatches.length && <div className="project-group"><Archive size={10} /> Archived</div>}
-        {archivedMatches.map((project) => <div key={project.root} className="project-entry"><div className={`project-row archived ${project.color ? "has-color" : ""} ${sameProject(activeRoot, project.root) ? "selected" : ""}`} style={{ "--project-color": project.color } as CSSProperties}>
+        {archivedMatches.map((project) => <div key={project.root} className="project-entry"><div className={`project-row archived ${project.color ? "has-color" : ""} ${sameProject(activeRoot, project.root) ? "selected" : ""}`} style={{ "--project-color": project.color } as CSSProperties} onContextMenu={(e) => openContextMenu(e, project)}>
           <span className="project-grip" />
           {vertical && <button className="project-collapse" aria-label={`${project.collapsed ? "Expand" : "Collapse"} chats for ${project.name}`} aria-expanded={!project.collapsed} aria-controls={`chats-${encodeURIComponent(project.root)}`} onClick={() => onChange(projects.map((p) => p.root === project.root ? { ...p, collapsed: !p.collapsed } : p))}>{project.collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>}
           {renaming === project.root ? <input autoFocus aria-label="Project name" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => rename(project)} onKeyDown={(e) => { if (e.key === "Enter") rename(project); if (e.key === "Escape") setRenaming(""); }} /> : <button className="project-open" title={project.root} aria-current={sameProject(activeRoot, project.root) ? "true" : undefined} disabled={!ready} onClick={() => onOpen(project, false)}><FolderOpen size={16} /><span>{project.name}</span>{!!counts[project.root] && <small>{counts[project.root]}</small>}</button>}
           {vertical && <button className="project-options" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} aria-expanded={newChatRoot !== undefined && sameProject(newChatRoot, project.root)} aria-controls={newChatRoot !== undefined && sameProject(newChatRoot, project.root) ? "new-chat-menu" : undefined} disabled={!ready} onClick={() => onNewChat(project.root)}><Plus size={13} /></button>}
-          <button className="project-options" aria-label={`Options for ${project.name}`} aria-expanded={menu === project.root} onClick={() => setMenu(menu === project.root ? "" : project.root)}><MoreHorizontal size={13} /></button>
-          {menu === project.root && <div className="project-menu"><button onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, hidden: false, collapsed: false } : p)); setMenu(""); }}>Restore project</button><button onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button></div>}
+          <button className="project-options" aria-label={`Options for ${project.name}`} aria-haspopup="menu" aria-expanded={menu === project.root} onClick={(e) => { if (menu === project.root) { closeMenu(true); return; } const r = e.currentTarget.getBoundingClientRect(); menuOpener.current = e.currentTarget; openMenu(project.root, { x: r.left, y: r.bottom + 4 }, { right: r.right, top: r.top }); }}><MoreHorizontal size={13} /></button>
+          {menu === project.root && createPortal(<div className="project-menu" ref={menuRef} role="menu" aria-label={`Options for ${project.name}`} style={menuBox ? { top: menuBox.top, left: menuBox.left } : { visibility: "hidden" }} onKeyDown={(e) => { const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role='menuitem']") || [])]; const index = items.indexOf(document.activeElement as HTMLButtonElement); if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } else if (e.key === "ArrowDown") { e.preventDefault(); focusMenuItem(index + 1); } else if (e.key === "ArrowUp") { e.preventDefault(); focusMenuItem(index - 1); } else if (e.key === "Home") { e.preventDefault(); focusMenuItem(0); } else if (e.key === "End") { e.preventDefault(); focusMenuItem(items.length - 1); } }}><button autoFocus role="menuitem" onClick={() => { onChange(projects.map((p) => p.root === project.root ? { ...p, hidden: false, collapsed: false } : p)); setMenu(""); }}>Restore project</button><button role="menuitem" onClick={() => { setName(project.name); setRenaming(project.root); setMenu(""); }}>Rename project</button></div>, container.current?.closest(".app") || document.body)}
         </div>{vertical && <div id={`chats-${encodeURIComponent(project.root)}`} hidden={project.collapsed}>
-          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Archived chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} />
+          <SessionTabs tabs={projectChats(project)} activeId={activeId} settings={settings} vertical label={`Archived chats in ${project.name}`} onSelect={onSelect} onCustomize={onCustomize} onRename={onRename} onClose={onClose} onArchiveChat={onArchiveChat} onClearChat={onClearChat} onExportChat={onExportChat} />
         </div>}</div>)}
         {!archivedMatches.length && <p className="project-empty">No matching archived projects.</p>}
       </section>}
