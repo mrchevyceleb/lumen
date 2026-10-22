@@ -563,8 +563,8 @@ export default function App() {
         sessionRef: resume?.sessionRef || "",
         scratchId: resume?.scratchId || scratchId || "",
         controlId: resume?.controlId || control?.controlId || "",
-        autoCompactTokens: resume?.autoCompactTokens ?? null,
-        mcpOverrides: resume?.mcpOverrides || {},
+        autoCompactTokens: resume?.autoCompactTokens ?? control?.autoCompactTokens ?? null,
+        mcpOverrides: resume?.mcpOverrides || control?.mcpOverrides || {},
         accountId: resume ? resume.accountId || "" : accountId,
         queuedMessages: resume?.queuedMessages || [],
         loadShellProfile: settingsRef.current.loadShellProfile,
@@ -583,11 +583,11 @@ export default function App() {
         agent,
         mode,
         name: resume?.name || control?.name || agentNames[agent],
-        nameCustom: resume?.nameCustom === true,
+        nameCustom: resume?.nameCustom === true || control?.nameCustom === true,
         managedBy: resume?.managedBy || control?.managedBy,
         accountId: created.accountId,
         accountName: created.accountName,
-        color: resume?.color,
+        color: resume?.color ?? control?.color,
         messages: resume?.messages || [],
         draft: resume?.draft || "",
         draftAttachments: resume?.draftAttachments || [],
@@ -600,8 +600,8 @@ export default function App() {
         effort: request.effort,
         workMode: request.workMode,
         controlId: created.controlId,
-        autoCompactTokens: resume?.autoCompactTokens ?? null,
-        mcpOverrides: resume?.mcpOverrides || {},
+        autoCompactTokens: resume?.autoCompactTokens ?? control?.autoCompactTokens ?? null,
+        mcpOverrides: resume?.mcpOverrides || control?.mcpOverrides || {},
         contextTokens: created.contextTokens ?? resume?.contextTokens ?? null,
         contextWindow: created.contextWindow ?? resume?.contextWindow ?? null,
         contextStale: (created.contextTokens ?? resume?.contextTokens) != null,
@@ -956,6 +956,8 @@ export default function App() {
                       : e.replace
                         ? e.text || ""
                         : (previous?.text || "") + (e.text || ""),
+                provider: e.type === "error" ? e.provider : undefined,
+                model: e.type === "error" ? e.model : undefined,
                 title:
                   e.title === "Tool result" && previous?.title
                     ? previous.title
@@ -1010,6 +1012,15 @@ export default function App() {
   // Paths with spaces are quoted so the tag stays one mention.
   const dropPaths = async (files: string[]) => {
     if (!active) return;
+    // Shell chats take plain filesystem paths (space-escaped), never image attachments or
+    // @ mentions; the backend rejects attachments for shells.
+    if (active.agent === "shell") {
+      if (!files.length) { notify("That drop did not include a file path I can use."); return; }
+      const shellPath = (file: string) => /\s/.test(file) ? `'${file.replace(/'/g, "'\\''")}'` : file;
+      const text = files.map(shellPath).join(" ");
+      setTabs((old) => old.map((tab) => tab.id === active.id ? { ...tab, draft: tab.draft ? `${tab.draft.replace(/\s+$/, "")} ${text} ` : `${text} ` } : tab));
+      return;
+    }
     if (!files.length) { notify("That drop did not include a file path I can use."); return; }
     const target = active.id;
     const media = files.filter((file) => /\.(png|jpe?g|webp|mp4|webm|mov|mkv|avi|m4v)$/i.test(file));
@@ -1507,16 +1518,20 @@ export default function App() {
   // place. The old CLI history file stays on disk; Lumen just stops showing it.
   const clearChat = (tab: Tab) => {
     const action = () => {
-      void api("session:close", tab.id).then(async () => {
+      void (async () => {
+        // Create the replacement FIRST. Closing first would remove the old chat from
+        // recovery before we know the new one exists, and a failed create would orphan it.
+        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, nameCustom: tab.nameCustom === true, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides });
+        if (!created) throw new Error("Could not start the fresh chat. This chat was kept.");
+        await api("session:close", tab.id);
         delete browserOpenRef.current[tab.controlId || tab.id];
         const wasActive = activeIdRef.current === tab.id;
         setTabs((old) => old.filter((t) => t.id !== tab.id));
-        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides });
         // Clearing the chat you are looking at should land you in the fresh one, not on the
         // project start screen; addTab only auto-focuses when nothing was just closed.
-        if (created && wasActive) { setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root); }
+        if (wasActive) { setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root); }
         notify("Chat cleared. Fresh conversation started.");
-      }).catch((e) => notify(e.message));
+      })().catch((e) => notify(e.message));
     };
     if (tab.busy || tab.messages.length)
       setConfirmation({

@@ -85,6 +85,10 @@ export interface Message {
   role: "user" | "assistant" | "tool" | "error" | "notice";
   text: string;
   title?: string;
+  // Pi error events carry the provider/model that produced the error so the card can name
+  // the exact credential at fault instead of blaming the whole Pi sign-in.
+  provider?: string;
+  model?: string;
   state?: string;
   turn?: string;
   time?: number;
@@ -212,6 +216,7 @@ export interface SessionEvent {
   detail?: string;
   state?: string;
   message?: string;
+  provider?: string;
   code?: number;
   sessionRef?: string;
   cwd?: string;

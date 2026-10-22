@@ -345,11 +345,24 @@ class WorkspaceService {
     await visit("", 0);
     return result.slice(0, 100);
   }
+  // The closest registered workspace that contains folder, so a chat whose CLI has cd'd
+  // into a subdirectory still searches its repo instead of failing "Open this workspace".
+  registeredAncestor(folder) {
+    if (typeof folder !== "string" || !folder) return null;
+    const key = (value) => process.platform === "win32" ? gitPathKey(value) : value.replace(/\\/g, "/").replace(/\/$/, "");
+    const target = key(folder);
+    let best = null;
+    for (const known of this.roots) {
+      const rootKey = key(known);
+      if (target === rootKey || target.startsWith(rootKey + "/")) if (!best || rootKey.length > key(best).length) best = known;
+    }
+    return best;
+  }
   // Repo entries (files and folders) for @ mentions in the composer. Fuzzy subsequence
   // matching on the relative path, with exact substring matches ranked first, then shorter
   // paths. One BFS pass fills the pool; the walk is capped so huge repos stay responsive.
   async mentionFiles(root, query) {
-    this.root(root);
+    root = this.registeredAncestor(root) || this.root(root);
     const q = String(query || "").toLowerCase();
     const pool = [];
     let visited = 0;
@@ -1007,9 +1020,10 @@ class Sessions {
   async piBridge(s, action, data = {}) {
     await this.ensurePi(s);
     const id = uuid();
+    const timeout = action === "compact" ? 300000 : 30000;
     const result = new Promise((resolve, reject) => {
       s.piRequests ||= new Map();
-      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi's Lumen controls did not respond.")); }, 30000);
+      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi's Lumen controls did not respond.")); }, timeout);
       s.piRequests.set(id, { resolve, reject, timer });
     });
     const ack = this.piRpc(s, "controls", { action, data: { ...data, id, action } });
@@ -1731,7 +1745,7 @@ class Sessions {
       } catch (error) { request.reject(error); }
       return;
     }
-    if (e.type === "agent_start") s.piRunActive = true;
+    if (e.type === "agent_start") { s.piRunActive = true; s.piLastError = null; }
     if (e.type === "response" && e.command === "get_state" && s.piCompletionStateId && e.id === s.piCompletionStateId && e.success &&
         !s.piRunActive && !e.data?.isStreaming && !e.data?.isCompacting && !e.data?.pendingMessageCount) {
       if (s.busy && !s.hadText && !s.piCommandFailed) this.text(s, "Command completed.", "command-result", true);
@@ -1759,6 +1773,12 @@ class Sessions {
       this.event(s, { type: "error", message: e.error });
       if (e.command === "prompt" || (s.piCompletionStateId && e.id === s.piCompletionStateId)) this.finish(s, 1);
     }
+    if (e.type === "pi_assistant_error") {
+      // Pi's RPC path emits message_end with the model identity; the terminal bridge path
+      // reports it through this annotated event so both render the same provider detail.
+      s.piLastError = { provider: e.provider || "", model: e.model || "", message: String(e.errorMessage || "").slice(0, 4000) };
+      return;
+    }
     if (e.type === "message_start" && e.message?.role === "assistant")
       s.messageId = uuid();
     if (!s.piRpcProcess && e.type === "message_start" && e.message?.role === "user") this.event(s, { type: "user-message", messageId: e.clientId || uuid(), text: e.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
@@ -1777,8 +1797,13 @@ class Sessions {
         if (b.type === "text")
           this.text(s, b.text, `${s.messageId || "answer"}:${i}`, true);
       }
-      if (e.message.errorMessage)
-        this.event(s, { type: "error", message: e.message.errorMessage });
+      if (e.message.errorMessage) {
+        // Keep the provider and model on the error event so the renderer can name the exact
+        // credential at fault (a stale provider API key is not a Pi sign-out).
+        const detail = s.agent === "pi" && (e.message.provider || e.message.model) ? { provider: e.message.provider || "", model: e.message.model || "" }
+          : s.agent === "pi" && s.piLastError?.message === e.message.errorMessage ? { provider: s.piLastError.provider, model: s.piLastError.model } : {};
+        this.event(s, { type: "error", message: e.message.errorMessage, ...detail });
+      }
     }
     if (e.type === "tool_execution_start")
       this.tool(s, e.toolCallId, e.toolName, JSON.stringify(e.args, null, 2));

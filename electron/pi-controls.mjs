@@ -219,6 +219,12 @@ export default function lumenControls(pi) {
     for (const event of ["agent_start", "agent_settled", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "session_compact", "model_select", "ui_prompt_start", "ui_prompt_end"])
       pi.on(event, (message, ctx) => { context = ctx;
         const delivery = message.message?.role === "user" && [...deliveries.values()].find((request) => request.rpc ? !request.confirming : message.message.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") === request.message);
+        // The session JSONL records each assistant message's provider and model, so tag an
+        // errored assistant message with them: a provider 401 then names the exact credential
+        // at fault instead of blaming the whole Pi sign-in.
+        if (ctx.mode !== "rpc" && event === "message_end" && message.message?.role === "assistant" && message.message.errorMessage && message.message.provider) {
+          output({ type: "pi_assistant_error", provider: message.message.provider, model: message.message.model || "", errorMessage: message.message.errorMessage });
+        }
         if (delivery) {
           delivery.started = true;
           if (ctx.mode !== "rpc") output({ ...message, clientId: delivery.clientId });
@@ -314,11 +320,15 @@ export default function lumenControls(pi) {
           compacting = true;
           const tokens = ctx.getContextUsage()?.tokens ?? null;
           contextEvent(ctx, { contextTokens: tokens, compacting: true });
-          ctx.compact({
-            onComplete: (result) => { compacting = false; lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
-              contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); },
-            onError: (error) => { compacting = false;
-              contextEvent(ctx, { contextTokens: tokens, compacting: false, error: error.message }); },
+          // The controls reply below must wait for compaction to settle, otherwise the host
+          // releases its turn gate and closes the panel while compaction is still running.
+          await new Promise((resolve, reject) => {
+            ctx.compact({
+              onComplete: (result) => { compacting = false; lastCompactedUsage = result?.estimatedTokensAfter ?? ctx.getContextUsage()?.tokens ?? tokens; saveWatermark();
+                contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: false }); resolve(); },
+              onError: (error) => { compacting = false;
+                contextEvent(ctx, { contextTokens: tokens, compacting: false, error: error.message }); reject(error); },
+            });
           });
         } else if (request.action !== "state") throw new Error("Unknown Lumen control.");
         ctx.ui.notify("LUMEN_CONTROLS:" + JSON.stringify({ id: request.id,

@@ -30,6 +30,24 @@ import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames, foregroundFor } from "./settings";
 import { ChatLink, LinkText, rehypeWebLinks, webLink } from "./ChatLinks";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
+// react-markdown renders a fenced block as <pre><code class="language-x">…</code></pre>. Pull the
+// raw text and language out of that tree so the copy button copies the code itself, never the
+// react-markdown element tree.
+const codeOf = (node: unknown): string => {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(codeOf).join("");
+  if (node && typeof node === "object" && "props" in node) return codeOf((node as { props?: { children?: unknown } }).props?.children);
+  return "";
+};
+const languageOf = (node: unknown): string => {
+  if (Array.isArray(node)) return node.map(languageOf).find(Boolean) || "";
+  if (node && typeof node === "object" && "props" in node) {
+    const props = (node as { props?: { className?: string; children?: unknown } }).props;
+    const match = /language-([\w-]+)/.exec(props?.className || "");
+    return match ? match[1] : languageOf(props?.children);
+  }
+  return "";
+};
 export function AgentMark({
   agent,
   color,
@@ -180,7 +198,8 @@ export default function Conversation({
   }, [mentionOpen, mentionQuery, mentionRoot]);
   const selectMention = (entry: Entry) => {
     if (!mentionToken) return;
-    const mention = `@${entry.path}${entry.directory ? "/" : ""}`;
+    const tagged = `${entry.path}${entry.directory ? "/" : ""}`;
+    const mention = /\s/.test(tagged) ? `@"${tagged}"` : `@${tagged}`;
     const next = input.slice(0, mentionToken.start) + mention + " " + input.slice(caret);
     setInput(next);
     setDismissedMentions(true);
@@ -243,7 +262,7 @@ export default function Conversation({
     inputRef.current?.focus();
   }, [tab.id]);
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
-  const isLocalCommand = !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact)(?:\s|$)/.test(input.trim());
+  const isLocalCommand = !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact|compact|clear)(?:\s|$)/.test(input.trim());
   // Manual compact: one code path for the /compact command, the Compact button and the
   // context panel. Claude has a real /compact and runs it as its own turn; the rest go
   // through the session-controls RPC. Google only compacts inside its own CLI.
@@ -677,7 +696,14 @@ function MessageView({
       <div className="error-message">
         <AlertCircle size={16} />
         <div>
-          {tab.agent !== "shell" && authError(m.text) ? <>
+          {tab.agent !== "shell" && authError(m.text) ? tab.agent === "pi" && (m.provider || m.model) ? <>
+            {/* Pi names the provider on its errors, so point at that provider's saved credential,
+                never at a generic Pi sign-in: re-running the wrong login was the sign-in loop. */}
+            <strong>{m.provider ? `${m.provider} ` : ""}rejected its saved API key{m.model ? ` for ${m.model}` : ""}</strong>
+            <p>Pi is still signed in. Replace the {m.provider || "provider"} API key under Settings → Accounts → Pi, or pick a different model, then retry your message.</p>
+            <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Update {m.provider || "provider"} sign-in</button>
+            <details className="auth-error-details"><summary>Error details</summary><p><LinkText text={m.text} onWeb={onWeb} onError={onError} /></p></details>
+          </> : <>
             <strong>{agentNames[tab.agent]} needs you to sign in again</strong>
             <p>Your chat is saved. Sign in here, then retry your message.</p>
             <button className="primary" disabled={tab.busy} onClick={onSignIn}><LogIn size={14} />Sign in to {agentNames[tab.agent]}</button>
@@ -715,11 +741,18 @@ function MessageView({
               a: ({ href, children }) => (
                 <ChatLink href={href} onWeb={onWeb} onError={onError} onFile={onFile}>{children}</ChatLink>
               ),
-              pre: ({ children }) => (
-                <div className="code-block">
-                  <pre>{children}</pre>
-                </div>
-              ),
+              pre: ({ children }) => {
+                const language = languageOf(children);
+                return (
+                  <div className="code-block">
+                    <div className="code-block-bar">
+                      <span className="code-block-lang">{language}</span>
+                      <CopyButton text={codeOf(children).replace(/\n$/, "")} />
+                    </div>
+                    <pre>{children}</pre>
+                  </div>
+                );
+              },
             }}
           >
             {m.text}

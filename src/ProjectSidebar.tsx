@@ -79,6 +79,23 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, []);
+  useEffect(() => {
+    if (!menu) return;
+    // Same rule as the chat menus: a pointer down on a different row, or any scroll or
+    // resize, closes the project menu instead of leaving it aimed at the wrong project.
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target)) return;
+      if ((target as Element).closest?.(".project-row")?.querySelector(".project-open")?.getAttribute("title") === menu) return;
+      setMenu("");
+    };
+    const dismiss = () => setMenu("");
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("resize", dismiss);
+    const scroller = container.current?.querySelector(".project-scroll");
+    scroller?.addEventListener("scroll", dismiss, { passive: true });
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", dismiss); scroller?.removeEventListener("scroll", dismiss); };
+  }, [menu]);
   useEffect(() => { if (projects.length <= 4) setQuery(""); }, [projects.length]);
   useEffect(() => {
     if (showArchived) return;

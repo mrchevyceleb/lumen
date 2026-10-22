@@ -45,10 +45,23 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
   const [renaming, setRenaming] = useState("");
   const [name, setName] = useState("");
   useEffect(() => {
-    const close = (event: PointerEvent) => { if (!nav.current?.contains(event.target as Node) && !menuRef.current?.contains(event.target as Node)) setMenu(""); };
+    if (!menu) return;
+    // The menu belongs to one row: any pointer down outside the menu and that row (including
+    // on a sibling row) closes it, and scrolling or resizing closes it too so it never hangs
+    // in space pointing at a row that moved.
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target)) return;
+      if ((target as Element).closest?.(".session-tab")?.querySelector(`[data-chat-id="${CSS.escape(menu)}"]`)) return;
+      setMenu("");
+    };
+    const dismiss = () => setMenu("");
     window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  }, []);
+    window.addEventListener("resize", dismiss);
+    nav.current?.closest(".project-scroll, .session-tabs")?.addEventListener("scroll", dismiss, { passive: true });
+    const scroller = nav.current?.closest(".project-scroll, .session-tabs");
+    return () => { window.removeEventListener("pointerdown", close); window.removeEventListener("resize", dismiss); scroller?.removeEventListener("scroll", dismiss); };
+  }, [menu]);
   useEffect(() => { if (menu) menuItem.current?.focus(); }, [menu]);
   useEffect(() => {
     if (renaming || !focusAfter.current) return;
