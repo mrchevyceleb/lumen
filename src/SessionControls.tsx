@@ -81,7 +81,7 @@ export default function SessionControls({ tab, onConfig, onClose, focusContext =
             <button className="primary" disabled={pending || tab.busy} type="submit">Apply</button></div>
         </form>
         <div className="context-policy-footer"><code>/autocompact 160k</code><button disabled={pending || tab.busy} onClick={() => { setThreshold(""); void change({ autoCompactTokens: null }); }}>Use CLI default</button></div>
-        {onCompact && <div className="context-policy-footer"><code>/compact</code><button className="primary" disabled={pending || tab.busy} onClick={() => { void (async () => { try { await onCompact(); onClose(); } catch (e: any) { setError(e.message); } })(); }}>Compact now</button></div>}
+        {onCompact && <div className="context-policy-footer"><code>/compact</code><button className="primary" disabled={pending || tab.busy || tab.phase === "compacting"} onClick={() => { void (async () => { try { await onCompact(); onClose(); } catch (e: any) { setError(e.message); } })(); }}>Compact now</button></div>}
         <p className="session-fine-print">{tab.agent === "claude" ? "Claude supports 100k–1M tokens." : "Choose 1k–2M tokens."} Blank restores the CLI’s automatic threshold.</p>
         {saved && <div className="session-saved" role="status"><Check size={13} />{saved}</div>}
       </section>

@@ -153,7 +153,7 @@ export default function Conversation({
   const menuOpen = tab.agent !== "shell" && !tab.busy && !controlPanel && !sessionPanel && focused && !dismissedCommands && !!commandToken &&
     (commandToken[1] === "/" || tab.agent === "codex") && caret > 0 && caret <= commandToken[2].length + 1;
   const query = commandToken?.[2].toLowerCase() || "";
-  const localCommands = tab.agent === "google" ? [] : lumenCommands;
+  const localCommands = tab.agent === "google" ? lumenCommands.filter((command) => command.name === "clear") : lumenCommands;
   const commands = [...localCommands, ...inventory.commands.filter((c) => !localCommands.some((local) => local.name === c.name))].filter((c) => `${c.name} ${c.description}`.toLowerCase().includes(query)).sort((a, b) =>
     Number(b.name.toLowerCase().startsWith(query)) - Number(a.name.toLowerCase().startsWith(query)) || a.name.localeCompare(b.name));
   const selection = Math.min(selectedCommand, Math.max(0, commands.length - 1));
@@ -164,7 +164,7 @@ export default function Conversation({
   const mentionToken = (() => {
     if (tab.agent === "shell" || tab.busy || tab.nativeOwned || !mentionRoot) return null;
     const before = input.slice(0, caret);
-    const match = before.match(/(^|\s)@([^\s@]*)$/);
+    const match = before.match(/(^|\s)@([^@\s"'`{}\[\]()<>]+)$/);
     if (!match) return null;
     return { start: caret - match[2].length - 1, query: match[2] };
   })();
@@ -204,7 +204,7 @@ export default function Conversation({
   const selectMention = (entry: Entry) => {
     if (!mentionToken) return;
     const tagged = `${entry.path}${entry.directory ? "/" : ""}`;
-    const mention = /\s/.test(tagged) ? `@"${tagged}"` : `@${tagged}`;
+    const mention = /\s/.test(tagged) ? `@"${tagged.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"` : `@${tagged}`;
     const next = input.slice(0, mentionToken.start) + mention + " " + input.slice(caret);
     setInput(next);
     setDismissedMentions(true);
@@ -278,19 +278,26 @@ export default function Conversation({
     inputRef.current?.focus();
   }, [tab.id]);
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
-  const isLocalCommand = !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact|compact|clear)(?:\s|$)/.test(input.trim());
+  const hostCommandName = input.trim().split(/\s+/, 1)[0];
+  const isHostCommand = tab.agent !== "shell" && (hostCommandName === "/clear" || hostCommandName === "/compact");
+  const isLocalCommand = tab.agent === "google"
+    ? hostCommandName === "/clear" || hostCommandName === "/compact"
+    : !["shell", "google"].includes(tab.agent) && /^\/(mcp|autocompact|compact|clear)(?:\s|$)/.test(input.trim());
   // Manual compact: one code path for the /compact command, the Compact button and the
   // context panel. Claude has a real /compact and runs it as its own turn; the rest go
   // through the session-controls RPC. Google only compacts inside its own CLI.
   const compactNow = async () => {
-    if (tab.busy || tab.agent === "shell" || tab.nativeOwned || tab.recoveryError) throw new Error("Finish this turn before compacting.");
+    if (tab.busy || tab.agent === "shell" || tab.nativeOwned || tab.recoveryError || controlPending) throw new Error("Finish this turn before compacting.");
     if (tab.agent === "google") throw new Error("Antigravity compacts inside its own CLI. Open native view and run /compact there.");
-    if (tab.agent === "claude") { await onSend("/compact"); return; }
+    if (tab.agent === "claude") {
+      if (!await onSend("/compact")) throw new Error("Claude did not accept /compact. Try again.");
+      return;
+    }
     const next = await api<SessionControlsState>("session:controls-change", tab.id, { compact: true });
     onConfig({ autoCompactTokens: next.autoCompactTokens, mcpOverrides: next.mcpOverrides, contextTokens: next.contextTokens, contextWindow: next.contextWindow });
   };
   const submit = async () => {
-    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && commandLoading)) return;
+    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && !isHostCommand && commandLoading)) return;
     submitLock.current = true;
     try {
     const hostCommand = input.trim();
@@ -301,12 +308,14 @@ export default function Conversation({
       if (await onSend(input)) { setInput(""); setCaret(0); stick.current = true; }
       return;
     }
-    if (hostCommand === "/clear") {
+    if (hostCommandName === "/clear") {
+      if (hostCommand !== "/clear") { setSessionError("Use /clear without extra text."); return; }
       setSessionPanel(null);
       onClearChat();
       return;
     }
-    if (hostCommand === "/compact") {
+    if (hostCommandName === "/compact") {
+      if (hostCommand !== "/compact") { setSessionError("Use /compact without extra text."); return; }
       setSubmitting(true);
       try { await compactNow(); setInput(""); setCaret(0); setDismissedCommands(true); }
       catch (e: any) { setSessionError(e.message); }
@@ -630,7 +639,7 @@ export default function Conversation({
                 setCaret(1); setDismissedCommands(false); setFocused(true);
                 requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(1, 1); });
               }}><span className="composer-slash">/</span></IconButton>}
-          {tab.agent !== "shell" && tab.agent !== "google" && <button className="model-control compact-control" aria-label="Compact this chat now" title="Compact this chat now · /compact" disabled={tab.busy || submitting || controlPending || tab.nativeOwned || !!tab.recoveryError} onClick={() => { void compactNow().catch((e: any) => setSessionError(e.message)); }}>
+          {tab.agent !== "shell" && tab.agent !== "google" && <button className="model-control compact-control" aria-label="Compact this chat now" title="Compact this chat now · /compact" disabled={tab.busy || tab.phase === "compacting" || submitting || controlPending || tab.nativeOwned || !!tab.recoveryError} onClick={() => { void compactNow().catch((e: any) => setSessionError(e.message)); }}>
             <Shrink size={13} /><span>Compact</span>
           </button>}
           {tab.agent !== "shell" && <ModelControls tab={tab} panel={controlPanel} setPanel={setControlPanel}

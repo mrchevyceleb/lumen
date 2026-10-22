@@ -1093,7 +1093,7 @@ export default function App() {
   }, []);
   // Dragging files in from Explorer: images and videos keep attaching the way they always
   // have; every other file (and folders) lands in the draft as an @path the agent can open.
-  // Paths with spaces are quoted so the tag stays one mention.
+  // Quotes and backslashes are escaped inside the quoted tag so the path stays one token.
   const dropPaths = async (files: string[]) => {
     if (!active) return;
     // Shell chats take plain filesystem paths (space-escaped), never image attachments or
@@ -1108,16 +1108,25 @@ export default function App() {
     if (!files.length) { notify("That drop did not include a file path I can use."); return; }
     const target = active.id;
     const media = files.filter((file) => /\.(png|jpe?g|webp|mp4|webm|mov|mkv|avi|m4v)$/i.test(file));
-    const rest = files.filter((file) => !media.includes(file));
-    try {
-      let references: string[] = [];
-      if (media.length) {
-        const imported = await api<AttachmentImport>("attachments:import", target, media);
+    const rest = [...files.filter((file) => !media.includes(file))];
+    // A media-looking folder or odd file must not lose the whole drop: try each import alone,
+    // and send anything the importer rejects onward as a normal @path mention.
+    let importedRefs: string[] = [];
+    const failedMedia: string[] = [];
+    for (const file of media) {
+      try {
+        const imported = await api<AttachmentImport>("attachments:import", target, [file]);
         if (imported.images.length) setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), ...imported.images].slice(0, 8) } : tab));
-        references = imported.references;
-      }
+        importedRefs = [...importedRefs, ...imported.references];
+      } catch { failedMedia.push(file); }
+    }
+    try {
+      const references = importedRefs;
+      rest.push(...failedMedia);
       if (rest.length || references.length) {
-        const tag = (file: string) => /\s/.test(file) ? `@"${file}"` : `@${file}`;
+        const tag = (file: string) => /\s/.test(file)
+          ? `@"${file.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`
+          : `@${file}`;
         const tags = [...references, ...rest].map(tag).join(" ");
         setTabs((old) => old.map((tab) => tab.id === target ? { ...tab, draft: tab.draft ? `${tab.draft.replace(/\s+$/, "")} ${tags} ` : `${tags} ` } : tab));
       }

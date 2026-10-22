@@ -771,7 +771,8 @@ class Sessions {
         if (s.agent === "claude" || s.agent === "google") throw new Error("Use /compact in this chat to compact with the CLI's own summary.");
         if (s.agent === "pi") {
           this.event(s, { type: "phase", phase: "compacting" });
-          try { await this.piBridge(s, "compact", {}); } catch (error) { this.event(s, { type: "phase", phase: undefined }); throw error; }
+          try { await this.piBridge(s, "compact", {}); }
+          finally { this.event(s, { type: "phase", phase: undefined }); }
         } else await (await ensureRuntime(this, s)).compactNow();
         return await this.readControls(s);
       }
@@ -1746,6 +1747,7 @@ class Sessions {
       return;
     }
     if (e.type === "agent_start") { s.piRunActive = true; s.piLastError = null; }
+    if (e.type === "agent_settled" && s.piLastError && s.piLastError.turn !== (s.turn || "")) s.piLastError = null;
     if (e.type === "response" && e.command === "get_state" && s.piCompletionStateId && e.id === s.piCompletionStateId && e.success &&
         !s.piRunActive && !e.data?.isStreaming && !e.data?.isCompacting && !e.data?.pendingMessageCount) {
       if (s.busy && !s.hadText && !s.piCommandFailed) this.text(s, "Command completed.", "command-result", true);
@@ -1776,7 +1778,16 @@ class Sessions {
     if (e.type === "pi_assistant_error") {
       // Pi's RPC path emits message_end with the model identity; the terminal bridge path
       // reports it through this annotated event so both render the same provider detail.
-      s.piLastError = { provider: e.provider || "", model: e.model || "", message: String(e.errorMessage || "").slice(0, 4000) };
+      // Keep a hash too: provider payloads can exceed the stored prefix, and exact text still
+      // has to match after the same prefix normalization on both sides.
+      const errorMessage = String(e.errorMessage || "");
+      s.piLastError = {
+        provider: e.provider || "",
+        model: e.model || "",
+        message: errorMessage.slice(0, 4000),
+        hash: crypto.createHash("sha256").update(errorMessage).digest("hex"),
+        turn: s.turn || "",
+      };
       return;
     }
     if (e.type === "message_start" && e.message?.role === "assistant")
@@ -1800,8 +1811,13 @@ class Sessions {
       if (e.message.errorMessage) {
         // Keep the provider and model on the error event so the renderer can name the exact
         // credential at fault (a stale provider API key is not a Pi sign-out).
+        const errorHash = crypto.createHash("sha256").update(e.message.errorMessage).digest("hex");
+        const samePiError = s.agent === "pi" && s.piLastError && (
+          s.piLastError.hash === errorHash ||
+          s.piLastError.message === e.message.errorMessage.slice(0, 4000)
+        );
         const detail = s.agent === "pi" && (e.message.provider || e.message.model) ? { provider: e.message.provider || "", model: e.message.model || "" }
-          : s.agent === "pi" && s.piLastError?.message === e.message.errorMessage ? { provider: s.piLastError.provider, model: s.piLastError.model } : {};
+          : samePiError ? { provider: s.piLastError.provider, model: s.piLastError.model } : {};
         this.event(s, { type: "error", message: e.message.errorMessage, ...detail });
       }
     }
