@@ -1913,6 +1913,25 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .compact .conversation-scroll {
   padding-top: 24px;
 }
+/* Long chats show only their newest messages; this pages the older ones back. */
+.earlier-messages {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px auto 28px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+.earlier-messages span {
+  opacity: 0.6;
+}
+.earlier-messages:hover {
+  color: var(--accent);
+}
 .jump-bottom {
   position: absolute;
   bottom: calc(100% + 8px);
