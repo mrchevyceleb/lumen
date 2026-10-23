@@ -42,6 +42,7 @@ const channels = new Set([
   "editor:dirty",
   "settings:load",
   "settings:save",
+  "dictation:status", "dictation:set-key", "dictation:chunk",
   "external:open",
   "file:open-link", "file:link-menu",
   "window:action",
