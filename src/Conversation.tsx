@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -79,6 +79,10 @@ export function AgentMark({
     </span>
   );
 }
+// A long chat holds thousands of messages. Drawing all of them makes every frame
+// walk tens of thousands of elements, so a spinner or a streamed word pegs a CPU
+// core and typing lags. Show the newest ones and let the reader page back.
+const RECENT_MESSAGES = 200;
 export default function Conversation({
   tab,
   settings,
@@ -270,6 +274,21 @@ export default function Conversation({
   const messages = useMemo<Message[]>(() => sending && !tab.messages.some((message) => message.id === sending.id)
     ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, delivery: "send", deliveryState: "sending" }]
     : tab.messages, [tab.messages, sending]);
+  // The first message on screen once the reader scrolls up or pages back, so
+  // new messages do not push the top away; null follows the newest ones.
+  const [firstShown, setFirstShown] = useState<string | null>(null);
+  const pagedBack = useRef<{ height: number; top: number } | null>(null);
+  const pinned = firstShown ? messages.findIndex((message) => message.id === firstShown) : -1;
+  const start = pinned >= 0 ? pinned : Math.max(0, messages.length - RECENT_MESSAGES);
+  useLayoutEffect(() => {
+    const el = scroll.current, saved = pagedBack.current;
+    pagedBack.current = null;
+    if (!el || !saved) return;
+    // Keep the message the reader was looking at in place above what was added.
+    el.scrollTop = saved.top + el.scrollHeight - saved.height;
+    // The button goes away with the last page; hand its focus to the composer.
+    if (document.activeElement === document.body) inputRef.current?.focus({ preventScroll: true });
+  }, [firstShown]);
   // Only the reply being written right now fades word by word; everything
   // already on screen stays still. The reply must sit after the newest user
   // turn, or a send in flight would replay the previous answer's fade before
@@ -291,6 +310,7 @@ export default function Conversation({
   useEffect(() => {
     stick.current = true;
     setAway(false);
+    setFirstShown(null);
     inputRef.current?.focus();
   }, [tab.id]);
   const isCommandInput = tab.agent !== "shell" && (input.trimStart().startsWith("/") || (tab.agent === "codex" && input.trimStart().startsWith("$")));
@@ -413,6 +433,8 @@ export default function Conversation({
           stick.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 120;
           setAway(!stick.current);
+          if (!stick.current && !firstShown && messages[start]) setFirstShown(messages[start].id);
+          else if (stick.current && firstShown) setFirstShown(null);
         }}
       >
         {messages.length === 0 ? (
@@ -469,7 +491,20 @@ export default function Conversation({
           </div>
         ) : (
           <div className="message-list">
-            {messages.map((message, index) => tab.agent !== "shell" && message.role === "assistant" && authError(message.text) && messages[index + 1]?.role === "error" && authError(messages[index + 1].text) ? null : (
+            {start > 0 && (
+              <button
+                className="earlier-messages"
+                onClick={() => {
+                  const el = scroll.current;
+                  if (el) pagedBack.current = { height: el.scrollHeight, top: el.scrollTop };
+                  setFirstShown(messages[Math.max(0, start - RECENT_MESSAGES)].id);
+                }}
+              >
+                Show {Math.min(start, RECENT_MESSAGES)} earlier messages
+                <span>{start.toLocaleString()} above</span>
+              </button>
+            )}
+            {messages.map((message, index) => index < start || tab.agent !== "shell" && message.role === "assistant" && authError(message.text) && messages[index + 1]?.role === "error" && authError(messages[index + 1].text) ? null : (
               <MessageView
                 key={message.id}
                 message={message}
