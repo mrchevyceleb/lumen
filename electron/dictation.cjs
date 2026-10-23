@@ -6,6 +6,7 @@
 // renderer gets a configured flag and a masked tail, nothing more.
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 
 const CHUNK_ID = /^[a-f0-9-]{36}:\d{1,9}$/;
 const MAX_CHUNK_BYTES = 12 * 1024 * 1024;
@@ -44,17 +45,32 @@ class Dictation {
   constructor(dataDir) {
     this.file = path.join(dataDir, "dictation.json");
     this.key = null;
+    this.keyOperations = Promise.resolve();
     this.cache = new Map();
   }
 
-  async status() {
-    if (this.key === null) {
-      try {
-        const saved = JSON.parse(await fs.readFile(this.file, "utf8"));
-        this.key = typeof saved?.groqApiKey === "string" ? saved.groqApiKey.trim() : "";
-      } catch { this.key = ""; }
-    }
+  // Serialize reads with writes: a slow initial status read must not restore
+  // an old key after Settings has saved or removed it.
+  withKey(operation) {
+    const result = this.keyOperations.then(operation);
+    this.keyOperations = result.catch(() => {});
+    return result;
+  }
+
+  keyStatus() {
     return { configured: !!this.key, masked: this.key ? `…${this.key.slice(-4)}` : "" };
+  }
+
+  status() {
+    return this.withKey(async () => {
+      if (this.key === null) {
+        try {
+          const saved = JSON.parse(await fs.readFile(this.file, "utf8"));
+          this.key = typeof saved?.groqApiKey === "string" ? saved.groqApiKey.trim() : "";
+        } catch { this.key = ""; }
+      }
+      return this.keyStatus();
+    });
   }
 
   async setKey(value) {
@@ -62,19 +78,22 @@ class Dictation {
     if (typeof value !== "string") throw new Error("Invalid key.");
     const key = value.trim();
     if (key.length > 512) throw new Error("That key looks too long. Paste the Groq API key from TARDIS.");
-    const previous = this.key;
-    try {
+    return this.withKey(async () => {
       if (!key) await fs.rm(this.file, { force: true });
       else {
         await fs.mkdir(path.dirname(this.file), { recursive: true });
-        await fs.writeFile(this.file, JSON.stringify({ groqApiKey: key }), { mode: 0o600, flag: "w" });
+        // Replace atomically so a failed write cannot truncate the saved key.
+        // A new private file also fixes an existing file with loose POSIX mode
+        // bits (writeFile's mode is only applied when creating a file).
+        const temporary = `${this.file}.${randomUUID()}.tmp`;
+        try {
+          await fs.writeFile(temporary, JSON.stringify({ groqApiKey: key }), { mode: 0o600, flag: "wx" });
+          await fs.rename(temporary, this.file);
+        } finally { await fs.rm(temporary, { force: true }); }
       }
-    } catch (error) {
-      this.key = previous;
-      throw error;
-    }
-    this.key = key;
-    return this.status();
+      this.key = key;
+      return this.keyStatus();
+    });
   }
 
   async transcribe(bytes) {

@@ -2,7 +2,8 @@
 // speech, silence trimmed frame by frame, so a click never reaches the model
 // (whisper invents a phrase for silent stretches) and "No speech heard" stays
 // reachable.
-import workletUrl from "./pcm-worklet.js?url";
+// Keep a real file: production data: inlining is blocked by script-src 'self'.
+import workletUrl from "./pcm-worklet.js?url&no-inline";
 
 export function wav(pcm: Int16Array, rate: number): Blob {
   const bytes = new ArrayBuffer(44 + pcm.length * 2), view = new DataView(bytes);
@@ -53,21 +54,27 @@ export async function capture(onSection: (audio: Blob) => void, onInterrupted: (
     };
     context.createMediaStreamSource(stream).connect(worklet); worklet.connect(context.destination);
     stream.getAudioTracks().forEach((track) => { track.onended = () => { if (!stopping) onInterrupted(); }; });
-    return { stop: async () => {
-      if (stopping) return; stopping = true;
-      await new Promise<void>((resolve) => { const timeout = setTimeout(resolve, 1500); stopped = () => { clearTimeout(timeout); resolve(); }; worklet.port.postMessage("stop"); });
-      media.getTracks().forEach((track) => track.stop()); worklet.disconnect();
-      try { if (context.state !== "closed") await context.close(); } finally { worklet.port.close(); flush(); }
-    } };
+    let stop: Promise<void> | undefined;
+    return { stop: () => stop ??= (async () => {
+      stopping = true;
+      try {
+        await new Promise<void>((resolve) => { const timeout = setTimeout(resolve, 1500); stopped = () => { clearTimeout(timeout); resolve(); }; worklet.port.postMessage("stop"); });
+      } finally {
+        media.getTracks().forEach((track) => track.stop()); worklet.disconnect();
+        try { if (context.state !== "closed") await context.close(); } finally { worklet.port.close(); flush(); }
+      }
+    })() };
   } catch (error) { stream?.getTracks().forEach((track) => track.stop()); await context.close(); throw error; }
 }
 
 async function captureFake(onSection: (audio: Blob) => void, onInterrupted: () => void, level: number) {
   void onInterrupted;
   const wavBlob = wav(pcmFromRms(level), 16000);
-  let stopped = false;
-  const timer = setTimeout(() => { if (!stopped) onSection(wavBlob); }, 450);
-  return { stop: async () => { stopped = true; clearTimeout(timer); onSection(wavBlob); } };
+  let emitted = false;
+  const emit = () => { if (!emitted) { emitted = true; if (level >= 0.02) onSection(wavBlob); } };
+  const timer = setTimeout(emit, 450);
+  let stop: Promise<void> | undefined;
+  return { stop: () => stop ??= Promise.resolve().then(() => { clearTimeout(timer); emit(); }) };
 }
 
 export async function dictationChunk(id: string, audio: Blob): Promise<{ text: string; warning?: string }> {
