@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Palette,
   Waves,
@@ -17,6 +17,7 @@ import {
 import { Modal } from "./Components";
 import { agentNames, defaults, themes } from "./settings";
 import type { Settings, Agent, AgentConfig } from "./types";
+import { api } from "./types";
 import GoogleSetup from "./GoogleSetup";
 import UpdatesPanel from "./UpdatesPanel";
 import AccountsPanel from "./AccountsPanel";
@@ -427,6 +428,7 @@ export default function SettingsPanel({
           {section === "behavior" && (
             <>
               <h3>A workspace that fits</h3>
+              <GroqDictationKey />
               <AdministratorPanel status={administrator} onStatus={onAdministratorStatus} />
               <Toggle title="Restore sessions on launch" detail="Reconnect saved conversations after restarts. Interrupted work waits for Continue; queued messages stay paused." value={s.restoreSessions} onChange={(value) => set("restoreSessions", value)} />
               <Toggle title="Load PowerShell profiles" detail="Use your normal environment, aliases, and functions in new sessions. Disable while troubleshooting profile startup." value={s.loadShellProfile} onChange={(value) => set("loadShellProfile", value)} />
@@ -485,6 +487,41 @@ export default function SettingsPanel({
         </div>
       </div>
     </Modal>
+  );
+}
+function GroqDictationKey() {
+  const [status, setStatus] = useState<{ configured: boolean; masked: string }>({ configured: false, masked: "" });
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const refresh = () => { void api<{ configured: boolean; masked: string }>("dictation:status").then(setStatus).catch(() => setStatus({ configured: false, masked: "" })); };
+  useEffect(() => { refresh(); }, []);
+  const save = async () => {
+    if (!key.trim() || busy) return;
+    setBusy(true); setNote("");
+    try { setStatus(await api<{ configured: boolean; masked: string }>("dictation:set-key", key)); setKey(""); setNote("Saved. Dictation is ready."); refresh(); }
+    catch (e: any) { setNote(e?.message || "Could not save that key."); }
+    finally { setBusy(false); }
+  };
+  const remove = async () => {
+    if (busy) return;
+    setBusy(true); setNote("");
+    try { setStatus(await api<{ configured: boolean; masked: string }>("dictation:set-key", "")); setNote("Removed."); }
+    catch (e: any) { setNote(e?.message || "Could not remove the key."); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="chat-layout-setting">
+      <strong>Dictation (Groq)</strong>
+      <p className="muted">Same Groq API key and Whisper cleanup you use in TARDIS. Paste it once here; it stays on this computer and never leaves except to Groq.</p>
+      <p className="muted">{status.configured ? <>Key saved {status.masked}. Mic shows in every chat composer.</> : "No key saved yet. The mic will ask you to add one."}</p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+        <input type="password" value={key} placeholder="gsk_…" aria-label="Groq API key" style={{ flex: "1 1 200px", minHeight: 32 }} onChange={(e) => setKey(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void save(); }} />
+        <button className="secondary" disabled={!key.trim() || busy} onClick={() => void save()}>Save key</button>
+        {status.configured && <button className="secondary" disabled={busy} onClick={() => void remove()}>Remove</button>}
+      </div>
+      {note && <p role="status" style={{ marginTop: 6, fontSize: 12 }}>{note}</p>}
+    </div>
   );
 }
 function Toggle({
