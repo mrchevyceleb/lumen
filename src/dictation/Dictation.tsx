@@ -130,10 +130,20 @@ export function Dictation({ chatId, onText, onActive }: { chatId: string; onText
       cancelled = true; alive.current = false; callbacks.current.onActive(false);
       const done = (async () => {
         await previous;
-        await opening.current?.then((mic) => mic.stop()).catch(() => {});
-        await stopCapture().catch(() => {});
-        while (starting.current || stopping.current || working.current) await new Promise((resolve) => setTimeout(resolve, 20));
-        await saving.current;
+        // A capture still waiting on the OS permission prompt, or a stop
+        // stuck inside AudioContext.close(), may never settle. Race the
+        // whole settlement against one deadline so a hung owner can never
+        // wedge every later mount of this chat; any late cleanup finishes
+        // in the background and a late mic is stopped by start()'s alive
+        // check instead.
+        const settle = (async () => {
+          const openingMic = opening.current;
+          if (openingMic) await openingMic.then((mic) => mic.stop()).catch(() => {});
+          await stopCapture().catch(() => {});
+          while (starting.current || stopping.current || working.current) await new Promise((resolve) => setTimeout(resolve, 20));
+          await saving.current;
+        })();
+        await Promise.race([settle, new Promise((resolve) => setTimeout(resolve, 8000))]);
       })();
       settling.set(chatId, done);
       void done.finally(() => { if (settling.get(chatId) === done) settling.delete(chatId); });
