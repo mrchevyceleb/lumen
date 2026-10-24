@@ -1,4 +1,4 @@
-const { WebContentsView, BrowserWindow, session, Menu, clipboard, app } = require("electron");
+const { WebContentsView, BrowserWindow, session, Menu, clipboard, app, dialog } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -136,9 +136,39 @@ class BrowserService {
     this.popups = new Set();
     this.profile = session.fromPartition("persist:lumen-browser");
     const networks = new Set(["local-network", "local-network-access", "loopback-network"]);
-    const permitted = (permission, origin) => permission === "clipboard-sanitized-write" || (networks.has(permission) && localOrigin(origin));
+    // Media gets a per-request prompt, just like a browser. The session cannot
+    // remember a device grant the way a site permission store can, so a stored
+    // denial would leave a meeting page blocked until Lumen restarts.
+    const mediaOrigin = (origin) => {
+      try {
+        const url = new URL(origin);
+        return url.protocol === "https:" || (url.protocol === "http:" && localOrigin(url.href));
+      } catch { return false; }
+    };
+    const permitted = (permission, origin) => permission === "clipboard-sanitized-write"
+      || (permission === "media" && mediaOrigin(origin))
+      || (networks.has(permission) && localOrigin(origin));
     this.profile.setPermissionCheckHandler((_contents, permission, origin) => permitted(permission, origin));
-    this.profile.setPermissionRequestHandler((contents, permission, callback, details) => callback(permitted(permission, details.requestingUrl || contents?.getURL())));
+    this.profile.setPermissionRequestHandler((contents, permission, callback, details) => {
+      const origin = details.requestingUrl || contents?.getURL() || "";
+      if (permission !== "media" || !mediaOrigin(origin)) {
+        callback(permitted(permission, origin));
+        return;
+      }
+      const devices = Array.isArray(details.mediaTypes) && details.mediaTypes.length
+        ? details.mediaTypes.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type).join(" and ")
+        : "camera and microphone";
+      dialog.showMessageBox(this.window, {
+        type: "question",
+        buttons: ["Allow", "Don't allow"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        title: "Use camera and microphone?",
+        message: `Allow ${new URL(origin).hostname} to use your ${devices}?`,
+        detail: "The site can use the devices only while this browser tab is open.",
+      }).then(({ response }) => callback(response === 0), () => callback(false));
+    });
     this.profile.on("will-download", (_event, item) => {
       item.setSaveDialogOptions({ title: "Save browser download", defaultPath: path.join(app.getPath("downloads"), path.basename(item.getFilename())) });
     });
