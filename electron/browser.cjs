@@ -145,14 +145,33 @@ class BrowserService {
         return url.protocol === "https:" || (url.protocol === "http:" && localOrigin(url.href));
       } catch { return false; }
     };
+    const mediaKey = (origin) => {
+      try { return new URL(origin).origin; } catch { return ""; }
+    };
+    // Only the frames the person approves enter this set, so no site is ever
+    // pre-granted. Some Chromium builds consult the check handler before the
+    // request handler for media, so the check follows the same set: an
+    // unapproved frame reports no media yet and must still come through the
+    // prompt below for the real grant.
+    const grantedMedia = new Set();
     const permitted = (permission, origin) => permission === "clipboard-sanitized-write"
-      || (permission === "media" && mediaOrigin(origin))
+      || (permission === "media" && grantedMedia.has(mediaKey(origin)))
       || (networks.has(permission) && localOrigin(origin));
-    this.profile.setPermissionCheckHandler((_contents, permission, origin) => permitted(permission, origin));
+    this.profile.setPermissionCheckHandler((_contents, permission, origin, details = {}) => {
+      // For a frame's own media check, Chromium names that frame's origin
+      // securityOrigin; top-level checks use requestingOrigin. Approving the
+      // embedder must never stand in for approving the embedded frame.
+      const effective = permission === "media" ? (details.securityOrigin || origin) : origin;
+      return permitted(permission, effective);
+    });
     this.profile.setPermissionRequestHandler((contents, permission, callback, details) => {
       const origin = details.requestingUrl || contents?.getURL() || "";
       if (permission !== "media" || !mediaOrigin(origin)) {
         callback(permitted(permission, origin));
+        return;
+      }
+      if (grantedMedia.has(mediaKey(origin))) {
+        callback(true);
         return;
       }
       const devices = Array.isArray(details.mediaTypes) && details.mediaTypes.length
@@ -167,7 +186,7 @@ class BrowserService {
         title: "Use camera and microphone?",
         message: `Allow ${new URL(origin).hostname} to use your ${devices}?`,
         detail: "The site can use the devices only while this browser tab is open.",
-      }).then(({ response }) => callback(response === 0), () => callback(false));
+      }).then(({ response }) => { if (response === 0) grantedMedia.add(mediaKey(origin)); callback(response === 0); }, () => callback(false));
     });
     this.profile.on("will-download", (_event, item) => {
       item.setSaveDialogOptions({ title: "Save browser download", defaultPath: path.join(app.getPath("downloads"), path.basename(item.getFilename())) });
