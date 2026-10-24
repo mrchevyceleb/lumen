@@ -12,7 +12,6 @@
     "start": "electron .",
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
-    "test": "vitest run",
     "package": "npm run build && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false",
     "package:portable": "npm run build && electron-builder --win portable --x64 --publish never --config.win.signExecutable=false",
     "verify:release": "node scripts/verify-release.cjs"
@@ -35,9 +34,7 @@
     "@xterm/xterm": "^6.0.0",
     "electron": "44.5.1",
     "electron-builder": "^26.0.0",
-    "fake-indexeddb": "^6.2.6",
     "js-yaml": "4.3.2",
-    "jsdom": "^29.1.1",
     "lucide-react": "^0.468.0",
     "monaco-editor": "^0.57.0",
     "playwright": "^1.56.0",
@@ -46,8 +43,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "typescript": "^5.9.0",
-    "vite": "8.3.1",
-    "vitest": "^4.1.12"
+    "vite": "8.3.1"
   },
   "build": {
     "appId": "app.lumen.workspace",

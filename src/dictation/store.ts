@@ -17,8 +17,23 @@ export const loadRecording=(scope:string)=>transaction<Recording|undefined>(['re
   row.continue();
  };
 });
-export const saveRecording=(record:Recording)=>transaction<void>(['recordings'],'readwrite',tx=>{tx.objectStore('recordings').put(record);});
-export const saveSection=(record:Recording,section:Section)=>transaction<void>(['recordings','sections'],'readwrite',tx=>{tx.objectStore('recordings').put({...record,updatedAt:Date.now()});tx.objectStore('sections').put(section);});
+// Ownership guard: every save names the recording id it belongs to and only
+// lands while that recording is still the scope's current one, so a late
+// save from an unmounted owner can never resurrect a discarded recording or
+// overwrite a newer one. A brand-new recording (no row yet) always lands.
+export const saveRecording=(record:Recording)=>transaction<void>(['recordings'],'readwrite',(tx)=>{
+ const store=tx.objectStore('recordings'),req=store.get(record.scope);
+ req.onsuccess=()=>{const current=req.result as Recording|undefined;if(!current||current.id===record.id)store.put(record);};
+});
+export const saveSection=(record:Recording,section:Section)=>transaction<void>(['recordings','sections'],'readwrite',(tx)=>{
+ const store=tx.objectStore('recordings'),req=store.get(record.scope);
+ req.onsuccess=()=>{const current=req.result as Recording|undefined;if(!current||current.id===record.id){store.put({...record,updatedAt:Date.now()});tx.objectStore('sections').put(section);}};
+});
 export const loadSection=(session:string,index:number)=>transaction<Section|undefined>(['sections'],'readonly',(tx,done)=>{const req=tx.objectStore('sections').get([session,index]);req.onsuccess=()=>done(req.result);});
-export const finishSection=(section:Section)=>transaction<void>(['sections'],'readwrite',tx=>{tx.objectStore('sections').put(section);});
+// Only lands while the section's session still owns stored sections, so a
+// late transcription result cannot recreate sections after a discard.
+export const finishSection=(section:Section)=>transaction<void>(['sections'],'readwrite',(tx)=>{
+ const store=tx.objectStore('sections'),req=store.get([section.session,section.index]);
+ req.onsuccess=()=>{if(req.result)store.put(section);};
+});
 export const clearRecording=(record:Recording)=>transaction<void>(['recordings','sections'],'readwrite',tx=>{tx.objectStore('recordings').delete(record.scope);tx.objectStore('sections').delete(IDBKeyRange.bound([record.id,0],[record.id,Number.MAX_SAFE_INTEGER]));});

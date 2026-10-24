@@ -100,20 +100,26 @@ export function Dictation({ chatId, onText, onActive }: { chatId: string; onText
     } catch (e) { report(e); } finally { stopping.current = false; }
   };
   const start = async () => {
-    if (starting.current || stopping.current || record.current) return;
+    if (!alive.current || starting.current || stopping.current || record.current) return;
     starting.current = true;
     update("starting"); setError(""); setNotice(""); setSeconds(0); setProcessed(0); processing.current = 0; failure.current = false; stopping.current = false; inserted.current = false; stopped.current = Promise.resolve();
     let pendingMic: ReturnType<typeof capture> | undefined, interrupted = false;
     try {
       const status = await api<{ configured: boolean }>("dictation:status");
       if (!status.configured) throw new Error("Add your Groq API key in Settings to dictate.");
+      if (!alive.current) return;
       const r = { scope: scope.current, id: crypto.randomUUID(), next: 0, updatedAt: Date.now() }; record.current = r;
       // Start AudioContext while still inside the user gesture (Safari/iPhone).
       pendingMic = capture(enqueue, () => { if (alive.current) { setNotice("Microphone paused or disconnected. The recorded portion is being kept."); interrupted = true; if (!starting.current) void finish(); } });
       opening.current = pendingMic;
       void pendingMic.catch(() => {});
-      await saveRecording(r); const mic = await pendingMic;
-      if (!alive.current) { await mic.stop(); return; }
+      await saveRecording(r);
+      // Unmounted while starting: leave no stored recording behind. The
+      // store ownership guard keeps this true even if a remounted chat has
+      // already started a newer recording under the same scope.
+      if (!alive.current) { await clearRecording(r); return; }
+      const mic = await pendingMic;
+      if (!alive.current) { await mic.stop(); await clearRecording(r); return; }
       microphone.current = mic; update("recording");
     } catch (e) { if (pendingMic) await pendingMic.then((mic) => mic.stop()).catch(() => {}); if (alive.current) { setError(e instanceof Error ? e.message : "Dictation interrupted. Your recording is saved."); update("error"); } }
     finally { opening.current = undefined; starting.current = false; if (interrupted && alive.current && microphone.current) void finish(); }
@@ -133,9 +139,9 @@ export function Dictation({ chatId, onText, onActive }: { chatId: string; onText
         // A capture still waiting on the OS permission prompt, or a stop
         // stuck inside AudioContext.close(), may never settle. Race the
         // whole settlement against one deadline so a hung owner can never
-        // wedge every later mount of this chat; any late cleanup finishes
-        // in the background and a late mic is stopped by start()'s alive
-        // check instead.
+        // wedge every later mount of this chat. Late work is harmless: the
+        // store writes are ownership-guarded, so a background save can
+        // never resurrect or overwrite the remounted chat's recording.
         const settle = (async () => {
           const openingMic = opening.current;
           if (openingMic) await openingMic.then((mic) => mic.stop()).catch(() => {});
