@@ -30,6 +30,7 @@ import QueuedMessages, { sendingMessage } from "./QueuedMessages";
 import { agentNames, foregroundFor } from "./settings";
 import { ChatLink, LinkText, externalLink, filePathFromHref, rehypeWebLinks, webLink } from "./ChatLinks";
 import { StreamingMarkdown } from "./stream-fade";
+import { Dictation } from "./dictation/Dictation";
 const authError = (text: string) => /failed to authenticate|authentication[_ ](?:failed|required)|not[_ ]authenticated|OAuth.*(?:expired|revoked|refresh|invalid)|(?:access|refresh)[_ ]token.*(?:expired|revoked|invalid|reused)|invalid[_ ](?:api[_ ]key|authentication credentials)|incorrect API key|API key.*(?:missing|invalid|not (?:found|set|configured))|no (?:API key|credentials)|not (?:logged|signed) in|please (?:log|sign) in/i.test(text);
 // react-markdown renders a fenced block as <pre><code class="language-x">…</code></pre>. Pull the
 // raw text and language out of that tree so the copy button copies the code itself, never the
@@ -681,6 +682,16 @@ export default function Conversation({
             }}
           />
           <div className="composer-send-actions">
+              {tab.agent !== "shell" && <Dictation chatId={tab.id} onText={(text) => {
+                const before = input.slice(0, caret), after = input.slice(caret);
+                const textBefore = before && !/\s$/.test(before) ? " " : "";
+                const textAfter = after && !/^\s/.test(after) && !/^[.,!?;:]/.test(after) ? " " : "";
+                const next = `${before}${textBefore}${text}${textAfter}${after}`;
+                setInput(next);
+                const nextCaret = before.length + textBefore.length + text.length;
+                setCaret(nextCaret);
+                requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(nextCaret, nextCaret); });
+              }} onActive={() => {}} />}
               {tab.busy && (
                 <button className="send-button stop-button" disabled={tab.stopping} aria-label="Stop running turn" title={tab.stopping ? "Cancellation requested" : "Stop running turn"} onClick={onStop}>
                   <Square size={13} fill="currentColor" />

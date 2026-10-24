@@ -18,6 +18,7 @@ const { ModelCache } = require("./model-cache.cjs");
 const { AgentControl } = require("./agent-control.cjs");
 const { createAdministrator, restoreRestartProfile, waitForRestartParent } = require("./administrator.cjs");
 const { RecoveryStore } = require("./recovery.cjs");
+const { Dictation } = require("./dictation.cjs");
 const { Attachments } = require("./attachments.cjs");
 const { BrowserService, browserURL } = require("./browser.cjs");
 app.setName("Lumen");
@@ -29,7 +30,7 @@ const startup = waitForRestartParent().then(() => {
   if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) { app.exit(0); return false; }
   return true;
 });
-let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments, browser, defaultModels, modelCache;
+let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments, browser, defaultModels, modelCache, dictation;
 let restartForUpdate = false;
 let restartForAdministrator = false, administratorRestartPending = false;
 const administrator = createAdministrator(app);
@@ -482,6 +483,7 @@ startup.then(async (start) => {
   const dataDir = app.getPath("userData");
   workspace = new WorkspaceService(dataDir);
   await workspace.init();
+  dictation = new Dictation(dataDir);
   let googleInstall;
   const installGoogle = () => googleInstall ||= require("./google.cjs").install(dataDir, resolveLauncher).finally(() => { googleInstall = null; });
   accounts = new Accounts(dataDir, resolveLauncher, (event) => {
@@ -656,6 +658,9 @@ startup.then(async (start) => {
   handle("settings:save", (settings) =>
     fs.writeFile(path.join(dataDir, "settings.json"), JSON.stringify(settings)),
   );
+  handle("dictation:status", () => dictation.status());
+  handle("dictation:set-key", (value) => dictation.setKey(value));
+  handle("dictation:chunk", (id, bytes) => dictation.chunk(id, bytes));
   handle("chat:export", async ({ name, text } = {}) => {
     if (typeof text !== "string" || !text.trim())
       throw new Error("This chat has nothing to export yet.");
