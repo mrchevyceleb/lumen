@@ -1026,7 +1026,7 @@ export default function App() {
             }
             else if (e.type === "view") { if (e.mode) t.mode = e.mode; if (e.sessionRef) t.sessionRef = e.sessionRef; }
             else if (e.type === "history") t.messages = e.messages || t.messages;
-            else if (e.type === "reconnected") { t.recoveryError = undefined; t.exited = false; }
+            else if (e.type === "reconnected") { t.recoveryError = undefined; t.exited = false; t.phase = undefined; t.phaseText = undefined; }
             else if (e.type === "phase") { t.phase = e.phase; t.phaseText = e.text; }
             else if (e.type === "session") t.sessionRef = e.sessionRef;
             else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
@@ -1037,7 +1037,7 @@ export default function App() {
             else if (["message-delivered", "message-delivery-state"].includes(e.type)) t.messages = t.messages.map((message) => message.id === e.messageId ? { ...message, deliveryState: e.type === "message-delivered" ? "confirmed" : e.deliveryState } : message);
             else if (e.type === "user-message-retracted") t.messages = t.messages.filter((m) => m.id !== e.messageId);
             else if (e.type === "cwd") { t.cwd = e.cwd; t.cwdVersion = (t.cwdVersion || 0) + 1; }
-            else if (e.type === "exit") t.exited = true;
+            else if (e.type === "exit") { t.exited = true; t.phase = undefined; t.phaseText = undefined; }
             else if (["text", "tool", "error", "diagnostic"].includes(e.type)) {
               const id = `${t.turn || "init"}-${e.key || e.type}`;
               const index = t.messages.findIndex((m) => m.id === id);
@@ -2351,7 +2351,7 @@ export default function App() {
           {updateStatus?.phase === "downloaded" && <button className="update-ready" title={`Lumen ${updateStatus.latest} is ready. Close Lumen to install, or restart now.`} onClick={() => api("updates:install").catch((e) => notify(e.message))}><Download size={12} />Update ready</button>}
           {boot.administrator.supported && <button className={boot.administrator.elevated ? "administrator-active" : ""} title={boot.administrator.elevated ? "Agents and terminals have Windows administrator access" : "Restart Lumen with Windows administrator access"}
             onClick={() => { setSettingsSection("behavior"); setDialog("settings"); }}><ShieldCheck size={12} />{boot.administrator.elevated ? "Administrator" : "Run as administrator"}</button>}
-          {active?.busy ? (
+          {active?.busy || active?.phase === "compacting" ? (
               active.phase ? <><TerminalSquare size={12} /><span>{active.phase === "retrying" ? (active.phaseText || "Reconnecting…") : active.phase === "compacting" ? "Compacting context…" : active.phase === "finishing" ? "Finishing Grok CLI…" : "Waiting for Grok CLI…"}</span></> : <Busy text="Working" />
           ) : (
             <>
