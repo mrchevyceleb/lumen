@@ -196,13 +196,15 @@ class BrowserService {
         return;
       }
       const devices = types.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type).join(" and ");
+      const titleDevices = types.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type)
+        .map((device, index) => index === 0 ? device[0].toUpperCase() + device.slice(1) : device).join(" and ");
       dialog.showMessageBox(this.window, {
         type: "question",
         buttons: ["Allow", "Don't allow"],
         defaultId: 1,
         cancelId: 1,
         noLink: true,
-        title: "Use camera and microphone?",
+        title: `Use ${titleDevices}?`,
         message: `Allow ${new URL(origin).hostname} to use your ${devices}?`,
         detail: "The site can use the devices only while this browser tab is open.",
       }).then(({ response }) => {
