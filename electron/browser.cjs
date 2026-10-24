@@ -148,20 +148,39 @@ class BrowserService {
     const mediaKey = (origin) => {
       try { return new URL(origin).origin; } catch { return ""; }
     };
-    // Only the frames the person approves enter this set, so no site is ever
-    // pre-granted. Some Chromium builds consult the check handler before the
-    // request handler for media, so the check follows the same set: an
-    // unapproved frame reports no media yet and must still come through the
-    // prompt below for the real grant.
-    const grantedMedia = new Set();
+    // Approvals are pinned to the exact tab contents and media type. Approving
+    // a microphone-only ask never opens the camera, and closing that tab ends
+    // the approval with it.
+    const mediaTabs = new WeakMap();
+    const mediaGrant = (contents, origin, type) => {
+      try {
+        if (!contents || contents.isDestroyed()) return false;
+      } catch { return false; }
+      const grants = mediaTabs.get(contents);
+      return !!grants?.get(mediaKey(origin))?.has(type);
+    };
+    const grantMedia = (contents, origin, type) => {
+      let grants = mediaTabs.get(contents);
+      if (!grants) {
+        grants = new Map();
+        mediaTabs.set(contents, grants);
+        contents.once("destroyed", () => mediaTabs.delete(contents));
+      }
+      let types = grants.get(mediaKey(origin));
+      if (!types) {
+        types = new Set();
+        grants.set(mediaKey(origin), types);
+      }
+      types.add(type);
+    };
     const permitted = (permission, origin) => permission === "clipboard-sanitized-write"
-      || (permission === "media" && grantedMedia.has(mediaKey(origin)))
       || (networks.has(permission) && localOrigin(origin));
-    this.profile.setPermissionCheckHandler((_contents, permission, origin, details = {}) => {
+    this.profile.setPermissionCheckHandler((contents, permission, origin, details = {}) => {
       // For a frame's own media check, Chromium names that frame's origin
       // securityOrigin; top-level checks use requestingOrigin. Approving the
       // embedder must never stand in for approving the embedded frame.
       const effective = permission === "media" ? (details.securityOrigin || origin) : origin;
+      if (permission === "media") return mediaGrant(contents, effective, details.mediaType);
       return permitted(permission, effective);
     });
     this.profile.setPermissionRequestHandler((contents, permission, callback, details) => {
@@ -170,13 +189,13 @@ class BrowserService {
         callback(permitted(permission, origin));
         return;
       }
-      if (grantedMedia.has(mediaKey(origin))) {
+      const types = Array.isArray(details.mediaTypes) && details.mediaTypes.length
+        ? details.mediaTypes : ["audio", "video"];
+      if (types.every((type) => mediaGrant(contents, origin, type))) {
         callback(true);
         return;
       }
-      const devices = Array.isArray(details.mediaTypes) && details.mediaTypes.length
-        ? details.mediaTypes.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type).join(" and ")
-        : "camera and microphone";
+      const devices = types.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type).join(" and ");
       dialog.showMessageBox(this.window, {
         type: "question",
         buttons: ["Allow", "Don't allow"],
@@ -186,7 +205,10 @@ class BrowserService {
         title: "Use camera and microphone?",
         message: `Allow ${new URL(origin).hostname} to use your ${devices}?`,
         detail: "The site can use the devices only while this browser tab is open.",
-      }).then(({ response }) => { if (response === 0) grantedMedia.add(mediaKey(origin)); callback(response === 0); }, () => callback(false));
+      }).then(({ response }) => {
+        if (response === 0) for (const type of types) grantMedia(contents, origin, type);
+        callback(response === 0);
+      }, () => callback(false));
     });
     this.profile.on("will-download", (_event, item) => {
       item.setSaveDialogOptions({ title: "Save browser download", defaultPath: path.join(app.getPath("downloads"), path.basename(item.getFilename())) });
