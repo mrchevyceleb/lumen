@@ -1,4 +1,4 @@
-const { WebContentsView, BrowserWindow, session, Menu, clipboard, app } = require("electron");
+const { WebContentsView, BrowserWindow, session, Menu, clipboard, app, dialog } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -136,9 +136,82 @@ class BrowserService {
     this.popups = new Set();
     this.profile = session.fromPartition("persist:lumen-browser");
     const networks = new Set(["local-network", "local-network-access", "loopback-network"]);
-    const permitted = (permission, origin) => permission === "clipboard-sanitized-write" || (networks.has(permission) && localOrigin(origin));
-    this.profile.setPermissionCheckHandler((_contents, permission, origin) => permitted(permission, origin));
-    this.profile.setPermissionRequestHandler((contents, permission, callback, details) => callback(permitted(permission, details.requestingUrl || contents?.getURL())));
+    // Media gets a per-request prompt, just like a browser. The session cannot
+    // remember a device grant the way a site permission store can, so a stored
+    // denial would leave a meeting page blocked until Lumen restarts.
+    const mediaOrigin = (origin) => {
+      try {
+        const url = new URL(origin);
+        return url.protocol === "https:" || (url.protocol === "http:" && localOrigin(url.href));
+      } catch { return false; }
+    };
+    const mediaKey = (origin) => {
+      try { return new URL(origin).origin; } catch { return ""; }
+    };
+    // Approvals are pinned to the exact tab contents and media type. Approving
+    // a microphone-only ask never opens the camera, and closing that tab ends
+    // the approval with it.
+    const mediaTabs = new WeakMap();
+    const mediaGrant = (contents, origin, type) => {
+      try {
+        if (!contents || contents.isDestroyed()) return false;
+      } catch { return false; }
+      const grants = mediaTabs.get(contents);
+      return !!grants?.get(mediaKey(origin))?.has(type);
+    };
+    const grantMedia = (contents, origin, type) => {
+      let grants = mediaTabs.get(contents);
+      if (!grants) {
+        grants = new Map();
+        mediaTabs.set(contents, grants);
+        contents.once("destroyed", () => mediaTabs.delete(contents));
+      }
+      let types = grants.get(mediaKey(origin));
+      if (!types) {
+        types = new Set();
+        grants.set(mediaKey(origin), types);
+      }
+      types.add(type);
+    };
+    const permitted = (permission, origin) => permission === "clipboard-sanitized-write"
+      || (networks.has(permission) && localOrigin(origin));
+    this.profile.setPermissionCheckHandler((contents, permission, origin, details = {}) => {
+      // For a frame's own media check, Chromium names that frame's origin
+      // securityOrigin; top-level checks use requestingOrigin. Approving the
+      // embedder must never stand in for approving the embedded frame.
+      const effective = permission === "media" ? (details.securityOrigin || origin) : origin;
+      if (permission === "media") return mediaGrant(contents, effective, details.mediaType);
+      return permitted(permission, effective);
+    });
+    this.profile.setPermissionRequestHandler((contents, permission, callback, details) => {
+      const origin = details.requestingUrl || contents?.getURL() || "";
+      if (permission !== "media" || !mediaOrigin(origin)) {
+        callback(permitted(permission, origin));
+        return;
+      }
+      const types = Array.isArray(details.mediaTypes) && details.mediaTypes.length
+        ? details.mediaTypes : ["audio", "video"];
+      if (types.every((type) => mediaGrant(contents, origin, type))) {
+        callback(true);
+        return;
+      }
+      const devices = types.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type).join(" and ");
+      const titleDevices = types.map((type) => type === "video" ? "camera" : type === "audio" ? "microphone" : type)
+        .map((device, index) => index === 0 ? device[0].toUpperCase() + device.slice(1) : device).join(" and ");
+      dialog.showMessageBox(this.window, {
+        type: "question",
+        buttons: ["Allow", "Don't allow"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        title: `Use ${titleDevices}?`,
+        message: `Allow ${new URL(origin).hostname} to use your ${devices}?`,
+        detail: "The site can use the devices only while this browser tab is open.",
+      }).then(({ response }) => {
+        if (response === 0) for (const type of types) grantMedia(contents, origin, type);
+        callback(response === 0);
+      }, () => callback(false));
+    });
     this.profile.on("will-download", (_event, item) => {
       item.setSaveDialogOptions({ title: "Save browser download", defaultPath: path.join(app.getPath("downloads"), path.basename(item.getFilename())) });
     });
