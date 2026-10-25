@@ -97,6 +97,7 @@ export interface Message {
   attachments?: ImageAttachment[];
 }
 export interface QueuedMessage { id: string; text: string; attachments?: ImageAttachment[]; deliveryUncertain?: boolean; dispatchReady?: boolean; state: "queued" | "sending" | "steering" }
+export interface CheckoutInfo { path: string; name: string; branch: string; linked: boolean }
 export interface Tab {
   id: string;
   root: string;

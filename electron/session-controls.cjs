@@ -60,6 +60,40 @@ async function codexThreadServers(s, loaded) {
   return { servers, skipped: probed.skipped, any: Object.keys(s.mcpOverrides).length > 0 || probed.skipped.length > 0 };
 }
 const exists = (file) => fs.stat(file).then(() => true, () => false);
+// A rich agent can move its own working folder mid-turn (EnterWorktree, or a
+// `git worktree add` followed by cd in a tool). Its process cwd never changes,
+// but its transcript records the real cwd: Claude stamps every entry, Codex
+// stamps session/turn-context rows. Walk backwards in bounded chunks until a
+// cwd record is found, so a long tool-heavy tail cannot hide the last one.
+async function tailCwd(file, agent) {
+  if (!file) return "";
+  const handle = await fs.open(file, "r").catch(() => null);
+  if (!handle) return "";
+  try {
+    const { size: total } = await handle.stat();
+    const CHUNK = 256 * 1024, MAX = 8 * 1024 * 1024;
+    let end = total, scanned = 0, remainder = "";
+    while (end > 0 && scanned < MAX) {
+      const size = Math.min(CHUNK, end, MAX - scanned);
+      const start = end - size;
+      const buffer = Buffer.alloc(size);
+      await handle.read(buffer, 0, size, start);
+      scanned += size; end = start;
+      const lines = (buffer.toString("utf8") + remainder).split("\n");
+      remainder = start > 0 ? lines.shift() || "" : "";
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line || !line.includes('"cwd"')) continue;
+        try {
+          const row = JSON.parse(line);
+          const cwd = typeof row.cwd === "string" ? row.cwd : agent === "codex" && typeof row.payload?.cwd === "string" ? row.payload.cwd : "";
+          if (cwd && path.isAbsolute(cwd)) return cwd;
+        } catch { /* A partial line at a chunk seam is retried whole via remainder. */ }
+      }
+    }
+    return "";
+  } finally { await handle.close().catch(() => {}); }
+}
 const jsonFile = (file) => fs.readFile(file, "utf8").then(JSON.parse).catch((error) => { if (error.code === "ENOENT") return {}; throw error; });
 const atomicWrite = async (file, text) => { const temporary = file + "." + uuid() + ".tmp"; await fs.writeFile(temporary, text, { mode: 0o600 }); await renameWithRetry(temporary, file); };
 const inFolder = (root, child) => { const relative = path.relative(root, child); return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative); };
@@ -324,6 +358,13 @@ class Runtime {
     }
     if (claude) {
       if (e.session_id && e.session_id !== s.sessionRef) { o.event(s, { type: "error", message: "Claude returned a different conversation identifier. Reconnect the saved chat before sending more messages." }); return; }
+      if (typeof e.cwd === "string" && path.isAbsolute(e.cwd) && path.resolve(e.cwd) !== path.resolve(s.cwd || s.root)) {
+        void fs.realpath(e.cwd).then((cwd) => fs.stat(cwd).then((stat) => {
+          if (this.closed || !stat.isDirectory() || path.resolve(cwd) === path.resolve(s.cwd || s.root)) return;
+          s.cwd = cwd;
+          o.event(s, { type: "cwd", cwd });
+        })).catch(() => {});
+      }
       if (e.type === "user" && this.userAcks.has(e.uuid)) { const ack = this.userAcks.get(e.uuid); clearTimeout(ack.timer); this.userAcks.delete(e.uuid); ack.resolve(); }
       if (e.type === "system") {
         s.nativeBackgroundTasks ||= new Set();
@@ -361,6 +402,7 @@ class Runtime {
       }
       if (e.type === "system" && e.subtype === "status") this.phase(e.status === "compacting");
       if (e.type === "result") {
+        void this.syncCwd().catch(() => {});
         if (e.is_error && (e.error_code === "authentication_failed" || /failed to authenticate|OAuth session expired|invalid authentication credentials|OAuth access token (?:has been )?(?:revoked|expired)/i.test([e.result, ...(e.errors || [])].join("\n")))) { this.authFailed = true; s.claudeAuthInvalid = true; }
         // Belt and braces for the pre-launch transcript check: if Claude still says the
         // conversation is missing, stop resuming it so the next send starts fresh.
@@ -676,6 +718,24 @@ class Runtime {
     return this.context ?? null;
   }
   reportContext() { this.owner.event(this.s, { type: "context", contextTokens: this.context ?? null, contextWindow: this.contextWindow ?? null }); }
+  // Follow a worktree the agent entered during a turn: the CLI process cwd is
+  // fixed at launch, but its transcript tail names the folder it is working in.
+  // Adopting it updates s.cwd, which the status bar and Source Control follow.
+  async syncCwd() {
+    const { s, owner: o } = this;
+    if (!["claude", "codex"].includes(s.agent) || s.projectless) return;
+    const file = s.agent === "codex" ? this.rolloutPath : await require("./session-history.cjs").sessionFile(s).catch(() => null);
+    const found = await tailCwd(file, s.agent).catch(() => "");
+    if (!found || this.closed) return;
+    const cwd = await fs.realpath(found).catch(() => "");
+    if (!cwd || this.closed) return;
+    const stat = await fs.stat(cwd).catch(() => null);
+    if (!stat?.isDirectory()) return;
+    if (path.resolve(cwd) === path.resolve(s.cwd || s.root)) return;
+    s.cwd = cwd;
+    o.event(s, { type: "cwd", cwd });
+    return cwd;
+  }
   async content(text, attachments = []) {
     const images = await this.owner.attachments?.resolve(this.s.controlId, attachments) || [];
     return [{ type: "text", text }, ...images.map((image) => this.s.agent === "codex" ? { type: "localImage", path: image.path } : this.s.agent === "claude" ?
@@ -910,7 +970,7 @@ class Runtime {
       if (p.turn?.id && this.activeTurnId && p.turn.id !== this.activeTurnId) return;
       this.activeTurnId = null;
       if (p.turn?.error) { if (require("./auth.cjs").authError(JSON.stringify(p.turn.error))) { this.authFailed = true; s.authInvalid = true; } o.event(s, { type: "error", message: p.turn.error.message }); }
-      o.finish(s, p.turn?.status === "failed" ? 1 : p.turn?.status === "interrupted" ? 130 : 0);
+      void this.syncCwd().catch(() => {}).finally(() => o.finish(s, p.turn?.status === "failed" ? 1 : p.turn?.status === "interrupted" ? 130 : 0));
     }
   }
   async hydrateCodex() {
@@ -1036,4 +1096,4 @@ async function ensureRuntime(owner, s) {
   s.authInvalid = false;
   return runtime;
 }
-module.exports = { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp };
+module.exports = { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp, tailCwd };

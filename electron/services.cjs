@@ -8,7 +8,7 @@ const { promisify } = require("node:util");
 const execute = promisify(execFile);
 const { discoverCommands, normalize } = require("./commands.cjs");
 const { catalog, efforts, piShortcuts, cliOptions, extraOptions } = require("./models.cjs");
-const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp } = require("./session-controls.cjs");
+const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp, tailCwd } = require("./session-controls.cjs");
 const { accountEnvironment } = require("./accounts.cjs");
 const { MessageQueue } = require("./message-queue.cjs");
 const { prepareProfile, profiledLaunch } = require("./profile-launcher.cjs");
@@ -1368,9 +1368,41 @@ class Sessions {
       throw error;
     }
   }
+  // Pi's bridge has no live cwd: its session file header records the launch
+  // folder, and a worktree entered mid-turn changes it. Sync before the turn
+  // closes so the status bar and Source Control land on the new checkout.
+  async syncPiCwd(s) {
+    if (s.agent !== "pi" || s.projectless || !s.sessionRef) return;
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const found = await tailCwd(s.sessionRef, "pi").catch(() => "");
+    if (!found || s.stopping) return;
+    const cwd = await fs.realpath(found).catch(() => "");
+    if (!cwd || s.stopping) return;
+    const stat = await fs.stat(cwd).catch(() => null);
+    if (!stat?.isDirectory() || path.resolve(cwd) === path.resolve(s.cwd || s.root)) return;
+    s.cwd = cwd;
+    this.event(s, { type: "cwd", cwd });
+  }
   finish(s, code = 0) {
     if (s.stopping) return;
     if (!s.busy) return;
+    if (s.agent === "pi") {
+      // Single-flight: a second completion signal while the cwd sync is pending
+      // merges its exit code and returns. Only the sync continuation closes the
+      // turn, so done never fires with a stale checkout.
+      if (s.piFinishCode === undefined) s.piFinishCode = code;
+      else if (code !== 0) s.piFinishCode = code;
+      if (s.piCwdSyncing) return;
+      s.piCwdSyncing = true;
+      const turn = s.turn;
+      void this.syncPiCwd(s).catch(() => {}).finally(() => {
+        s.piCwdSyncing = false;
+        const merged = s.piFinishCode ?? code;
+        s.piFinishCode = undefined;
+        if (s.turn === turn) this.finish(s, merged);
+      });
+      return;
+    }
     if (s.stopRequested && code === 0) code = 130;
     clearTimeout(s.progressTimer);
     s.busy = false;
