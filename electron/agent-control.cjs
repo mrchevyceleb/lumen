@@ -11,8 +11,8 @@ const object = (value) => value && typeof value === "object" && !Array.isArray(v
 function validate(action, body) {
   if (!object(body)) throw new ControlError("Send a JSON object.");
   const fields = {
-    create: ["id", "agent", "name", "owner", "root", "cwd", "model", "effort", "workMode", "accountId", "text"],
-    message: ["id", "text"], queue: ["messageId", "action"], configure: ["model", "effort", "workMode"],
+    create: ["id", "agent", "name", "owner", "root", "cwd", "model", "effort", "workMode", "serviceTier", "accountId", "text"],
+    message: ["id", "text"], queue: ["messageId", "action"], configure: ["model", "effort", "workMode", "serviceTier"],
     rename: ["name"], answer: ["requestId", "response"], stop: [], focus: [], close: [], resume: [],
   }[action];
   if (!fields) return body;
@@ -21,7 +21,7 @@ function validate(action, body) {
     if (body[key] !== undefined && typeof body[key] !== "string") throw new ControlError(`${key} must be a string.`);
   }
   for (const key of ["id", "messageId"]) if (body[key] !== undefined && !uuid.test(body[key])) throw new ControlError(`${key} must be a UUID.`);
-  for (const key of ["name", "owner", "model", "effort", "workMode", "accountId"]) {
+  for (const key of ["name", "owner", "model", "effort", "workMode", "serviceTier", "accountId"]) {
     if (body[key] !== undefined && (body[key].length > 300 || /[\x00-\x1f]/.test(body[key]))) throw new ControlError(`Invalid ${key}.`);
   }
   if (action === "create") {

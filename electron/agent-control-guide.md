@@ -22,11 +22,11 @@ node $lumen stop TASK_ID
 node $lumen resume TASK_ID
 node $lumen focus TASK_ID
 node $lumen models TASK_ID
-node $lumen configure TASK_ID --model MODEL_ID --effort LEVEL
+node $lumen configure TASK_ID --model MODEL_ID --effort LEVEL --speed default|priority|ultrafast
 node $lumen rename TASK_ID --name 'Login repair'
 ```
 
-Choose `pi`, `codex`, `claude`, `grok`, or `shell`. Omit `--root` for no workspace. `--cwd` must be inside the selected workspace. `--account-id` selects a saved account; omitting it uses the app's default. Empty strings select CLI defaults for model/effort/account. Configure uses the same supported-model validation as the UI. Claude/Grok support `--work-mode plan` or `default`; other agents retain their own planning workflows.
+Choose `pi`, `codex`, `claude`, `grok`, or `shell`. Omit `--root` for no workspace. `--cwd` must be inside the selected workspace. `--account-id` selects a saved account; omitting it uses the app's default. Empty strings select CLI defaults for model/effort/account. Configure uses the same supported-model validation as the UI. Claude/Grok support `--work-mode plan` or `default`; other agents retain their own planning workflows. Codex models also accept `--speed` with a service tier id from the model catalog (`priority` is Fast, `ultrafast` where offered, `default` is standard speed); tasks report it as `serviceTier`.
 
 Task IDs are stable across normal app restarts. List includes all open chats, including ones created by a human. Native chats can be inspected or focused, but must return to readable view in the app before sending prompts or changing controls. Shell commands retain their PowerShell process and must finish before another is sent. Closing requires an idle readable chat with an empty queue. Closing removes that tab just as closing it in the UI does; saved files and native CLI history remain.
 
@@ -57,7 +57,7 @@ Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON
 | --- | --- |
 | GET /v1 | Protocol version, capabilities, ready |
 | GET /v1/tasks | `{ tasks: [...] }` with metadata, queues, context usage, pending questions |
-| POST /v1/tasks | `id?`, `agent?`, `root?`, `cwd?`, `name?`, `owner?`, `accountId?`, `model?`, `effort?`, `workMode?`, `text?`; returns visible task |
+| POST /v1/tasks | `id?`, `agent?`, `root?`, `cwd?`, `name?`, `owner?`, `accountId?`, `model?`, `effort?`, `workMode?`, `serviceTier?`, `text?`; returns visible task |
 | GET /v1/tasks/ID | Metadata plus the last 200 visible messages (up to 80,000 characters each); `transcriptLimited` reports truncation |
 | POST /v1/tasks/ID/messages | `{ id?: UUID, text: string }`; returns `messageId`, queue and current task |
 | POST /v1/tasks/ID/queue | `{ messageId: UUID, action: "steer" or "remove" }` |
@@ -66,7 +66,7 @@ Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON
 | POST /v1/tasks/ID/focus | `{}`; selects the task in the app |
 | POST /v1/tasks/ID/rename | `{ name: string }` |
 | GET /v1/tasks/ID/models | Installed CLI's model catalog and effort options |
-| POST /v1/tasks/ID/configure | `model?`, `effort?`, `workMode?`; requires idle readable view |
+| POST /v1/tasks/ID/configure | `model?`, `effort?`, `workMode?`, `serviceTier?`; requires idle readable view |
 | POST /v1/tasks/ID/answer | `{ requestId: string, response: object }` |
 | POST /v1/tasks/ID/close | `{}`; requires idle readable view and empty queue |
 

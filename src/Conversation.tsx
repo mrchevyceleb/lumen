@@ -370,7 +370,7 @@ export default function Conversation({
       // Lumen's own commands run against the idle chat. Host commands with
       // arguments are rejected exactly as the idle path rejects them, instead
       // of being queued and then diverging from Lumen's transcript.
-      const bareHostCommand = hostCommand.trim() === hostCommandName && (isHostCommand || ["/model", "/effort", "/thinking"].includes(hostCommandName));
+      const bareHostCommand = hostCommand.trim() === hostCommandName && (isHostCommand || ["/model", "/effort", "/thinking", ...(tab.agent === "codex" ? ["/fast", "/speed"] : [])].includes(hostCommandName));
       if (isHostCommand && !bareHostCommand) {
         setSessionError(hostCommandName === "/clear" ? "Use /clear without extra text." : "Use /compact without extra text.");
         return;
@@ -436,6 +436,10 @@ export default function Conversation({
     }
     if (tab.agent !== "shell" && ["/model", "/effort", "/thinking"].includes(hostCommand)) {
       setControlPanel(hostCommand === "/model" ? "model" : "effort");
+      setInput(""); setDismissedCommands(true); return;
+    }
+    if (tab.agent === "codex" && ["/fast", "/speed"].includes(hostCommand)) {
+      setControlPanel("speed");
       setInput(""); setDismissedCommands(true); return;
     }
     setSubmitting(true);

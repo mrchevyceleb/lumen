@@ -10,7 +10,8 @@ class ModelCache {
       if (fs.statSync(this.file).size < 8 * 1024 * 1024) {
         const saved = JSON.parse(fs.readFileSync(this.file, "utf8"));
         for (const [key, entry] of saved.entries || []) if (entry?.value?.models?.length && Date.now() - entry.at < 7 * 86400000 &&
-          entry.value.models.every((m) => typeof m.id === "string" && typeof m.name === "string" && Array.isArray(m.efforts))) this.entries.set(key, entry);
+          entry.value.models.every((m) => typeof m.id === "string" && typeof m.name === "string" && Array.isArray(m.efforts) &&
+            (entry.agent !== "codex" || Array.isArray(m.speeds)))) this.entries.set(key, entry);
       }
     } catch {}
   }
@@ -30,7 +31,7 @@ class ModelCache {
     const effort = levels.some((e) => e.id === requested) ? requested : levels.some((e) => e.id === selected?.defaultEffort) ? selected.defaultEffort : "";
     return { at: entry.at, value: { ...entry.value, currentModel: model,
       currentEffort: s.agent === "google" ? selected?.defaultEffort || "" : effort,
-      currentEfforts: levels, currentMode: s.workMode || "" } };
+      currentEfforts: levels, currentMode: s.workMode || "", currentSpeed: s.serviceTier || "" } };
   }
   remember(s, info) {
     const key = this.key(s), old = this.entries.get(key)?.value;

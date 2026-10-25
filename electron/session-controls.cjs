@@ -6,7 +6,7 @@ const os = require("node:os");
 const TOML = require("@iarna/toml");
 const net = require("node:net");
 const WebSocket = require("ws");
-const { cliOptions } = require("./models.cjs");
+const { cliOptions, speedId } = require("./models.cjs");
 const { codexAccountOptions, renameWithRetry } = require("./accounts.cjs");
 const uuid = () => crypto.randomUUID();
 const withoutNulls = (value) => Array.isArray(value) ? value.map(withoutNulls) : value && typeof value === "object" ?
@@ -726,7 +726,7 @@ class Runtime {
       this.threadServers = servers.servers;
       this.skippedServers = servers.skipped;
       if (servers.skipped.length) this.noteClosedServers(servers.skipped);
-      const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", config: { ...codexConfig(s), ...(servers.any ? { mcp_servers: servers.servers } : {}) }, ...(s.model ? { model: s.model } : {}) };
+      const params = { cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", config: { ...codexConfig(s), ...(servers.any ? { mcp_servers: servers.servers } : {}) }, ...(s.model ? { model: s.model } : {}), ...(s.serviceTier ? { serviceTier: s.serviceTier } : {}) };
       const resuming = !!s.sessionRef;
       // The installed daemon's paginated-history implementation does not yet
       // persist empty threads reliably. Legacy history can materialize an empty
@@ -737,8 +737,15 @@ class Runtime {
       s.sessionStarted = true;
       s.model ||= result.model;
       s.effort ||= result.reasoningEffort || "";
+      // The thread echoes the tier it actually runs at (config default included,
+      // unknown tiers dropped to null). Adopt the echo, but an explicit Standard
+      // pick must survive a server that reports standard speed as null. Older
+      // CLIs may omit the field entirely, in which case keep the request.
+      if (result.serviceTier !== undefined)
+        s.serviceTier = result.serviceTier ? speedId(result.serviceTier) : s.serviceTier === "default" ? "default" : "";
+      else s.serviceTier = speedId(s.serviceTier || "");
       o.event(s, { type: "session", sessionRef: s.sessionRef });
-      o.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
+      o.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode, serviceTier: s.serviceTier });
       this.rolloutPath = result.thread.path;
       if (!resuming) {
         await this.request("thread/name/set", { threadId: s.sessionRef, name: s.savedTab?.name || "Lumen · " + path.basename(s.cwd) });
@@ -1011,7 +1018,7 @@ class Runtime {
       await this.servers();
       const disabledPluginIds = [...new Set(this.rawServers.filter((r) => r.pluginId && s.mcpOverrides[r.name] === false).map((r) => r.pluginId))];
       const collaborationMode = s.workMode ? { mode: s.workMode, settings: { model: s.model || (await this.request("model/list")).data?.find((model) => model.isDefault)?.model, reasoning_effort: s.effort || null, developer_instructions: null } } : undefined;
-      const result = await this.request("turn/start", { threadId: s.sessionRef, clientUserMessageId: message.id, input: await this.content(text, message.attachments), disabledPluginIds, ...(collaborationMode ? { collaborationMode } : {}), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}) });
+      const result = await this.request("turn/start", { threadId: s.sessionRef, clientUserMessageId: message.id, input: await this.content(text, message.attachments), disabledPluginIds, ...(collaborationMode ? { collaborationMode } : {}), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}), ...(s.serviceTier ? { serviceTier: s.serviceTier } : {}) });
       if (s.busy && result.turn?.status === "inProgress") this.activeTurnId = result.turn.id;
     }
     else {
@@ -1244,7 +1251,7 @@ class Runtime {
     if (servers.skipped.length) this.noteClosedServers(servers.skipped);
     await this.request("thread/unsubscribe", { threadId: s.sessionRef });
     const result = await this.request("thread/resume", { threadId: s.sessionRef, cwd: s.cwd, approvalPolicy: "never", sandbox: "danger-full-access", excludeTurns: true,
-      config: { ...codexConfig(s), ...(servers.any ? { mcp_servers: servers.servers } : {}) }, ...(s.model ? { model: s.model } : {}) });
+      config: { ...codexConfig(s), ...(servers.any ? { mcp_servers: servers.servers } : {}) }, ...(s.model ? { model: s.model } : {}), ...(s.serviceTier ? { serviceTier: s.serviceTier } : {}) });
     if (result.thread.id !== s.sessionRef) throw new Error("Codex returned a different conversation. The saved chat has been retained.");
     this.rolloutPath = result.thread.path;
     s.codexReconfigure = false;

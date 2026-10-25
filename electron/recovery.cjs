@@ -81,7 +81,7 @@ class RecoveryStore {
     const tab = { ...saved, ...existing, id: session.id, controlId: session.controlId,
       root: session.root, cwd: session.cwd, projectless: session.projectless, scratchId: saved.scratchId || session.scratchId,
       agent: session.agent, mode: session.mode, accountId: session.accountId, accountName: session.accountName,
-      command: session.command, model: session.model, effort: session.effort, workMode: session.workMode,
+      command: session.command, model: session.model, effort: session.effort, workMode: session.workMode, serviceTier: session.serviceTier || "",
       contextTokens: session.contextTokens ?? existing?.contextTokens ?? saved.contextTokens ?? null,
       contextWindow: session.contextWindow ?? existing?.contextWindow ?? saved.contextWindow ?? null,
       sessionRef: session.sessionRef, autoCompactTokens: session.autoCompactTokens, mcpOverrides: session.mcpOverrides,
@@ -147,7 +147,7 @@ class RecoveryStore {
     if (event.type === "message-delivery-state") { const message = tab.messages.find((item) => item.id === event.messageId); if (message) message.deliveryState = event.deliveryState; }
     if (event.type === "view") tab.mode = event.mode;
     if (event.type === "cwd") tab.cwd = event.cwd;
-    if (["config", "session-controls"].includes(event.type)) for (const key of ["model", "effort", "workMode", "autoCompactTokens", "mcpOverrides"]) if (Object.hasOwn(event, key)) tab[key] = event[key];
+    if (["config", "session-controls"].includes(event.type)) for (const key of ["model", "effort", "workMode", "serviceTier", "autoCompactTokens", "mcpOverrides"]) if (Object.hasOwn(event, key)) tab[key] = event[key];
     if (event.type === "context") applyContext(tab, event);
     if (event.type === "queue") { tab.queuedMessages = event.queuedMessages; tab.queuePaused = event.queuePaused; }
     if (event.type === "user-message-retracted") tab.messages = tab.messages.filter((message) => message.id !== event.messageId);

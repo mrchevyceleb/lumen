@@ -651,6 +651,7 @@ export default function App() {
         model: resume?.model ?? control?.model ?? config.model,
         effort: resume?.effort ?? control?.effort ?? config.effort ?? "",
         workMode: resume?.workMode || control?.workMode || "",
+        serviceTier: resume?.serviceTier ?? control?.serviceTier ?? "",
         sessionRef: resume?.sessionRef || "",
         scratchId: resume?.scratchId || scratchId || "",
         controlId: resume?.controlId || control?.controlId || "",
@@ -689,6 +690,7 @@ export default function App() {
         sessionRef: resume?.sessionRef,
         model: request.model,
         effort: request.effort,
+        serviceTier: request.serviceTier,
         workMode: request.workMode,
         controlId: created.controlId,
         autoCompactTokens: resume?.autoCompactTokens ?? control?.autoCompactTokens ?? null,
@@ -1029,7 +1031,7 @@ export default function App() {
             else if (e.type === "reconnected") { t.recoveryError = undefined; t.exited = false; t.phase = undefined; t.phaseText = undefined; }
             else if (e.type === "phase") { t.phase = e.phase; t.phaseText = e.text; }
             else if (e.type === "session") t.sessionRef = e.sessionRef;
-            else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; }
+            else if (e.type === "config") { t.model = e.model; t.effort = e.effort; t.workMode = e.workMode; if (e.serviceTier !== undefined) t.serviceTier = e.serviceTier; }
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
             else if (e.type === "context") { t.contextTokens = e.contextTokens; t.contextWindow = e.contextWindow; t.contextStale = false; }
             else if (e.type === "queue") { t.queuedMessages = e.queuedMessages; t.queuePaused = e.queuePaused; }
@@ -1263,7 +1265,7 @@ export default function App() {
         }
         created = await addTab(body.agent, "rich", folder, undefined, body.cwd, body.accountId, undefined, {
           controlId: body.id, managedBy: body.owner || "Local agent", name: body.name || `Agent task · ${agentNames[body.agent as Agent]}`,
-          model: body.model, effort: body.effort, workMode: body.workMode,
+          model: body.model, effort: body.effort, workMode: body.workMode, serviceTier: body.serviceTier,
         });
         if (!created) throw new Error("Could not create the chat.");
         audit(created, `${created.managedBy} created this task through Lumen's local interface.`);
@@ -1708,7 +1710,7 @@ export default function App() {
       void (async () => {
         // Create the replacement FIRST. Closing first would remove the old chat from
         // recovery before we know the new one exists, and a failed create would orphan it.
-        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, nameCustom: tab.nameCustom === true, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides }, tab.controlId || tab.id);
+        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, nameCustom: tab.nameCustom === true, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, serviceTier: tab.serviceTier, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides }, tab.controlId || tab.id);
         if (!created) throw new Error("Could not start the fresh chat. This chat was kept.");
         await api("session:close", tab.id);
         delete browserOpenRef.current[tab.controlId || tab.id];
