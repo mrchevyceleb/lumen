@@ -8,7 +8,7 @@ export function taskView(tab: Tab, requests: { session: string; request: PiReque
     id: tab.controlId || tab.id, name: tab.name, agent: tab.agent, owner: tab.managedBy || "",
     root: tab.projectless ? "" : tab.root, cwd: tab.cwd, mode: tab.mode,
     accountId: tab.accountId || "", accountName: tab.accountName || "CLI default",
-    model: tab.model || "", effort: tab.effort || "", workMode: tab.workMode || "",
+    model: tab.model || "", effort: tab.effort || "", workMode: tab.workMode || "", serviceTier: tab.serviceTier || "",
     busy: tab.busy, phase: tab.phase || "", exitCode: tab.exitCode ?? null,
     status: pendingRequests.length ? "needs-input" : tab.busy ? "working" : tab.queuePaused && tab.queuedMessages?.length ? "queue-paused" : tab.queuedMessages?.length ? "queued" : tab.exitCode && tab.exitCode !== 0 ? "failed" : "idle",
     contextTokens: tab.contextTokens ?? null, contextWindow: tab.contextWindow ?? null,

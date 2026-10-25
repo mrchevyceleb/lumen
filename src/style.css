@@ -4163,7 +4163,7 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .model-control span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-control:hover, .model-control:focus-visible { color: var(--text); background: var(--surface); border-color: var(--border); }
 .model-control:first-child { color: var(--text); }
-.model-control.plan-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.model-control.plan-active, .model-control.speed-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .control-status, .control-error { font-size: 11px; color: var(--muted); }
 .control-error { color: #e4a398; flex-basis: 100%; padding: 5px 9px; }
 .model-search-row { display: flex; gap: 8px; align-items: center; padding: 0 0 16px; }

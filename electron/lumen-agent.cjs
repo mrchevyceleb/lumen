@@ -15,7 +15,7 @@ const help = `Lumen agent control — all tasks are visible in the app
   lumen-agent remove TASK_ID MESSAGE_ID
   lumen-agent resume|stop|focus|close TASK_ID
   lumen-agent models TASK_ID
-  lumen-agent configure TASK_ID --model MODEL --effort LEVEL --work-mode plan
+  lumen-agent configure TASK_ID --model MODEL --effort LEVEL --work-mode plan --speed default|priority|ultrafast
   lumen-agent rename TASK_ID --name "New title"
   lumen-agent answer TASK_ID REQUEST_ID --response '{"value":"..."}'
   lumen-agent watch TASK_ID [--timeout 600] [--interval 1000]
@@ -42,7 +42,7 @@ async function main() {
     else { if (process.argv[i + 1] === undefined || process.argv[i + 1].startsWith("--")) throw new Error(`Missing value for ${arg}`); options[arg.slice(2)] = process.argv[++i]; }
   }
   if (options.help || !args.length || args[0] === "help") return console.log(help);
-  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks"]);
+  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "speed", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks"]);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown option --${key}`);
   const dataDir = process.platform === "win32" ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Lumen") : process.platform === "darwin" ? path.join(os.homedir(), "Library", "Application Support", "Lumen") : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Lumen");
   const file = options.connection || process.env.LUMEN_CONTROL_FILE || path.join(dataDir, "agent-control.json");
@@ -87,7 +87,7 @@ async function main() {
   if (command !== "create" && command !== "list" && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id || "")) throw new Error("Choose a task ID from list or create.");
   let body = {};
   for (const [key, value] of Object.entries(options)) {
-    const field = { "work-mode": "workMode", "account-id": "accountId" }[key] || key;
+    const field = { "work-mode": "workMode", "account-id": "accountId", speed: "serviceTier" }[key] || key;
     if (!["connection", "text-file", "timeout", "interval", "response"].includes(key)) body[field] = value;
   }
   if (options["text-file"]) { if (options.text !== undefined) throw new Error("Choose --text or --text-file."); body.text = await fs.readFile(options["text-file"], "utf8"); }

@@ -5,6 +5,14 @@ const { claudeAccountSettings, codexAccountOptions } = require("./accounts.cjs")
 const label = (id) => ({ xhigh: "Extra high", off: "Off" }[id] || id.charAt(0).toUpperCase() + id.slice(1));
 const efforts = (values) => (values || []).map((v) => typeof v === "string" ? { id: v, name: label(v), description: "" } :
   { id: v.reasoningEffort || v.id || v.value, name: v.label || label(v.reasoningEffort || v.id || v.value), description: v.description || "" });
+// Codex names its speed tiers per model ("priority" is Fast, plus "ultrafast" on
+// some). "fast" is the older alias Codex still accepts; store the canonical id.
+// "default" is Codex's explicit standard speed: it stays distinct from "" (unset,
+// follow the CLI's own config) so picking Standard can override config.toml.
+const speedId = (value) => value === "fast" ? "priority" : typeof value === "string" ? value : "";
+const speeds = (m) => Array.isArray(m.serviceTiers) && m.serviceTiers.length ?
+  m.serviceTiers.filter((t) => t && typeof t.id === "string").map((t) => ({ id: speedId(t.id), name: t.name || label(t.id), description: t.description || "" })).filter((t) => t.id && t.id !== "default") :
+  (m.additionalSpeedTiers || []).filter((t) => typeof t === "string").map((t) => ({ id: speedId(t), name: t === "fast" ? "Fast" : label(t), description: "" })).filter((t) => t.id && t.id !== "default");
 function catalog(agent, values, current = {}) {
   if (!Array.isArray(values)) throw new Error("This CLI did not return its available models. Try native view.");
   const models = values.slice(0, 5000).map((m) => {
@@ -13,7 +21,8 @@ function catalog(agent, values, current = {}) {
     if (agent === "claude") return { id: m.value, name: m.displayName, description: m.description || "",
       efforts: efforts(m.supportedEffortLevels), defaultEffort: "" };
     if (agent === "codex") return { id: m.model, name: m.displayName, description: m.description || "",
-      efforts: efforts(m.supportedReasoningEfforts), defaultEffort: m.defaultReasoningEffort };
+      efforts: efforts(m.supportedReasoningEfforts), defaultEffort: m.defaultReasoningEffort,
+      speeds: speeds(m), defaultSpeed: speedId(m.defaultServiceTier) };
     return { id: m.modelId, name: m.name, description: m.description || "",
       efforts: efforts(m._meta?.reasoningEfforts), defaultEffort: m._meta?.reasoningEfforts?.find((e) => e.default)?.id || "" };
   }).filter((m) => typeof m.id === "string" && !!m.id && typeof m.name === "string");
@@ -41,6 +50,7 @@ function cliOptions(s) {
   if (s.agent === "codex") args.push(...codexAccountOptions(s));
   if (s.effort && s.agent !== "google") args.push(...(s.agent === "codex" ? ["-c", `model_reasoning_effort=${JSON.stringify(s.effort)}`] :
     [s.agent === "pi" ? "--thinking" : ["claude", "google"].includes(s.agent) ? "--effort" : "--reasoning-effort", s.effort]));
+  if (s.agent === "codex" && s.serviceTier) args.push("-c", `service_tier=${JSON.stringify(s.serviceTier)}`);
   if (["claude", "grok"].includes(s.agent)) args.push("--permission-mode", s.workMode === "plan" ? "plan" : "bypassPermissions");
   return args;
 }
@@ -72,7 +82,7 @@ function extraOptions(s) {
       if (["--input-format", "--output-format", "--conversation", "--print", "--prompt", "-p", "--mode", "--effort"].includes(key)) { if (!arg.includes("=")) i++; continue; }
     }
     if (flags.has(arg.split("=")[0])) { if (!arg.includes("=")) i++; continue; }
-    const ownedConfig = (value) => (s.model && /^model\s*=/.test(value)) || (s.effort && /^model_reasoning_effort\s*=/.test(value)) || (s.accountId && /^(cli_auth_credentials_store|model_provider|openai_base_url|chatgpt_base_url|model_providers\.(?:openai|"openai")\.[^=]+)\s*=/.test(value)) || /^(sandbox_mode|approval_policy|shell_environment_policy\.(inherit|ignore_default_excludes))\s*=/.test(value);
+    const ownedConfig = (value) => (s.model && /^model\s*=/.test(value)) || (s.effort && /^model_reasoning_effort\s*=/.test(value)) || (s.serviceTier && /^service_tier\s*=/.test(value)) || (s.accountId && /^(cli_auth_credentials_store|model_provider|openai_base_url|chatgpt_base_url|model_providers\.(?:openai|"openai")\.[^=]+)\s*=/.test(value)) || /^(sandbox_mode|approval_policy|shell_environment_policy\.(inherit|ignore_default_excludes))\s*=/.test(value);
     if (s.agent === "codex" && ["-c", "--config"].includes(arg) && ownedConfig(s.extraArgs[i + 1] || "")) { i++; continue; }
     if (s.agent === "codex" && arg.startsWith("--config=") && ownedConfig(arg.slice(9))) continue;
     if (s.workMode && s.agent === "grok" && arg === "--no-plan") continue;
@@ -80,4 +90,4 @@ function extraOptions(s) {
   }
   return result;
 }
-module.exports = { catalog, efforts, piShortcuts, cliOptions, extraOptions };
+module.exports = { catalog, efforts, piShortcuts, cliOptions, extraOptions, speedId };

@@ -29,10 +29,11 @@ export interface EffortOption { id: string; name: string; description: string }
 export interface ModelOption {
   id: string; name: string; description: string; provider?: string;
   efforts: EffortOption[]; defaultEffort?: string;
+  speeds?: EffortOption[]; defaultSpeed?: string;
 }
 export interface ModelCatalog {
   sourceKey?: string;
-  models: ModelOption[]; currentModel: string; currentEffort: string; currentMode?: string;
+  models: ModelOption[]; currentModel: string; currentEffort: string; currentMode?: string; currentSpeed?: string;
   currentEfforts?: EffortOption[]; favorites?: string[];
   shortcuts?: Record<string, string[]>;
   warning?: string;
@@ -128,6 +129,7 @@ export interface Tab {
   model?: string;
   effort?: string;
   workMode?: string;
+  serviceTier?: string;
   controlId?: string;
   autoCompactTokens?: number | null;
   mcpOverrides?: Record<string, boolean>;
@@ -227,6 +229,7 @@ export interface SessionEvent {
   model?: string;
   effort?: string;
   workMode?: string;
+  serviceTier?: string;
   autoCompactTokens?: number | null;
   mcpOverrides?: Record<string, boolean>;
   contextTokens?: number | null;

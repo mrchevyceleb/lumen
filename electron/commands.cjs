@@ -1,6 +1,6 @@
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
-const { catalog, cliOptions, extraOptions } = require("./models.cjs");
+const { catalog, cliOptions, extraOptions, speedId } = require("./models.cjs");
 const { accountEnvironment, codexAccountOptions } = require("./accounts.cjs");
 
 // Read metadata from the installed CLI. No user prompt or model turn is sent.
@@ -81,7 +81,8 @@ async function discoverCommands(s, launcher, kill) {
           }
           if ((codexCommands || s.modelsOnly) && codexConfig && codexModels.ready) finish(null, { commands: codexCommands || [], origin: "Codex CLI", warning: codexWarning,
             catalog: catalog("codex", codexModels, { currentModel: s.model || codexConfig.model || "",
-              currentEffort: s.effort || codexConfig.model_reasoning_effort || "" }) });
+              currentEffort: s.effort || codexConfig.model_reasoning_effort || "",
+              currentSpeed: s.serviceTier || speedId(codexConfig.service_tier || "") }) });
         }
         if (s.agent === "grok") {
           if (e.id === 1) {

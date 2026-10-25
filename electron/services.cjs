@@ -7,7 +7,7 @@ const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const execute = promisify(execFile);
 const { discoverCommands, normalize } = require("./commands.cjs");
-const { catalog, efforts, piShortcuts, cliOptions, extraOptions } = require("./models.cjs");
+const { catalog, efforts, piShortcuts, cliOptions, extraOptions, speedId } = require("./models.cjs");
 const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp, tailCwd } = require("./session-controls.cjs");
 const { accountEnvironment } = require("./accounts.cjs");
 const { MessageQueue } = require("./message-queue.cjs");
@@ -648,6 +648,7 @@ class Sessions {
     model = "",
     effort = "",
     workMode = "",
+    serviceTier = "",
     extraArgs = [],
     sessionRef = "",
     scratchId = "",
@@ -673,6 +674,10 @@ class Sessions {
     if ([model, effort, workMode].some((value) => typeof value !== "string" || value.length > 300 || /[\x00-\x1f]/.test(value)))
       throw new Error("Invalid session controls.");
     if (workMode && (!["claude", "grok", "codex", "google"].includes(agent) || !["plan", "default"].includes(workMode))) throw new Error("Invalid planning mode.");
+    if (typeof serviceTier !== "string" || serviceTier.length > 40 || /[\x00-\x1f]/.test(serviceTier)) throw new Error("Invalid speed setting.");
+    serviceTier = speedId(serviceTier);
+    if (serviceTier && agent !== "codex") throw new Error("Speed settings are available for Codex models.");
+    if (serviceTier && !/^[a-z][a-z0-9-]*$/.test(serviceTier)) throw new Error("Invalid speed setting.");
     if (sessionRef && agent !== "pi" && !/^[0-9a-f-]{36}$/i.test(sessionRef))
       throw new Error("Invalid CLI session identifier.");
     if (
@@ -734,6 +739,7 @@ class Sessions {
       model,
       effort,
       workMode,
+      serviceTier,
       extraArgs,
       sessionRef,
       controlId,
@@ -751,7 +757,7 @@ class Sessions {
     s.messageQueue = new MessageQueue(this, s, queuedMessages);
     this.sessions.set(id, s);
     this.recovery?.bind(s, savedTab);
-    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, controlId, contextTokens: s.contextTokens, contextWindow: s.contextWindow, ...controls, accountId: s.accountId, accountName: s.accountName, ...s.messageQueue.state() };
+    return { id, agent, mode, root, cwd: s.cwd, projectless, scratchId, model, effort, workMode, serviceTier, controlId, contextTokens: s.contextTokens, contextWindow: s.contextWindow, ...controls, accountId: s.accountId, accountName: s.accountName, ...s.messageQueue.state() };
   }
   async sessionControls(id) {
     const s = this.get(id);
@@ -1110,9 +1116,22 @@ class Sessions {
         this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
       } else if (s.agent === "codex") {
         const runtime = await ensureRuntime(this, s);
-        info = catalog("codex", (await runtime.request("model/list")).data, { currentModel: s.model, currentEffort: s.effort, currentMode: s.workMode });
+        info = catalog("codex", (await runtime.request("model/list")).data, { currentModel: s.model, currentEffort: s.effort, currentMode: s.workMode, currentSpeed: s.serviceTier || "" });
       } else info = (await this.commands(id, refresh)).catalog;
       if (!info || !this.sessions.has(id) || s.stopping || s.transitioning) throw new Error("Model discovery was canceled.");
+      // A chat can be created or recovered with a tier its model no longer
+      // offers; the fresh catalog is the first place that can be known. Only
+      // judge when the model actually publishes its tiers.
+      if (s.agent === "codex" && s.serviceTier && s.serviceTier !== "default") {
+        const offered = info.models.find((m) => m.id === (s.model || info.currentModel))?.speeds || [];
+        if (offered.length && !offered.some((speed) => speed.id === s.serviceTier)) {
+          // "default", not "": the live thread may already run at the stale
+          // tier, and only an explicit standard tier overrides it.
+          s.serviceTier = "default"; info.currentSpeed = "default";
+          this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode, serviceTier: "default" });
+          if (s.runtime && s.sessionRef && !s.busy) await s.runtime.request("thread/settings/update", { threadId: s.sessionRef, serviceTier: "default" }).catch(() => {});
+        }
+      }
       s.catalog = info; s.catalogAt = Date.now(); s.catalogCached = !!info.warning;
       if (!info.warning) this.modelCache?.remember(s, info);
       this.emit({ id, type: "models", catalog: info });
@@ -1122,10 +1141,15 @@ class Sessions {
   }
   async configure(id, change) {
     const s = this.get(id);
-    const previousModel = s.model;
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") throw new Error("Finish this turn before changing its controls.");
     const info = await this.models(id, !!s.catalogCached && s.agent !== "google");
     if (s.busy || s.stopping || s.transitioning || s.setting || !this.sessions.has(id)) throw new Error("This chat is busy or closing.");
+    // Captured after models(): discovery itself can settle effort or a stale
+    // tier, and a rollback must return to that settled state, not before it.
+    const previousModel = s.model;
+    const previousEffort = s.effort;
+    const previousWorkMode = s.workMode;
+    const previousTier = s.serviceTier || "";
     s.setting = true;
     try {
       if (change.cycle && s.agent !== "pi") throw new Error("Native cycling is available for Pi.");
@@ -1143,6 +1167,7 @@ class Sessions {
           if (s.agent === "pi") await this.piBridge(s, "select", { model: model.id });
           s.model = model.id;
           if (s.agent === "google" || s.agent !== "pi" && !model.efforts.some((e) => e.id === s.effort)) s.effort = model.defaultEffort || "";
+          if (s.agent === "codex" && s.serviceTier && s.serviceTier !== "default" && !(model.speeds || []).some((speed) => speed.id === s.serviceTier)) s.serviceTier = "default";
         }
         if (change.effort !== undefined) {
           const levels = s.agent === "pi" ? efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) :
@@ -1161,6 +1186,14 @@ class Sessions {
           if (!["claude", "grok", "codex", "google"].includes(s.agent) || !["plan", "default"].includes(change.workMode)) throw new Error("Use this agent's native planning workflow.");
           s.workMode = change.workMode;
         }
+        if (change.serviceTier !== undefined && (change.serviceTier !== "" || s.agent === "codex")) {
+          if (s.agent !== "codex") throw new Error("Speed settings are available for Codex models.");
+          if (typeof change.serviceTier !== "string" || change.serviceTier.length > 40 || /[\x00-\x1f]/.test(change.serviceTier)) throw new Error("Invalid speed setting.");
+          const tier = speedId(change.serviceTier);
+          const speeds = info.models.find((m) => m.id === (s.model || info.currentModel))?.speeds || [];
+          if (tier && tier !== "default" && !speeds.some((speed) => speed.id === tier)) throw new Error("This speed is not available for the selected model.");
+          s.serviceTier = tier;
+        }
       }
       if (s.agent === "pi") {
         const state = await this.piRpc(s, "get_state");
@@ -1168,22 +1201,37 @@ class Sessions {
         s.effort = state.thinkingLevel || "";
         s.catalog = { ...info, currentModel: s.model, currentEffort: s.effort,
           currentEfforts: efforts((await this.piRpc(s, "get_available_thinking_levels")).levels) };
-      } else s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode };
+      } else s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode, currentSpeed: s.serviceTier || "" };
+      const previousContextWindow = s.runtime?.contextWindow ?? s.contextWindow ?? null;
       if (s.agent !== "pi" && s.model !== previousModel) {
         if (s.runtime) s.runtime.contextWindow = null;
         this.event(s, { type: "context", contextTokens: s.contextTokens, contextWindow: null, resetContextWindow: true });
       }
       if (s.agent === "codex" && s.runtime) {
         const model = s.model || info.currentModel || info.models[0]?.id;
-        await s.runtime.request("thread/settings/update", { threadId: s.sessionRef, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}),
-          ...(s.workMode ? { collaborationMode: { mode: s.workMode, settings: { model, reasoning_effort: s.effort || null, developer_instructions: null } } } : {}) });
+        // The local fields above were already mutated; if the live thread rejects
+        // the update, restore them so the UI and the thread cannot drift apart.
+        try {
+          await s.runtime.request("thread/settings/update", { threadId: s.sessionRef, ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}),
+            ...(change.serviceTier !== undefined || s.serviceTier || previousTier ? { serviceTier: s.serviceTier || "default" } : {}),
+            ...(s.workMode ? { collaborationMode: { mode: s.workMode, settings: { model, reasoning_effort: s.effort || null, developer_instructions: null } } } : {}) });
+        } catch (error) {
+          const contextWasReset = s.model !== previousModel;
+          s.model = previousModel; s.effort = previousEffort; s.workMode = previousWorkMode; s.serviceTier = previousTier;
+          s.catalog = { ...info, currentModel: s.model || info.currentModel, currentEffort: s.effort, currentMode: s.workMode || info.currentMode, currentSpeed: s.serviceTier || "" };
+          if (contextWasReset) {
+            if (s.runtime) s.runtime.contextWindow = previousContextWindow;
+            this.event(s, { type: "context", contextTokens: s.contextTokens, contextWindow: previousContextWindow });
+          }
+          throw error;
+        }
         if (s.model !== previousModel) await s.runtime.contextUsage().catch(() => {});
       } else if (s.agent !== "pi" && s.runtime) await this.resetRuntime(s);
       if (["claude", "grok"].includes(s.agent) && s.model !== previousModel) {
         void ensureRuntime(this, s).catch(() => {});
       }
-      this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode });
-      return { model: s.model, effort: s.effort, workMode: s.workMode, catalog: s.catalog };
+      this.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode, serviceTier: s.serviceTier || "" });
+      return { model: s.model, effort: s.effort, workMode: s.workMode, serviceTier: s.serviceTier || "", catalog: s.catalog };
     } finally { s.setting = false; }
   }
   event(s, event) {

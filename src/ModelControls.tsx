@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Brain, Check, ChevronDown, ListChecks, RefreshCw, Search, Star } from "lucide-react";
+import { Brain, Check, ChevronDown, ListChecks, RefreshCw, Search, Star, Zap } from "lucide-react";
 import { Modal } from "./Components";
 import { api, type ModelCatalog, type Tab } from "./types";
 import { agentNames } from "./settings";
-export type ControlPanel = "model" | "effort" | "plan" | null;
+export type ControlPanel = "model" | "effort" | "speed" | "plan" | null;
 function matches(e: KeyboardEvent, binding: string) {
   const parts = binding.toLowerCase().split("+");
   return e.key.toLowerCase() === parts.at(-1) && e.ctrlKey === parts.includes("ctrl") &&
@@ -24,6 +24,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
   const [shortcuts, setShortcuts] = useState<Record<string, string[]>>({});
   const alive = useRef(true);
   const inFlight = useRef(false);
+  const speedVisible = useRef(false);
   const root = useRef<HTMLDivElement>(null);
   const picker = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -42,12 +43,12 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
     } catch (e: any) { if (alive.current) setError(e.message); }
     finally { inFlight.current = false; if (alive.current) setLoading(false); }
   };
-  const apply = async (change: { model?: string; effort?: string; workMode?: string; cycle?: string }) => {
+  const apply = async (change: { model?: string; effort?: string; workMode?: string; serviceTier?: string; cycle?: string }) => {
     if (inFlight.current || tab.busy) return;
     inFlight.current = true; setApplying(true); setError("");
     try {
-      const value = await api<{ model: string; effort: string; workMode: string; catalog: ModelCatalog }>("session:configure", tab.id, change);
-      onConfig({ model: value.model, effort: value.effort, workMode: value.workMode });
+      const value = await api<{ model: string; effort: string; workMode: string; serviceTier: string; catalog: ModelCatalog }>("session:configure", tab.id, change);
+      onConfig({ model: value.model, effort: value.effort, workMode: value.workMode, serviceTier: value.serviceTier });
       if (alive.current) { setInfo(value.catalog); setPanel(null); }
     } catch (e: any) { if (alive.current) setError(e.message); }
     finally { inFlight.current = false; if (alive.current) setApplying(false); }
@@ -69,6 +70,7 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
       }
       if (!action && matches(e, "ctrl+alt+m")) action = "model";
       if (!action && matches(e, "ctrl+alt+r")) action = "effort-picker";
+      if (!action && tab.agent === "codex" && speedVisible.current && matches(e, "ctrl+alt+f")) action = "speed";
       if (!action && matches(e, "ctrl+shift+p")) action = "plan";
       if (tab.agent === "claude") {
         if (matches(e, "alt+p")) action = "model";
@@ -89,15 +91,24 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
   const levels = tab.agent === "pi" ? info?.currentEfforts || [] : model?.efforts || [];
   const effort = tab.effort || info?.currentEffort;
   const workMode = tab.workMode || info?.currentMode;
+  const speeds = tab.agent === "codex" ? model?.speeds || [] : [];
+  const speed = tab.serviceTier ?? info?.currentSpeed ?? "";
+  const fastTier = !!speed && speed !== "default";
+  const speedName = speeds.find((option) => option.id === speed)?.name ||
+    (fastTier ? { priority: "Fast", ultrafast: "Ultrafast" }[speed] || speed : "");
+  const showSpeed = tab.agent === "codex" && (fastTier || (!!info && speeds.length > 0));
+  speedVisible.current = showSpeed;
   const modelChoices = favorites ? (info?.favorites || []).flatMap((id) => info?.models.filter((m) => m.id === id) || []) : info?.models || [];
   const choices = panel === "model" ? modelChoices.filter((m) =>
     `${m.name} ${m.id} ${m.description}`.toLowerCase().includes(query.toLowerCase())) :
+    panel === "speed" ? [{ id: "default", name: "Standard", description: "Normal speed at normal usage." }, ...speeds] :
     [...(["pi", "google"].includes(tab.agent) || !levels.length ? [] : [{ id: "", name: "CLI default", description: "Use the CLI's effort setting for this model." }]), ...levels];
+  const currentId = panel === "model" ? modelId : panel === "speed" ? speed || "default" : effort;
   const selection = Math.min(selected, Math.max(0, choices.length - 1));
   useEffect(() => {
     picker.current?.querySelectorAll<HTMLElement>(".model-option")[selection]?.scrollIntoView({ block: "nearest" });
   }, [selection, query]);
-  const choose = (id: string) => void apply(panel === "model" ? { model: id } : { effort: id });
+  const choose = (id: string) => void apply(panel === "model" ? { model: id } : panel === "speed" ? { serviceTier: id } : { effort: id });
   const locked = tab.busy || loading || applying;
   return <div className="model-controls" ref={root}>
     <button disabled={locked} className="model-control" aria-label="Choose model" title="Choose model · Ctrl+Alt+M" onClick={() => setPanel("model")}>
@@ -106,14 +117,17 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
     <button disabled={locked} className="model-control effort-control" aria-label="Choose effort level" title="Effort · Ctrl+Alt+R" onClick={() => setPanel("effort")}>
       <Brain size={13} /><span>{effort || "Effort"}</span><ChevronDown size={12} />
     </button>
+    {showSpeed && <button disabled={locked} className={`model-control ${fastTier ? "speed-active" : ""}`} aria-label="Choose speed" title="Speed · Ctrl+Alt+F" onClick={() => setPanel("speed")}>
+      <Zap size={13} /><span>{speedName || (speed === "default" ? "Standard" : "Speed")}</span><ChevronDown size={12} />
+    </button>}
     <button disabled={locked} className={`model-control ${workMode === "plan" ? "plan-active" : ""}`} aria-label="Choose planning mode" title="Planning · Ctrl+Shift+P" onClick={() => setPanel("plan")}>
       <ListChecks size={13} /><span>{workMode === "plan" ? "Plan" : "Mode"}</span><ChevronDown size={12} />
     </button>
     {!panel && (loading || applying || error) && <span className={error ? "control-error" : "control-status"} role="status">{error || "Updating controls…"}</span>}
     {!panel && error && <button className="text-button" disabled={loading} onClick={() => void load(true)}>Retry models</button>}
     {!panel && !loading && !error && info?.warning && <span className="control-status" role="status">{info.warning}</span>}
-    {panel && <Modal title={panel === "model" ? "Choose a model" : panel === "effort" ? "Thinking & effort" : "Plan before building"}
-      subtitle={`${agentNames[tab.agent]} · ${panel === "plan" ? "Choose the CLI's planning workflow." : "Apply to this conversation. Your draft and history stay here."}`}
+    {panel && <Modal title={panel === "model" ? "Choose a model" : panel === "effort" ? "Thinking & effort" : panel === "speed" ? "Response speed" : "Plan before building"}
+      subtitle={`${agentNames[tab.agent]} · ${panel === "plan" ? "Choose the CLI's planning workflow." : panel === "speed" ? "Faster speeds use more of your plan's usage." : "Apply to this conversation. Your draft and history stay here."}`}
       onClose={() => { if (!applying) setPanel(null); }}>
       <div className="model-picker-body" ref={picker}>
       {panel !== "plan" ? <>
@@ -129,16 +143,17 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
           {!!info?.favorites?.length && panel === "model" && <button className={`favorite-filter ${favorites ? "active" : ""}`} aria-pressed={favorites} onClick={() => { setFavorites(!favorites); setSelected(0); }}><Star size={14} />Favorites</button>}
           <button className="picker-refresh" aria-label="Refresh available models" disabled={locked} onClick={() => void load(true)}><RefreshCw size={16} /></button>
         </div>
-        <div id="model-picker-options" className="model-options" role="listbox" aria-label={panel === "model" ? "Available models" : "Available effort levels"} aria-busy={locked}>
+        <div id="model-picker-options" className="model-options" role="listbox" aria-label={panel === "model" ? "Available models" : panel === "speed" ? "Available speeds" : "Available effort levels"} aria-busy={locked}>
           {loading ? <p className="picker-empty">Reading your installed CLI…</p> : choices.length === 0 ?
             <p className="picker-empty">{panel === "effort" ? "This model does not expose adjustable thinking. Choose another model or open native view." : "No matching models. Refresh or check your CLI account in native view."}</p> :
-            choices.map((choice, index) => <button key={choice.id} id={`model-picker-option-${index}`} role="option" disabled={locked} aria-selected={choice.id === (panel === "model" ? modelId : effort)}
+            choices.map((choice, index) => <button key={choice.id} id={`model-picker-option-${index}`} role="option" disabled={locked} aria-selected={choice.id === currentId}
               className={`model-option ${selection === index ? "highlighted" : ""}`} onMouseEnter={() => setSelected(index)} onClick={() => choose(choice.id)}>
               <div><strong>{choice.name}</strong>{panel === "model" && info?.favorites?.includes(choice.id) && <Star size={12} className="favorite-star" />}
-                {choice.id === (panel === "model" ? modelId : effort) && <Check size={15} className="current-check" />}</div>
+                {choice.id === currentId && <Check size={15} className="current-check" />}</div>
               {choice.description && <p>{choice.description}</p>}{panel === "model" && <small>{choice.id}</small>}
             </button>)}
         </div>
+        {panel === "speed" && !loading && !speeds.length && <p className="picker-note">This model does not offer faster speeds. Choose another model to go faster.</p>}
         {tab.agent === "pi" && <p className="picker-note">Favorites come from Pi's scoped model list. Your model and thinking shortcuts work in readable view.</p>}
         {info?.warning && <p className="picker-note" role="status">{info.warning}</p>}
         <p className="picker-note">{applying ? "Applying to your chat…" : "Native CLI options · changes apply to the next turn"}</p>
