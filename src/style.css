@@ -2142,6 +2142,9 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   margin-left: auto;
   opacity: 0.6;
 }
+.worktree-banner { color: var(--accent); }
+.checkout-chip { flex: 0 1 auto; min-width: 0; max-width: 46%; }
+.checkout-chip.worktree-chip { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .session-empty {
   max-width: 620px;
   margin: 5vh auto 0;

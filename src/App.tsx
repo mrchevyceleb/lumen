@@ -2031,6 +2031,8 @@ export default function App() {
                         });
                       }}
                       onDetach={() => setAttachment("")}
+                      checkout={checkoutPath ? { path: checkout?.path || checkoutPath, name: checkoutName || checkoutPath, branch: statusWorkspace?.git.branch || "", linked: linkedCheckout } : undefined}
+                      onCheckout={() => { setWorktreeFocus(gitRootOf(statusWorkspace) || checkoutPath); setDialog("worktrees"); }}
                     />
                   )}
                   </> : <SessionStart key={root} workspace={workspace} settings={settings} available={boot.agents}

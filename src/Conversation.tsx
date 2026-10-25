@@ -17,10 +17,11 @@ import {
   Cable,
   Shrink,
   LogIn,
+  GitBranch,
 } from "lucide-react";
 import { Busy, CopyButton, IconButton } from "./Components";
 import ContextIndicator from "./ContextIndicator";
-import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand, type Entry, type MentionResults } from "./types";
+import { api, type Settings, type Tab, type Message, type CommandInventory, type SlashCommand, type Entry, type MentionResults, type CheckoutInfo } from "./types";
 import CommandMenu from "./CommandMenu";
 import FileMentionMenu from "./FileMentionMenu";
 import ModelControls, { type ControlPanel } from "./ModelControls";
@@ -108,6 +109,8 @@ export default function Conversation({
   onForceStop,
   onContinue,
   onReconnect,
+  checkout,
+  onCheckout,
 }: {
   tab: Tab;
   settings: Settings;
@@ -132,6 +135,8 @@ export default function Conversation({
   onForceStop: () => void;
   onContinue: () => void;
   onReconnect: () => void;
+  checkout?: CheckoutInfo;
+  onCheckout?: () => void;
 }) {
   const input = tab.draft || "";
   const setInput = (value: string) => onConfig({ draft: value });
@@ -628,6 +633,17 @@ export default function Conversation({
             <span>Open this workspace ↗</span>
           </button>
         )}
+        {tab.agent !== "shell" && checkout?.linked && (
+          <button
+            className="cwd-banner worktree-banner"
+            onClick={() => onCheckout?.()}
+            title={checkout.path}
+          >
+            <GitBranch size={13} />
+            Worktree: {checkout.name}{checkout.branch ? ` · ${checkout.branch}` : ""}
+            <span>Manage worktrees ↗</span>
+          </button>
+        )}
         <div className="composer-anchor">
         {menuOpen && <CommandMenu commands={commands} selected={selection} loading={commandLoading} error={commandError}
           warning={inventory.warning} origin={inventory.origin} agent={agentNames[tab.agent]}
@@ -750,6 +766,9 @@ export default function Conversation({
           </div>
           </div>
           <div className="composer-toolbar">
+              {checkout && <button className={`model-control checkout-chip${checkout.linked ? " worktree-chip" : ""}`} aria-label={`Current ${checkout.linked ? "worktree" : "folder"}: ${checkout.path}`} title={`${checkout.linked ? "Worktree" : "Folder"}: ${checkout.path}${checkout.branch ? `\nBranch: ${checkout.branch}` : ""}`} onClick={() => onCheckout?.()}>
+                <GitBranch size={13} /><span>{checkout.linked ? `Worktree: ${checkout.name}` : checkout.name}{checkout.branch ? ` · ${checkout.branch}` : ""}</span>
+              </button>}
               {tab.agent !== "shell" && <IconButton
                 label="Attach images or videos"
                 onClick={onAttach}
