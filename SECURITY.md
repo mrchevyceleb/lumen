@@ -21,7 +21,7 @@ Lumen launches agent CLIs in their most permissive modes so they can work withou
 - Claude Code and Google Antigravity run with `--dangerously-skip-permissions` (Claude's shell sandbox is also disabled).
 - Codex runs with `danger-full-access` and no approval prompts.
 - Grok runs with permission bypass and `--sandbox off`.
-- Outside plan mode, Lumen approves native tool callbacks automatically.
+- Outside plan mode, Lumen approves native tool callbacks automatically. In plan mode, read-only exploration inside the workspace folder is also approved automatically; writing, shell commands, and reads pointed outside that folder still ask. Claude's Bash working directory stays pinned to the folder the chat started in.
 
 Agents can read and change files, run any command, start processes, and use the network with your account's permissions. Only open workspaces and run prompts you trust. Treat untrusted repositories, prompt files, MCP servers, and web content as a prompt-injection risk. This behavior is by design; reports that only restate it are not vulnerabilities, but ways for untrusted input to escalate beyond it are.
 

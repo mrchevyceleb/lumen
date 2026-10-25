@@ -159,8 +159,10 @@ export default function Conversation({
   const [focused, setFocused] = useState(true);
   const [caret, setCaret] = useState(0);
   const request = useRef(0);
+  const busyRef = useRef(tab.busy);
+  busyRef.current = tab.busy;
   const loadedCommands = useRef(false);
-  const loadingCommands = useRef(false);
+  const loadingCommands = useRef<Promise<{ inventory?: CommandInventory; error?: string }> | null>(null);
   const commandToken = input.match(/^([/$])([^\s]*)([\s\S]*)$/);
   const menuOpen = tab.agent !== "shell" && !tab.busy && !controlPanel && !sessionPanel && focused && !dismissedCommands && !!commandToken &&
     (commandToken[1] === "/" || tab.agent === "codex") && caret > 0 && caret <= commandToken[2].length + 1;
@@ -238,26 +240,31 @@ export default function Conversation({
     queuedMentionAccept.current = null;
     if (shownMentionEntries.length) selectMention(shownMentionEntries[mentionSelection]);
   }, [caret, input, mentionOpen, mentionSelection, queuedMentionSettled, shownMentionEntries]);
-  const loadCommands = async (refresh = false) => {
-    if (loadingCommands.current) return;
-    loadingCommands.current = true;
+  const loadCommands = (refresh = false): Promise<{ inventory?: CommandInventory; error?: string }> => {
+    if (loadingCommands.current) return loadingCommands.current;
     const current = ++request.current;
     setCommandLoading(true);
     setCommandError("");
-    try {
-      const result = await api<CommandInventory>("session:commands", tab.id, refresh);
-      if (request.current !== current) return;
-      setInventory(result);
-      loadedCommands.current = true;
-      return result;
-    } catch (e: any) {
-      if (request.current === current) setCommandError(e.message);
-    } finally {
-      if (request.current === current) { setCommandLoading(false); loadingCommands.current = false; }
-    }
+    const pending = (async () => {
+      try {
+        const result = await api<CommandInventory>("session:commands", tab.id, refresh);
+        if (request.current !== current) return { error: "Commands changed while loading." };
+        setInventory(result);
+        loadedCommands.current = true;
+        return { inventory: result };
+      } catch (e: any) {
+        if (request.current === current) setCommandError(e.message);
+        return { error: e.message || "Could not load this agent's commands." };
+      }
+    })().finally(() => {
+      if (request.current === current) setCommandLoading(false);
+      if (loadingCommands.current === pending) loadingCommands.current = null;
+    });
+    loadingCommands.current = pending;
+    return pending;
   };
   useEffect(() => {
-    if (menuOpen && !loadedCommands.current && !commandError) void loadCommands();
+    if (menuOpen && !loadedCommands.current && !commandError) { void loadCommands(); }
   }, [menuOpen, commandError]);
   useEffect(() => () => { request.current++; }, []);
   useEffect(() => { setSelectedCommand(0); }, [query]);
@@ -351,13 +358,49 @@ export default function Conversation({
     }
   };
   const submit = async () => {
-    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && !isHostCommand && commandLoading)) return;
+    if ((!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || tab.recoveryError || tab.phase === "compacting" || (tab.busy && tab.agent === "shell") || controlPending || submitting || submitLock.current || (isCommandInput && !isLocalCommand && !isHostCommand && commandLoading)) return;
     submitLock.current = true;
     try {
     const hostCommand = input.trim();
     setSessionError("");
     if (tab.busy) {
-      if (isCommandInput) { setSessionError("Queue a normal message while the agent works. Run CLI commands after this turn finishes."); return; }
+      // Queue by default: everything typed while the agent works waits above
+      // the composer and sends as the next turn. Only the explicit Steer
+      // correction button injects into the running turn.
+      // Lumen's own commands run against the idle chat. Host commands with
+      // arguments are rejected exactly as the idle path rejects them, instead
+      // of being queued and then diverging from Lumen's transcript.
+      const bareHostCommand = hostCommand.trim() === hostCommandName && (isHostCommand || ["/model", "/effort", "/thinking"].includes(hostCommandName));
+      if (isHostCommand && !bareHostCommand) {
+        setSessionError(hostCommandName === "/clear" ? "Use /clear without extra text." : "Use /compact without extra text.");
+        return;
+      }
+      if (bareHostCommand || isLocalCommand) {
+        setSessionError("This Lumen command runs when the chat is idle. Queue a message or a CLI command for the next turn.");
+        return;
+      }
+      if (isCommandInput) {
+        // Resolve the command now, exactly as the idle path would, so the queued
+        // text is what the next turn should actually run. Native-view commands
+        // cannot ride the queue; say so instead of queueing text that would
+        // misfire later. Pi extension commands queue natively.
+        setSubmitting(true);
+        try {
+          let available = inventory;
+          if (!loadedCommands.current) {
+            const discovered = await loadCommands();
+            if (!discovered.inventory) { setSessionError(discovered.error || "Could not load this agent's commands. The message was not queued."); return; }
+            if (!busyRef.current) { setSessionError("The turn finished before this command could queue. Review it and send again."); return; }
+            available = discovered.inventory;
+          }
+          const token = input.trim().split(/\s+/)[0];
+          const command = available.commands.find((c) => c.insertText === token || (tab.agent === "codex" && `/${c.name}` === token));
+          if (command?.native) { setSessionError("This command needs Native CLI. Run it after this turn finishes."); return; }
+          const resolved = command && tab.agent === "codex" && token.startsWith("/") ? input.replace(token, command.insertText) : input;
+          if (await onSend(resolved)) { setInput(""); setCaret(0); stick.current = true; }
+          return;
+        } finally { setSubmitting(false); }
+      }
       setSubmitting(true);
       if (await onSend(input)) { setInput(""); setCaret(0); stick.current = true; }
       return;
@@ -400,8 +443,8 @@ export default function Conversation({
     let available = inventory;
     if (isCommandInput && !loadedCommands.current) {
       const discovered = await loadCommands();
-      if (!discovered) return;
-      available = discovered;
+      if (!discovered.inventory) return;
+      available = discovered.inventory;
     }
     const token = input.trim().split(/\s+/)[0];
     const command = available.commands.find((c) => c.insertText === token || (tab.agent === "codex" && `/${c.name}` === token));
@@ -525,7 +568,7 @@ export default function Conversation({
                 onSignIn={onSignIn}
               />
             ))}
-            {tab.busy && (
+            {(tab.busy || tab.phase === "compacting") && (
               <div className="working-indicator" role="status" aria-live="polite">
                 {tab.phase ? <TerminalSquare size={13} /> : <span className="thinking-dots">
                   <i />
@@ -604,7 +647,7 @@ export default function Conversation({
         <div className="composer-anchor">
         {menuOpen && <CommandMenu commands={commands} selected={selection} loading={commandLoading} error={commandError}
           warning={inventory.warning} origin={inventory.origin} agent={agentNames[tab.agent]}
-          onSelect={selectCommand} onHover={setSelectedCommand} onRefresh={() => void loadCommands(true)} onNative={() => onNative()} />}
+          onSelect={selectCommand} onHover={setSelectedCommand} onRefresh={() => { void loadCommands(true); }} onNative={() => onNative()} />}
         {mentionOpen && <FileMentionMenu entries={shownMentionEntries} selected={mentionSelection} loading={mentionLoading || !mentionFresh} error={mentionError} query={mentionQuery}
           truncated={mentionTruncated} ghost={ghost} onSelect={selectMention} onHover={setMentionSelected} />}
         <div className="composer">
@@ -716,7 +759,7 @@ export default function Conversation({
               {(!tab.busy || tab.agent !== "shell") && (
                 <button className="send-button" aria-label={tab.busy ? "Queue message" : "Send message"}
                   title={`${tab.busy ? "Queue message" : "Send message"} · ${settings.enterSend ? "Enter · Shift+Enter for a new line" : "Ctrl+Enter"}`}
-                  disabled={(!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || !!tab.recoveryError || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)} onClick={submit}>
+                  disabled={(!input.trim() && !tab.draftAttachments?.length) || tab.nativeOwned || !!tab.recoveryError || tab.phase === "compacting" || controlPending || submitting || (isCommandInput && !isLocalCommand && commandLoading)} onClick={submit}>
                   <ArrowUp size={18} />
                 </button>
               )}

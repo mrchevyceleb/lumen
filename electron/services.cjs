@@ -714,6 +714,11 @@ class Sessions {
       if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw new Error("Use an absolute working folder.");
       cwd = fsSync.realpathSync(cwd);
       if (!fsSync.statSync(cwd).isDirectory()) throw new Error("Working folder is unavailable.");
+      // A working folder outside the root is legitimate here: shell chats record
+      // one from OSC after `cd`, and older saved chats reopen with theirs. The
+      // plan-mode gate independently refuses relative reads until the runtime's
+      // spawn folder is proven inside the workspace, so no hard rejection is
+      // needed at create time.
     }
     if (agent === "google") effort = require("./google.cjs").variant(model).effort;
     const s = {
@@ -1339,6 +1344,8 @@ class Sessions {
       );
     if (s.busy)
       throw new Error("Wait for this turn to finish or stop it first.");
+    if (s.agent === "pi" && s.piCompacting)
+      throw new Error("Pi is compacting context. Wait for compaction to finish before sending.");
     if (typeof prompt !== "string" || (!prompt.trim() && !queuedMessage?.attachments?.length) || prompt.length > 200000)
       throw new Error("Enter a message under 200,000 characters.");
     if (s.mode === "native")
@@ -1352,6 +1359,11 @@ class Sessions {
     s.hadText = false;
     s.messageStreams = new Map();
     s.piRunActive = false;
+    // A compaction already in flight can clear before this turn's agent_start;
+    // that clear must not finish this new turn early. Its own later clear still
+    // settles the turn if Pi ends up not running an agent for it.
+    s.piCompactClearPendingStart = !!s.piCompacting;
+    s.piAgentStarted = false;
     s.piCompletionStateId = undefined;
     s.piPromptId = undefined;
     s.piCommandFailed = false;
@@ -1764,10 +1776,16 @@ class Sessions {
       try {
         const usage = JSON.parse(e.message.slice("LUMEN_CONTEXT:".length)); this.event(s, { type: "context", contextTokens: usage.contextTokens, contextWindow: usage.contextWindow });
         if (usage.compacting !== undefined) {
+          if (usage.compacting && !s.piAgentStarted) s.piCompactClearPendingStart = true;
           s.piCompacting = usage.compacting;
           this.event(s, { type: "phase", phase: usage.compacting ? "compacting" : undefined });
           if (usage.error) this.event(s, { type: "diagnostic", key: "auto-compact", text: "Auto-compact: " + usage.error + ". The CLI's normal context protection remains active." });
-          if (!usage.compacting && !s.piRunActive) this.finish(s, s.piCommandFailed ? 1 : 0);
+          if (!usage.compacting && !s.piRunActive) {
+            // A no-run extension command needs one fresh state check before its
+            // host turn can settle; a normal prompt still waits for agent_start.
+            if (s.piCompactClearPendingStart && s.piCompletionStateId) this.writePiBridge(s, { id: s.piCompletionStateId, type: "get_state" });
+            else if (!s.piCompactClearPendingStart) this.finish(s, s.piCommandFailed ? 1 : 0);
+          }
         }
       } catch {}
       return;
@@ -1807,10 +1825,11 @@ class Sessions {
       } catch (error) { request.reject(error); }
       return;
     }
-    if (e.type === "agent_start") { s.piRunActive = true; s.piLastError = null; }
+    if (e.type === "agent_start") { s.piRunActive = true; s.piAgentStarted = true; s.piCompactClearPendingStart = false; s.piLastError = null; }
     if (e.type === "agent_settled" && s.piLastError && s.piLastError.turn !== (s.turn || "")) s.piLastError = null;
     if (e.type === "response" && e.command === "get_state" && s.piCompletionStateId && e.id === s.piCompletionStateId && e.success &&
         !s.piRunActive && !e.data?.isStreaming && !e.data?.isCompacting && !e.data?.pendingMessageCount) {
+      s.piCompactClearPendingStart = false;
       if (s.busy && !s.hadText && !s.piCommandFailed) this.text(s, "Command completed.", "command-result", true);
       this.finish(s, s.piCommandFailed ? 1 : 0);
     }
@@ -1905,6 +1924,8 @@ class Sessions {
     }
     if (e.type === "agent_settled") {
       s.piRunActive = false;
+      s.piAgentStarted = false;
+      s.piCompactClearPendingStart = false;
       if (!s.piCompacting) this.finish(s, s.piCommandFailed ? 1 : 0);
       this.writePiBridge(s, { id: uuid(), type: "get_state" });
     }
@@ -1983,7 +2004,9 @@ class Sessions {
         this.event(s, { type: "context", contextTokens: history.contextTokens });
       }
       s.messageQueue.reconcile(history?.messages || [], saved?.acceptedMessageIds || []);
-      this.event(s, { type: "reconnected" }); return;
+      this.event(s, { type: "reconnected" });
+      if (s.piCompacting) this.event(s, { type: "phase", phase: "compacting" });
+      return;
     }
     if (["claude", "grok"].includes(s.agent) && s.sessionRef) {
       if (s.agent === "claude") await claudeHome(this, s); else await grokHome(this, s);
@@ -2003,6 +2026,7 @@ class Sessions {
     }
     if (s.agent !== "google") await ensureRuntime(this, s);
     this.event(s, { type: "reconnected" });
+    if (s.agent === "pi" && s.piCompacting) this.event(s, { type: "phase", phase: "compacting" });
   }
   async releaseRuntime(s) {
     const runtime = s.runtime, child = s.process;

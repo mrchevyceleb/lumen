@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const TOML = require("@iarna/toml");
@@ -16,6 +17,219 @@ const withoutNulls = (value) => Array.isArray(value) ? value.map(withoutNulls) :
 // thread starts and leave out only the ones that are not listening; a server
 // that is running passes through untouched. Nothing on disk is changed.
 const LOCAL_MCP_TIMEOUT_MS = 350;
+// Plan mode exists to think before touching anything, so read-only exploration
+// should not stop for approval: asking about every Read turns planning into a
+// click-through. These Claude Code tools cannot write files or run code, and
+// they auto-allow in plan mode when every path they touch sits inside the
+// chat's own directories; pointed anywhere else (a credential store, say) they
+// ask like everything else. Bash is deliberately absent: a shell command is
+// arbitrary code even when it looks read-only. Skill is absent too: skill
+// content can run shell lines and pre-approve tools. MCP tools ask: their
+// names say nothing about whether they write, and an MCP resource URI is not a
+// filesystem path this gate can prove stays inside the workspace. Task
+// bookkeeping and plan entry only touch agent-internal state, so they never ask.
+const PLAN_READ_ONLY_TOOLS = new Set(["Read", "Glob", "Grep"]);
+const PLAN_FREE_TOOLS = new Set(["TodoRead", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "EnterPlanMode", "ToolSearch"]);
+function toolNeedsPlanConfirm(session, toolName, input) {
+  if (toolName === "ExitPlanMode") return true;
+  if (session?.workMode !== "plan") return false;
+  if (PLAN_FREE_TOOLS.has(toolName)) return false;
+  if (PLAN_READ_ONLY_TOOLS.has(toolName)) {
+    try { return !planPathsInside(session, input, toolName); }
+    catch { return true; } // an unparsable target asks instead of crashing the gate
+  }
+  return true;
+}
+
+// Note: recursive search below a proven base relies on Claude's own directory
+// confinement. `realTarget` canonicalises the base itself (so a symlinked base
+// pointing outside refuses), but a symlinked directory deeper inside the search
+// tree is Claude's traversal decision, the same boundary it enforces in native
+// CLI use. The gate check and Claude's later read are separate syscalls, so a
+// path swapped for a symlink between them is the same race native CLI use has.
+function planPathsInside(session, input, toolName) {
+  const rawPaths = [];      // explicit file or directory targets from the input
+  const scopePaths = [];    // explicit search roots (Grep/Grep `path`) that Claude resolves
+  const patterns = [];      // Glob pattern and `glob` filter directories to prove inside
+  const relativeValues = []; // relative targets whose meaning depends on Claude's cwd
+  let sawPath = false;
+  let needsSpawnBase = false;
+  // Claude expands a leading ~ to the home directory. Keep that meaning here;
+  // resolving it as a workspace child would silently approve credential reads.
+  const expandHome = (value) => value === "~" ? os.homedir() : value.startsWith("~/") || value.startsWith("~\\") ? path.join(os.homedir(), value.slice(2)) : value;
+  const isAbsoluteCandidate = (value) => path.isAbsolute(value) || /^[A-Za-z]:/.test(value);
+  const isDriveRelative = (value) => /^[A-Za-z]:(?![\\/])/.test(value);
+  // A single leading separator is relative to the current drive on Windows.
+  // Double separators are absolute UNC or device paths and can be proven
+  // canonically like any other absolute target.
+  const isRootRelative = (value) => process.platform === "win32" && /^[\\/]/.test(value) && !/^[\\/]{2}/.test(value) && !/^[A-Za-z]:/.test(value);
+  const addTarget = (value) => {
+    if (typeof value !== "string" || !value) return;
+    sawPath = true;
+    const expanded = expandHome(value);
+    if (isDriveRelative(expanded) || isRootRelative(expanded)) throw new Error("drive-relative");
+    if (isAbsoluteCandidate(expanded)) rawPaths.push(expanded);
+    else relativeValues.push(expanded);
+  };
+  const addScope = (value) => {
+    if (typeof value !== "string" || !value) return;
+    sawPath = true;
+    const expanded = expandHome(value);
+    if (isDriveRelative(expanded) || isRootRelative(expanded)) throw new Error("drive-relative");
+    scopePaths.push(expanded);
+    // An explicit search root pins the search's meaning: relative targets under
+    // it are anchored there instead of Claude's spawn folder.
+  };
+  for (const key of ["file_path", "cwd", "notebook_path"]) addTarget(input?.[key]);
+  if (Array.isArray(input?.paths)) for (const value of input.paths) addTarget(value);
+  if (toolName === "Read") addTarget(input?.path);
+  else addScope(input?.path);
+  // Grep's `pattern` is a regex, not a path. Only Glob's pattern and either
+  // tool's explicit `glob` filter describe where files may be read from.
+  const patternKeys = toolName === "Glob" ? ["pattern", "glob"] : ["glob"];
+  for (const key of patternKeys) {
+    const rawValue = input?.[key];
+    if (typeof rawValue !== "string" || !rawValue) continue;
+    const value = expandHome(rawValue);
+    sawPath = true;
+    if (isDriveRelative(value) || isRootRelative(value)) return false;
+    // A `..` segment after a wildcard can still walk out after the wildcard
+    // matches, so any parent traversal in a search pattern asks. A brace group
+    // can hide one ({../..}), so the segment check alone is not enough: refuse
+    // braces whose expansion could reach outside the named base.
+    if (value.split(/[\\/]+/).includes("..")) return false;
+    if (value.includes("{") || value.includes("}")) return false;
+    if (!/[\\/]/.test(value)) {
+      // A slash-free pattern searches Claude's current folder (pinned by an
+      // explicit `path` when the call has one, otherwise its spawn folder).
+      if (!scopePaths.length) needsSpawnBase = true;
+      continue;
+    }
+    // Peel the last segment unconditionally: a wildcard-free absolute pattern
+    // like "/etc/*.conf" (or "/etc/passwd" pasted as a pattern) would otherwise
+    // lose its parent directory and resolve inside the workspace.
+    if (!/[\[\]*?]/.test(value) && !/^[A-Za-z]:/.test(value) && !path.isAbsolute(value)) relativeValues.push(value.replace(/[\\/]+$/, "") || value);
+    if (value.includes("*") || value.includes("?") || value.includes("{") || value.includes("[") || path.isAbsolute(value) || /^[A-Za-z]:/.test(value)) {
+      const prefix = value.split(/[*?[{]/)[0];
+      // A relative glob's base is the text before the first wildcard. Peel one
+      // segment only for an absolute pattern; a relative pattern's base is its
+      // whole pre-wildcard text (Globs anchor leading ** to the search root).
+      const dir = path.isAbsolute(value) || /^[A-Za-z]:/.test(value) ? prefix.replace(/[\\/][^\\/]*$/, "") : prefix.replace(/[\\/]$/, "");
+      // A drive-absolute pattern is outside on a non-Windows host even though
+      // this platform's path parser treats it as a relative workspace child.
+      if (/^[A-Za-z]:/.test(dir) && process.platform !== "win32") return false;
+      // A root-anchored pattern peels to the filesystem root (or a bare drive
+      // letter). Push that root so the inside check below refuses it instead
+      // of falling through to the spawn-folder-only check.
+      patterns.push(dir || path.parse(value).root || value);
+      if (!isAbsoluteCandidate(dir || value)) needsSpawnBase = true;
+    }
+  }
+  // Read and Glob name the thing to read. If neither a path nor a usable search
+  // pattern was supplied, there is nothing this gate can prove is inside.
+  if ((toolName === "Read" || toolName === "Glob") && !sawPath) return false;
+  const comparable = (value) => process.platform === "win32" ? value.toLowerCase() : value;
+  const canonicalRoot = (value) => { try { return comparable(fsSync.realpathSync.native(value)); } catch { return comparable(path.resolve(value)); } };
+  // The workspace root is fixed for the chat and never travels with terminal
+  // OSC output. A home or filesystem root is never a safe auto-allow boundary
+  // by itself.
+  const workspaceRoot = typeof session?.root === "string" && session.root ? canonicalRoot(session.root) : null;
+  if (!workspaceRoot || workspaceRoot === comparable(path.parse(workspaceRoot).root) || workspaceRoot === canonicalRoot(os.homedir())) return false;
+  // A workspace that CONTAINS the home folder (C:\\Users, /home, a parent of it)
+  // would make ~ an in-workspace path, so it refuses as a boundary too.
+  const homeDir = canonicalRoot(os.homedir());
+  if (homeDir === workspaceRoot || homeDir.startsWith(workspaceRoot + path.sep)) return false;
+  const insideWorkspace = (candidate) => candidate === workspaceRoot || candidate.startsWith(workspaceRoot + path.sep);
+  const realTarget = (candidate, base) => {
+    const target = path.resolve(base, candidate);
+    // Follow links on the deepest existing ancestor, then re-append any tail
+    // that does not exist yet. A symlinked directory inside the workspace must
+    // not smuggle a read to its real target outside it.
+    let existing = target;
+    const tail = [];
+    while (true) {
+      try { const real = comparable(fsSync.realpathSync.native(existing)); return tail.length ? path.join(real, ...tail.reverse()) : real; }
+      catch {
+        const parent = path.dirname(existing);
+        if (parent === existing) return comparable(target);
+        tail.push(path.basename(existing));
+        existing = parent;
+      }
+    }
+  };
+  // Relative targets are anchored by the input's own explicit search root when
+  // the call has one. Only relative targets with no anchor, and searches with no
+  // anchor at all, depend on the folder Claude was really spawned in. The live
+  // cwd can be rewritten by terminal OSC output, so it is never an anchor; the
+  // spawn folder is recorded when the runtime starts. If it is unknown (a
+  // session object built before the runtime recorded it) or outside the
+  // workspace, relative targets ask.
+  // A Grep whose input names no path at all (including one that only carries
+  // a `glob` filter) searches Claude's current folder, so it needs the proven
+  // spawn folder before anything else. Checked up front because `glob` adds a
+  // pattern, which would hide the bareness from later checks.
+  const hasUsablePaths = Array.isArray(input?.paths) && input.paths.some((value) => typeof value === "string" && !!value);
+  const isBareGrepEarly = toolName === "Grep" && ![input?.path, input?.file_path, input?.cwd, input?.notebook_path].some((v) => typeof v === "string" && v) && !hasUsablePaths;
+  // The spawn folder is recorded when the runtime starts and never travels
+  // with terminal OSC output. There is no live-cwd fallback: when it is unknown
+  // or outside the workspace, anything relative asks.
+  const spawnFolder = () => typeof session?.spawnCwd === "string" && session.spawnCwd ? canonicalRoot(session.spawnCwd) : null;
+  let spawnBase = null;
+  const needsSpawnFolder = relativeValues.length || needsSpawnBase || scopePaths.length || isBareGrepEarly;
+  if (needsSpawnFolder) {
+    const spawn = spawnFolder();
+    // Anchored searches (an explicit absolute path, or a relative one proven
+    // below) let Claude search exactly the named folder, so an outside spawn
+    // folder does not block them. Anything that searches Claude's current
+    // folder instead needs that folder proven inside the workspace.
+    const searchesCurrentFolder = !(scopePaths.length || rawPaths.length || patterns.length);
+    if (!spawn || (searchesCurrentFolder && !insideWorkspace(spawn))) return false;
+    if (relativeValues.length && !scopePaths.length && !insideWorkspace(spawn)) return false;
+    spawnBase = spawn;
+  }
+  const anchoredBase = (value) => {
+    const scope = scopePaths.find((candidate) => !isAbsoluteCandidate(candidate));
+    if (scope) {
+      // A relative search root is itself resolved against Claude's spawn folder,
+      // the one base Claude really uses, never the OSC-rewritten live cwd.
+      if (!spawnBase) return false;
+      return realTarget(scope, spawnBase);
+    }
+    const absoluteScope = scopePaths.find((candidate) => isAbsoluteCandidate(candidate));
+    if (absoluteScope) return realTarget(absoluteScope, path.parse(workspaceRoot).root);
+    return spawnBase;
+  };
+  const inside = (candidate, base) => {
+    if (!base) return false;
+    const target = realTarget(candidate, base);
+    return target === workspaceRoot || target.startsWith(workspaceRoot + path.sep);
+  };
+  if (!rawPaths.every((candidate) => inside(candidate, workspaceRoot))) return false;
+  if (!patterns.every((candidate) => {
+    const base = isAbsoluteCandidate(candidate) ? null : anchoredBase();
+    return isAbsoluteCandidate(candidate) ? inside(candidate, workspaceRoot) : inside(candidate, base);
+  })) return false;
+  // Every explicit search root must itself sit inside the workspace.
+  for (const candidate of scopePaths) {
+    if (isAbsoluteCandidate(candidate)) { if (!inside(candidate, workspaceRoot)) return false; }
+    else {
+      if (!spawnBase || !inside(candidate, spawnBase)) return false;
+    }
+  }
+  if (!insideWorkspace(anchoredBase() || workspaceRoot) && scopePaths.length) return false;
+  if (relativeValues.length) {
+    const base = anchoredBase();
+    if (!base || !insideWorkspace(base)) return false;
+    if (!relativeValues.every((candidate) => inside(candidate, base))) return false;
+  }
+  // A search with no anchor at all, including a Grep with no path, searches
+  // Claude's spawn folder, so it only auto-allows when that folder is proven
+  // inside the workspace. A workspace that CONTAINS the home folder (C:\Users,
+  // /home) turns ~ into an in-workspace path, so it is refused as a boundary.
+  if (needsSpawnBase && !spawnBase) return false;
+  if (isBareGrepEarly && !(spawnBase && insideWorkspace(spawnBase))) return false;
+  return true;
+}
 function localMcpAddress(value) {
   let url;
   try { url = new URL(String(value)); } catch { return null; }
@@ -312,7 +526,7 @@ class Runtime {
         const reply = (response) => this.write({ type: "control_response", response: { subtype: "success", request_id: e.request_id, response } });
         if (e.request.tool_name === "AskUserQuestion") this.ask({ title: "Claude Code needs your input", questions: e.request.input?.questions?.map((q) => ({ ...q, id: q.question })) || [] },
           (answer) => reply(answer.cancelled ? { behavior: "deny", message: "The user cancelled this question." } : { behavior: "allow", updatedInput: { ...e.request.input, answers: answer.answers } }));
-        else if (s.workMode === "plan" || e.request.tool_name === "ExitPlanMode") this.ask({ method: "confirm", title: "Claude Code · plan mode", message: `Allow ${e.request.tool_name}?\n${JSON.stringify(e.request.input || {}, null, 2)}` },
+        else if (toolNeedsPlanConfirm(s, e.request.tool_name, e.request.input)) this.ask({ method: "confirm", title: "Claude Code · plan mode", message: `Allow ${e.request.tool_name}?\n${JSON.stringify(e.request.input || {}, null, 2)}` },
           (answer) => {
             reply(answer.confirmed ? { behavior: "allow", updatedInput: e.request.input || {} } : { behavior: "deny", message: "The user declined this action." });
             if (answer.confirmed && e.request.tool_name === "ExitPlanMode") { s.workMode = "default"; o.event(s, { type: "config", workMode: s.workMode }); }
@@ -431,10 +645,17 @@ class Runtime {
   async initialize() {
     const { owner: o, s } = this;
     await o.prepareLaunch(s);
+    // The plan-mode gate resolves relative tool paths against the folder this
+    // child was really spawned in. The live cwd can be rewritten by terminal
+    // OSC output, so record the spawn folder here and never update it.
+    s.spawnCwd = s.cwd || s.root;
     let args, env;
     if (s.agent === "claude") {
       s.nativeBackgroundTasks = new Set(); s.nativeBackgroundWork = false;
-      env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s) };
+      // Keep Claude's tool working directory pinned to the spawn folder: Bash
+      // `cd` must not silently move where Read/Glob/Grep resolve, which is also
+      // what the plan-mode gate proves inside the workspace.
+      env = { CLAUDE_CONFIG_DIR: await claudeHome(o, s), CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "1" };
       args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", ...cliOptions(s), ...launchOptions(s)];
       if (!s.sessionRef) { s.sessionRef = uuid(); o.event(s, { type: "session", sessionRef: s.sessionRef }); }
       else if (s.sessionStarted && !await require("./session-history.cjs").sessionFile(s).then(async (file) => {
@@ -1096,4 +1317,4 @@ async function ensureRuntime(owner, s) {
   s.authInvalid = false;
   return runtime;
 }
-module.exports = { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp, tailCwd };
+module.exports = { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp, tailCwd, toolNeedsPlanConfirm };

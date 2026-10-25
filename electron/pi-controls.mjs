@@ -271,6 +271,60 @@ export default function lumenControls(pi) {
   };
   for (const event of ["session_start", "model_select", "message_end", "session_compact"])
     pi.on(event, (_event, ctx) => contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null }));
+  // Pi's own compaction (threshold/overflow) starts in session_before_compact.
+  // Lumen-triggered compaction already set the flag and settles through its own
+  // ctx.compact callbacks; Pi also emits these session events for it, but the
+  // Lumen callback must stay the single settler or the host ends the turn twice.
+  let nativeCompactTimer;
+  let nativeCompacting = false;
+  const clearNativeCompacting = (ctx, error) => {
+    clearTimeout(nativeCompactTimer);
+    nativeCompactTimer = undefined;
+    // Only Pi-native compaction, started by session_before_compact, is cleared
+    // here. A Lumen-triggered ctx.compact settles through its own callbacks.
+    if (!nativeCompacting) return;
+    nativeCompacting = false;
+    compacting = false;
+    contextEvent(ctx, {
+      contextTokens: ctx.getContextUsage()?.tokens ?? null,
+      compacting: false,
+      ...(error ? { error } : {}),
+    });
+  };
+  pi.on("session_before_compact", (_event, ctx) => {
+    if (compacting) return;
+    compacting = true;
+    nativeCompacting = true;
+    contextEvent(ctx, { contextTokens: ctx.getContextUsage()?.tokens ?? null, compacting: true });
+    // A later extension can cancel this hook, and Pi can still return without a
+    // terminal compact event. Never let that leave the UI or host turn stuck.
+    // Only a positively idle Pi gets the short guard. At compaction start Pi is
+    // normally not idle, and an unknown state must never clear early.
+    const timeoutMs = ctx.isIdle?.() === true ? 30 * 1000 : 5 * 60 * 1000;
+    nativeCompactTimer = setTimeout(() => clearNativeCompacting(ctx, "Compaction did not finish. It may still be completing in Pi."), timeoutMs);
+    nativeCompactTimer.unref?.();
+  });
+  // nativeCompacting already separates Pi's own compaction from a
+  // Lumen-triggered one, so these terminal events always clear it. fromExtension
+  // only records whether another extension supplied the summary; skipping the
+  // clear on it would strand the indicator.
+  pi.on("session_compact", (event, ctx) => {
+    if (!nativeCompacting) return;
+    clearNativeCompacting(ctx);
+  });
+  pi.on("session_compact_failed", (event, ctx) => {
+    if (!nativeCompacting) return;
+    clearNativeCompacting(ctx, event.errorMessage);
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (nativeCompacting) clearNativeCompacting(ctx);
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    // Pi documents this as after every automatic compaction/continuation has
+    // finished. If a native compaction was cancelled without its terminal
+    // event, this is the safe point to release the indicator and host turn.
+    if (nativeCompacting) clearNativeCompacting(ctx);
+  });
   pi.on("agent_settled", (_event, ctx) => {
     const usage = ctx.getContextUsage();
     const tokens = usage?.tokens ?? null;
