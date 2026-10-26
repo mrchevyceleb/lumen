@@ -26,6 +26,15 @@ const help = `Lumen agent control — all tasks are visible in the app
   lumen-agent browser evaluate TAB_ID --script-file interaction.js
   lumen-agent browser view TAB_ID --device iphone|pixel|ipad [--orientation landscape]   (phone-size view; --device desktop switches back)
   lumen-agent browser screenshot-markup TAB_ID --marks '[{"label":"broken button","x":0.42,"y":0.18}]' [--output marked.png]   (x/y normalized 0-1)
+  lumen-agent browser snapshot TAB_ID   (list visible clickable elements with refs)
+  lumen-agent browser click TAB_ID --ref N | --selector CSS | --text "Sign in" | --x 120 --y 240 [--double]
+  lumen-agent browser hover TAB_ID --ref N | --selector CSS | --x 120 --y 240
+  lumen-agent browser type TAB_ID --text "hello" [--ref N | --selector CSS] [--submit]
+  lumen-agent browser press TAB_ID --key Enter [--modifiers control,shift]
+  lumen-agent browser scroll TAB_ID --dy 600 [--dx 0] [--x 120 --y 240]
+  Drive actions move a visible cursor in the pane and send real mouse/key input.
+  lumen-agent whoami   (inside a Lumen chat: your own task id and state)
+  lumen-agent guide    (print the full agent guide)
   Screenshot: --output FILE.png saves the image instead of printing a data URL.
 Options: --connection FILE, --id UUID (retry-safe task/message ID), --owner NAME,
   --cwd FOLDER, --account-id UUID. Omit --root for a chat without a workspace.
@@ -39,10 +48,11 @@ async function main() {
     const arg = process.argv[i];
     if (!arg.startsWith("--")) args.push(arg);
     else if (arg === "--help") options.help = true;
+    else if (arg === "--submit" || arg === "--double") options[arg.slice(2)] = "true";
     else { if (process.argv[i + 1] === undefined || process.argv[i + 1].startsWith("--")) throw new Error(`Missing value for ${arg}`); options[arg.slice(2)] = process.argv[++i]; }
   }
   if (options.help || !args.length || args[0] === "help") return console.log(help);
-  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "speed", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks"]);
+  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "speed", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks", "selector", "ref", "x", "y", "key", "dy", "dx", "modifiers", "submit", "double"]);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown option --${key}`);
   const dataDir = process.platform === "win32" ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Lumen") : process.platform === "darwin" ? path.join(os.homedir(), "Library", "Application Support", "Lumen") : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Lumen");
   const file = options.connection || process.env.LUMEN_CONTROL_FILE || path.join(dataDir, "agent-control.json");
@@ -64,9 +74,26 @@ async function main() {
     });
   }
   const [command, id, messageId] = args;
+  if (command === "guide") {
+    const guide = process.env.LUMEN_GUIDE || path.join(path.dirname(file), "lumen-agent-guide.md");
+    try { return console.log(await fs.readFile(guide, "utf8")); }
+    catch { throw new Error(`Open Lumen once so it writes its guide. Guide file: ${guide}`); }
+  }
+  if (command === "whoami") {
+    const taskId = process.env.LUMEN_TASK_ID || "";
+    if (!taskId) throw new Error("LUMEN_TASK_ID is not set. whoami works inside a Lumen chat; outside one, use list to see every task.");
+    const task = await request("GET", `/v1/tasks/${taskId}`).catch((e) => ({ error: e.message }));
+    return console.log(JSON.stringify({ taskId, task }, null, 2));
+  }
   if (command === "browser") {
+    const number = (value) => value === undefined ? undefined : Number(value);
     const body = { action: id, id: messageId, url: options.url, chatId: options["chat-id"], workspace: options.workspace,
+      text: options.text, selector: options.selector, ref: number(options.ref), x: number(options.x), y: number(options.y),
+      key: options.key, deltaY: number(options.dy), deltaX: number(options.dx),
+      modifiers: options.modifiers ? options.modifiers.split(",").map((m) => m.trim().toLowerCase()).filter(Boolean) : undefined,
+      doubleClick: options.double === "true", submit: options.submit === "true",
       ...(options["script-file"] ? { script: await fs.readFile(options["script-file"], "utf8") } : {}) };
+    for (const key of Object.keys(body)) if (body[key] === undefined) delete body[key];
     if (id === "view") {
       body.view = !options.device || options.device === "desktop" ? { mode: "desktop" }
         : { mode: "mobile", device: options.device, orientation: options.orientation === "landscape" ? "landscape" : "portrait" };

@@ -2,7 +2,7 @@ export type Agent = "shell" | "pi" | "codex" | "claude" | "grok" | "google";
 export type Mode = "rich" | "native";
 export interface ImageAttachment { id: string; name: string; mimeType: string; bytes: number; preview: string }
 export type BrowserViewMode = { mode: "desktop" } | { mode: "mobile"; device: string; orientation: "portrait" | "landscape" };
-export interface BrowserTab { id: string; title: string; url: string; error: string; loading: boolean; unloaded?: boolean; canGoBack: boolean; canGoForward: boolean; view?: BrowserViewMode }
+export interface BrowserTab { id: string; title: string; url: string; error: string; loading: boolean; unloaded?: boolean; canGoBack: boolean; canGoForward: boolean; view?: BrowserViewMode; agentDriving?: boolean; agentDriveBlocked?: boolean }
 export interface BrowserState { scope: string; activeId: string; tabs: BrowserTab[]; error?: string }
 export interface BrowserSnapshot { active: BrowserState; states: BrowserState[] }
 export interface BrowserPage { url: string; title: string; text: string; console: { level: string; message: string }[] }

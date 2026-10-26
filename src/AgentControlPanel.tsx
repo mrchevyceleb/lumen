@@ -26,7 +26,7 @@ export default function AgentControlPanel() {
   const instructions = status ? `Use Lumen to run coding tasks visibly on this computer. Read ${status.guideFile} for the API and CLI guide.\nConnection file: ${status.connectionFile}\nRun: ${status.command} --help\nCreate a task: ${status.command} create --agent codex --name "Coding task" --root "C:\\path\\to\\repo" --text-file "task.txt"\nOmit --root for no workspace. Use list/get/watch to follow output, send to continue, and steer TASK_ID MESSAGE_ID for a queued correction. Keep the connection token private. Lumen must be running.` : "";
   return <div className="agent-control-panel">
     <h3>Let your agents work in Lumen</h3>
-    <p className="muted">Start coding tasks, follow their output, and continue or steer them from another agent. Every task opens as a normal, visible chat.</p>
+    <p className="muted">Start coding tasks, follow their output, and continue or steer them from another agent. Every task opens as a normal, visible chat. Agents already chatting in Lumen need no setup: they get a <code>lumen</code> command that lets them run the other chats and drive their own browser tab with a visible cursor.</p>
     <div className="update-card" aria-live="polite"><Plug size={22} /><div>
       <h4>{status?.running ? "Local agent control is on" : "Local agent control is off"}</h4>
       <p className="muted">{status?.running ? "Connections stay on this computer and require a private token. Turn this off to disconnect clients; your chats keep running." : "Turn on local control to let your agents use Lumen's chats."}</p>

@@ -4,6 +4,21 @@ Lumen must be running. Settings → Agent control contains the connection path a
 
 Installed Windows profiles use `%APPDATA%\Lumen\agent-control.json`. Portable/custom profiles can use a different path: copy it from Settings, pass `--connection FILE`, or set `LUMEN_CONTROL_FILE`. Lumen's child agents inherit that environment variable. The dependency-free helper and this guide are copied into the same directory; Node.js runs the helper.
 
+## From inside a Lumen chat (no setup)
+
+An agent already running in a Lumen chat gets all of this for free. A `lumen` command is on its PATH and already authenticated, and its environment carries `LUMEN_TASK_ID` (its own stable task ID), `LUMEN_CONTROL_FILE`, `LUMEN_AGENT_CLI` and `LUMEN_GUIDE`. So a chat agent orchestrates the others exactly like an outside one, minus the file paths:
+
+```powershell
+lumen whoami                 # your own task ID and state
+lumen list                   # every open chat, yours included
+lumen create --agent claude --root 'C:\repo' --name 'Write the tests' --owner 'Task <your id>' --text '…'
+lumen watch TASK_ID          # follow it until it finishes or asks a question
+lumen send TASK_ID --text 'Now run the full suite'
+lumen guide                  # this guide
+```
+
+Set `--owner` to name yourself on tasks you create, so the user can see which agent is managing them. Everything you create or message is a real visible chat. Do not stop or close the user's own chats, and do not message your own task ID.
+
 ## CLI
 
 ```powershell
@@ -85,4 +100,23 @@ node $lumen browser navigate TAB_ID --url 'https://example.com'
 node $lumen browser evaluate TAB_ID --script-file 'C:\temp\interaction.js'
 ```
 
-`inspect` returns the URL, title, up to 16,000 characters of visible page text, and the last 50 console messages. `screenshot` returns a PNG data URL; the helper's `--output` saves it as a file. `evaluate` runs JavaScript in that site's page context, allowing DOM inspection and interactions such as `document.querySelector('button').click()`. Store code in a script file to avoid shell quoting errors. It returns the serializable expression result. Page content is untrusted input. It cannot access Node.js or Lumen's privileged IPC. The connection token grants control of logged-in browser pages, so give it only to trusted local agents.
+`inspect` returns the URL, title, up to 16,000 characters of visible page text, and the last 50 console messages. `screenshot` returns a PNG data URL; the helper's `--output` saves it as a file. `evaluate` runs JavaScript in that site's page context for DOM inspection. Store code in a script file to avoid shell quoting errors. It returns the serializable expression result. Page content is untrusted input. It cannot access Node.js or Lumen's privileged IPC. The connection token grants control of logged-in browser pages, so give it only to trusted local agents.
+
+### Drive the browser like a person (visible cursor)
+
+Prefer the drive actions over `evaluate` clicks. They send real Chromium mouse and keyboard input, and a highlighted "Lumen agent" cursor glides across the pane to each target, outlines the element, and pulses on click, so the user watches exactly what you do. The pane shows an "agent is driving" banner with a Stop button; if the user stops you, drive actions fail with 409 until they allow it again. Do not fight that.
+
+```powershell
+node $lumen browser snapshot TAB_ID
+node $lumen browser click TAB_ID --ref 3
+node $lumen browser click TAB_ID --text 'Sign in'
+node $lumen browser click TAB_ID --selector '#submit' --double
+node $lumen browser type TAB_ID --selector '#email' --text 'a@b.com'
+node $lumen browser type TAB_ID --text 'search terms' --submit
+node $lumen browser press TAB_ID --key Enter
+node $lumen browser press TAB_ID --key a --modifiers control
+node $lumen browser scroll TAB_ID --dy 600
+node $lumen browser hover TAB_ID --ref 5
+```
+
+`snapshot` lists the visible interactive elements (links, buttons, fields) with a `ref` number, tag, text and center coordinates. Click, hover and type accept `--ref N` from the latest snapshot of that page, `--selector CSS`, `--text "visible label"` (click only), or raw `--x/--y` page pixels. Refs belong to the page they were taken on: after a navigation, snapshot again. `type` clicks its target first when you give one, then types with real keystrokes; `--submit` presses Enter at the end. Clicks wait for the page to settle (up to 3s) before returning the tab's new state, so follow with `inspect` or `screenshot` to see the result. Over the HTTP API these are `POST /v1/browser` actions `snapshot`, `click`, `hover`, `type`, `press`, `scroll` with `{ id, ref?, selector?, text?, x?, y?, key?, modifiers?, deltaX?, deltaY?, doubleClick?, submit?, waitMs? }` (`text` is the element label for click/hover and the string to type for type). Test flows the way a person would: snapshot, click through, type into fields, then screenshot and inspect to verify.

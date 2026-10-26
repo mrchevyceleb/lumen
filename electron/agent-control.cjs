@@ -69,6 +69,19 @@ class AgentControl {
     catch (e) { if (e.code !== "ENOENT") this.error = "Could not read agent-control preferences."; }
     await fs.copyFile(path.join(__dirname, "lumen-agent.cjs"), this.helper);
     await fs.copyFile(path.join(__dirname, "agent-control-guide.md"), this.guide);
+    // A `lumen` command on every chat process's PATH (see accounts.cjs), so an
+    // agent inside Lumen orchestrates the other chats with `lumen list`,
+    // `lumen create …`, `lumen browser click …` and never needs a file path.
+    const bin = path.join(this.dataDir, "bin");
+    await fs.mkdir(bin, { recursive: true });
+    // Run the helper on Lumen's own runtime (Electron as Node), so the command
+    // works on machines with no system Node.js installed.
+    const cmdQuote = (value) => value.replace(/%/g, "%%").replace(/"/g, '\\"');
+    const shQuote = (value) => value.replace(/([\\"$`])/g, "\\$1");
+    await fs.writeFile(path.join(bin, "lumen.cmd"),
+      `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${cmdQuote(process.execPath)}" "${cmdQuote(this.helper)}" %*\r\n`);
+    await fs.writeFile(path.join(bin, "lumen"),
+      `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${shQuote(process.execPath)}" "${shQuote(this.helper)}" "$@"\n`, { mode: 0o755 });
     process.env.LUMEN_CONTROL_FILE = this.file;
     if (this.enabled) await this.start(); else await fs.unlink(this.file).catch(() => {});
   }
@@ -153,7 +166,7 @@ class AgentControl {
         for await (const chunk of req) { bytes += chunk.length; if (bytes > 900000) throw new ControlError("Request is too large.", 413); chunks.push(chunk); }
         try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new ControlError("Invalid JSON."); }
       }
-      if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close", "browser"] });
+      if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close", "browser", "browser-drive"] });
       if (url.pathname === "/v1/browser" && ["GET", "POST"].includes(req.method)) {
         if (!this.ready || !this.browser) throw new ControlError("Lumen's browser is starting. Try again shortly.", 503);
         try { return send(200, await this.browser(req.method === "GET" ? { action: "list" } : body)); }
