@@ -161,7 +161,7 @@ Click files in the explorer to view or edit them beside the conversation. Save w
 
 The Git panel supports individual/all staging and unstaging, readable diffs, commits, fetch, pull, push, and recent history. Pull uses fast-forward only. A first push sets the branch's upstream. The GitHub view lists PRs when the GitHub CLI is installed and signed in, and opens them in your browser. Git remote authentication uses your existing Git configuration.
 
-Open **Worktrees** to create a branch and checkout, or switch to an existing checkout. New worktrees are created beside the repository under `<repository>.worktrees/`. Existing sessions remain in their original checkout. Worktree removal and destructive Git resets are left to the terminal.
+Open **Worktrees** to create a branch and checkout, or switch to an existing checkout. New worktrees are created beside the repository under `<repository>.worktrees/`. Existing sessions remain in their original checkout. Choose **+ → Worktree agent job** to create a worktree and launch a visible agent chat in one step, with its own model, effort, and optional first instruction. **Settings → Agents** supplies the default model and effort for new jobs. Worktree removal and destructive Git resets are left to the terminal.
 
 ## Personalize
 
@@ -203,7 +203,7 @@ Web and server links in chat, code blocks, and terminal output open in Lumen's b
 
 ## Local agent control
 
-Use **Settings → Agent control → Copy instructions for an agent** to let another AI start and manage visible coding tasks in Lumen. A dependency-free `lumen-agent.cjs` helper supports create, list, get/watch, continue, queue/steer, stop/resume, model configuration, rename, focus, answer, and close. Any installed provider or a shell can be selected, with a workspace or without one. Existing chats are available too. Agent-created chats have a badge, and management actions leave visible notices.
+Use **Settings → Agent control → Copy instructions for an agent** to let another AI start and manage visible coding tasks in Lumen. A dependency-free `lumen-agent.cjs` helper supports create, list, get/watch, continue, queue/steer, stop/resume, model configuration, rename, focus, answer, and close. Any installed provider or a shell can be selected, with a workspace, a new dedicated worktree, or without one. Existing chats are available too. Agent-created chats have a badge, and management actions leave visible notices.
 
 The API is on by default, stays on loopback, requires a private per-launch token, and rejects browser origins. Turn it off in Settings to disconnect clients while chats keep running. The helper discovers `%APPDATA%\Lumen\agent-control.json`, or a copied connection path/`LUMEN_CONTROL_FILE` for portable profiles. Lumen agents inherit the connection path. Task IDs persist with saved chats; messages queue by default. See the [full CLI and HTTP guide](electron/agent-control-guide.md) for retry-safe IDs, output monitoring, and PowerShell examples that don't require Node.js.
 

@@ -9,6 +9,7 @@ const channels = new Set([
   "workspace:choose",
   "workspace:open",
   "workspace:register",
+  "workspace:inspect",
   "launch:take",
   "launch:resolve",
   "files:tree",
@@ -20,7 +21,7 @@ const channels = new Set([
   "git:status",
   "git:action",
   "git:diff",
-  "git:worktree",
+  "git:worktree", "git:worktree-job", "git:worktree-job:binding",
   "git:prs",
   "session:create",
   "session:start",
@@ -57,7 +58,11 @@ contextBridge.exposeInMainWorld("lumen", {
   invoke: async (channel, ...args) => {
     if (!channels.has(channel)) throw new Error("Unknown action.");
     const result = await ipcRenderer.invoke(channel, ...args);
-    if (result.error) throw new Error(result.error);
+    if (result.error) {
+      const error = new Error(result.error);
+      if (result.code) error.code = result.code;
+      throw error;
+    }
     return result.data;
   },
   onSession: (callback) => {

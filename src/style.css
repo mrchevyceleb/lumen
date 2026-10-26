@@ -2068,21 +2068,53 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   height: 28px;
   flex-shrink: 0;
 }
+.composer-session-toggle { display: none; }
+@container (max-width: 760px) {
+  /* The chat column can be narrow even in a large window. Collapse the four session controls
+     into their existing dialog instead of wrapping every button onto a row of its own. */
+  .composer-toolbar { flex-wrap: nowrap; gap: 2px; padding: 4px 6px; }
+  .composer-toolbar .compact-control,
+  .composer-toolbar .mcp-control,
+  .composer-toolbar .auto-compact-control,
+  .composer-toolbar .context-indicator-composer { display: none; }
+  .composer-toolbar > .composer-session-toggle { display: grid; }
+  .composer-toolbar .checkout-chip { flex: 0 1 170px; max-width: 32%; }
+  .composer-toolbar .model-control[aria-label="Choose model"] { flex: 1 1 140px; max-width: 180px; }
+  .composer-toolbar .effort-control { flex: 0 1 auto; max-width: 120px; }
+  .composer-toolbar .control-status { display: none; }
+  .composer-toolbar:has(.control-error) { flex-wrap: wrap; }
+}
+@container (max-width: 600px) {
+  .composer-toolbar { padding: 3px 5px 4px; }
+  .composer-toolbar .checkout-chip { flex: 0 0 28px; width: 28px; height: 28px; max-width: none; padding: 0; justify-content: center; }
+  .composer-toolbar .checkout-chip span { display: none; }
+  .composer-toolbar .model-control { gap: 4px; padding: 4px 5px; font-size: 10px; }
+  .composer-toolbar .model-control > svg { flex-shrink: 0; }
+  .composer-toolbar .model-control[aria-label="Choose model"] { flex-basis: 110px; max-width: 160px; }
+  .composer-toolbar .effort-control { max-width: 95px; }
+  .composer-toolbar .model-control[aria-label="Choose planning mode"] { flex-shrink: 0; }
+  .composer-toolbar .model-control[aria-label="Choose planning mode"] span,
+  .composer-toolbar .model-control[aria-label="Choose planning mode"] > svg:last-child { display: none; }
+}
+@container (max-width: 420px) {
+  /* Folder and branch remain available in the status bar; the tiny composer keeps only actions. */
+  .composer-toolbar .checkout-chip { display: none; }
+  .composer-toolbar > .icon-button { width: 26px; height: 26px; }
+  .composer-toolbar .model-control[aria-label="Choose model"] { flex: 1 1 auto; max-width: none; }
+  .composer-toolbar .effort-control,
+  .composer-toolbar .model-control[aria-label="Choose speed"] { flex: 0 0 28px; max-width: none; justify-content: center; }
+  .composer-toolbar .effort-control span,
+  .composer-toolbar .effort-control > svg:last-child,
+  .composer-toolbar .model-control[aria-label="Choose speed"] span,
+  .composer-toolbar .model-control[aria-label="Choose speed"] > svg:last-child { display: none; }
+}
 @media (max-width: 719px) {
-  /* The composer itself carries the compaction action; at phone width the context summary
-     remains in SessionControls, keeping this toolbar from becoming a four-row control pile. */
   .composer-toolbar .auto-compact-control,
   .composer-toolbar .context-indicator {
     display: none;
   }
 }
 
-@container (max-width: 380px) {
-  /* Wrap instead of scrolling: a narrow composer must fit its controls, never hide them behind a
-     horizontal scrollbar where they cannot be reached with the mouse wheel. */
-  .composer-toolbar { flex-wrap: wrap; overflow-x: visible; row-gap: 4px; }
-  .composer-toolbar .model-control { flex: 1 1 132px; min-width: 0; max-width: none; }
-}
 .send-button {
   width: 30px;
   height: 30px;
@@ -3149,6 +3181,34 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   display: block;
   margin-top: 5px;
 }
+.worktree-job-form { padding-top: 20px; }
+.worktree-job-source { display: flex; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.worktree-job-source > span { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.worktree-job-source > div { flex: 1; min-width: 0; }
+.worktree-job-source strong { display: block; font-size: 13px; font-weight: 550; }
+.worktree-job-source small { display: block; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
+.worktree-job-source em { color: var(--muted); font-size: 10px; font-style: normal; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worktree-job-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.agent-job-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.agent-job-grid > button { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 9px; min-width: 0; padding: 13px 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); text-align: left; transition: transform 140ms ease, border-color 140ms ease, background 140ms ease; }
+.agent-job-grid > button:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--agent-color); }
+.agent-job-grid > button.selected { border-color: var(--agent-color); background: color-mix(in srgb, var(--agent-color) 9%, var(--surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--agent-color) 25%, transparent); }
+.agent-job-grid > button > span { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.agent-job-grid > button > svg:last-child:not(:first-child) { position: absolute; top: 10px; right: 9px; color: var(--agent-color); }
+.agent-job-grid > button:disabled { opacity: 0.35; cursor: not-allowed; }
+.job-model-defaults { padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--surface) 60%, transparent); }
+.default-model-group { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.default-model-trigger > span { flex: 1; }
+.default-model-trigger > svg { flex-shrink: 0; }
+.effort-picker-label { display: flex; align-items: center; gap: 7px; flex: 1; padding: 8px 4px; color: var(--muted); font-size: 11px; }
+.worktree-job-form textarea { width: 100%; min-height: 108px; resize: vertical; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: 12px/1.7 var(--font); }
+.worktree-job-form .settings-note { display: flex; align-items: flex-start; gap: 6px; }
+.worktree-job-form .settings-note > svg { flex-shrink: 0; margin-top: 3px; color: var(--accent); }
+@media (max-width: 680px) {
+  .default-model-group, .worktree-job-fields { grid-template-columns: 1fr; }
+  .agent-job-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .worktree-job-source em { display: none; }
+}
 .current-tag {
   font-size: 9px;
   color: var(--accent);
@@ -4192,6 +4252,7 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .default-model-options { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
 .default-model-options .model-search-row { padding-bottom: 8px; }
 .default-model-options .model-options { max-height: 260px; }
+.default-model-options .model-options:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .default-model-options .model-option { padding: 10px; }
 .default-model-options .model-option strong { font-size: 12px; }
 .default-model-options .picker-note { margin-top: 10px; }

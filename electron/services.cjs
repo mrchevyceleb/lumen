@@ -426,7 +426,10 @@ class WorkspaceService {
           partial.truncated = true;
           throw partial;
         }
-        throw new Error(strip(error.stderr || error.message).trim());
+        const failure = new Error(strip(error.stderr || error.message).trim());
+        if (typeof error.code === "number") failure.exitCode = error.code;
+        if (error.killed || error.signal) failure.processKilled = true;
+        throw failure;
       },
     );
   }

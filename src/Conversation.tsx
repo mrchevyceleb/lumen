@@ -16,6 +16,7 @@ import {
   ExternalLink,
   Cable,
   Shrink,
+  SlidersHorizontal,
   LogIn,
   GitBranch,
 } from "lucide-react";
@@ -794,7 +795,8 @@ export default function Conversation({
             onPlanDraft={() => { setInput(input.startsWith("/plan") ? input : `/plan${input.trim() ? ` ${input}` : " "}`); setDismissedCommands(true);
               requestAnimationFrame(() => inputRef.current?.focus()); }} />}
           {!["shell", "google"].includes(tab.agent) && <>
-            <IconButton label="MCPs & context" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={14} /></IconButton>
+            <IconButton className="mcp-control" label="MCPs & context" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("mcp")}><Cable size={14} /></IconButton>
+            <IconButton className="composer-session-toggle" label="Chat tools & context" aria-haspopup="dialog" disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}><SlidersHorizontal size={14} /></IconButton>
             <button className="model-control auto-compact-control" aria-label={compactLabel} title={compactLabel}
               disabled={tab.busy || submitting || controlPending} onClick={() => setSessionPanel("context")}>
               <Shrink size={13} /><span>{tab.autoCompactTokens ? `${(tab.autoCompactTokens / 1000).toLocaleString()}k` : "Auto-compact"}</span>
