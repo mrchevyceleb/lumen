@@ -21,5 +21,7 @@
 .dictation-mic.needs-attention { color: #e8b34a; }
 @keyframes dictation-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, #dc5571 12%, transparent); } }
 .dictation-float { position: fixed; z-index: 80; box-shadow: 0 12px 32px #00000055; }
+/* Keep transient notices below the active dictation controls, and modals above both. */
+.app:has(.dictation-float) .toast { z-index: 70; }
 @media (max-width: 640px) { .dictation-panel .dictation-button { min-height: 42px; } .dictation-panel { gap: 8px; } }
 @media (prefers-reduced-motion: reduce) { .dictation-spin, .dictation-dot, .dictation-mic.is-live { animation: none; } }

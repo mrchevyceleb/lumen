@@ -160,15 +160,23 @@ export function Dictation({ chatId, onText, onActive }: { chatId: string; onText
   useEffect(() => { if (phase !== "recording") return; const id = setInterval(() => setSeconds((s) => s + 1), 1000); return () => clearInterval(id); }, [phase]);
 
   // Inline trigger lives inside the composer pill; the working panel floats
-  // above it through a portal so the pill's overflow never clips it.
+  // above it through a portal so the pill's overflow never clips it. The portal
+  // stays under the app root because Lumen's theme variables are defined there.
   const pillRef = useRef<HTMLDivElement | null>(null), [anchor, setAnchor] = useState<{ right: number; top: number } | null>(null);
   const panelOpen = phase !== "idle" || !!notice;
   useLayoutEffect(() => {
     if (!panelOpen) { setAnchor(null); return; }
-    const measure = () => { const el = pillRef.current; if (!el) return; const r = el.getBoundingClientRect(); setAnchor({ right: r.right, top: r.top }); };
+    const composer = pillRef.current?.closest(".composer");
+    const measure = () => {
+      const el = pillRef.current; if (!el) return;
+      const r = (composer ?? el).getBoundingClientRect();
+      setAnchor({ right: r.right, top: r.top });
+    };
     measure();
+    const observer = new ResizeObserver(measure);
+    if (composer) observer.observe(composer);
     window.addEventListener("scroll", measure, true); window.addEventListener("resize", measure);
-    return () => { window.removeEventListener("scroll", measure, true); window.removeEventListener("resize", measure); };
+    return () => { observer.disconnect(); window.removeEventListener("scroll", measure, true); window.removeEventListener("resize", measure); };
   }, [panelOpen]);
 
   const recording = phase === "recording", busy = phase === "starting" || phase === "finishing" || phase === "discarding";
@@ -190,6 +198,6 @@ export function Dictation({ chatId, onText, onActive }: { chatId: string; onText
       {!busy && <button type="button" className="dictation-discard" onClick={() => void discard()} aria-label={phase === "idle" ? "Dismiss dictation notice" : "Discard dictation"}><X size={16} /></button>}
       {error && <p role="alert">{error}</p>}
       {notice && <small role="status" className="dictation-notice">{notice}</small>}
-    </div>, document.body)}
+    </div>, pillRef.current?.closest(".app") ?? document.body)}
   </>;
 }
