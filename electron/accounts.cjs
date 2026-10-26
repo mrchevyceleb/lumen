@@ -11,16 +11,34 @@ function codexAccountOptions(s) {
   // keys use different official endpoints. An explicit API URL breaks OAuth.
   return s.accountId ? ["-c", 'cli_auth_credentials_store="file"', "-c", 'model_provider="openai"', "-c", 'chatgpt_base_url="https://chatgpt.com/backend-api/"'] : [];
 }
+// Every process Lumen spawns for a chat (the CLI itself, its tool shells and
+// tool terminals, all of which build their environment here) learns how to
+// reach Lumen's own local agent control: its stable task id, the connection
+// file, the helper CLI, the guide, and a `lumen` shim on PATH. That is what
+// lets an agent inside a chat list, create, message and orchestrate the
+// other chats, and drive this chat's browser, with no setup from the user.
+function lumenEnvironment(s, env) {
+  if (!s?.controlId || !s.lumenDataDir) return env;
+  env.LUMEN_TASK_ID = s.controlId;
+  env.LUMEN_CONTROL_FILE = path.join(s.lumenDataDir, "agent-control.json");
+  env.LUMEN_AGENT_CLI = path.join(s.lumenDataDir, "lumen-agent.cjs");
+  env.LUMEN_GUIDE = path.join(s.lumenDataDir, "lumen-agent-guide.md");
+  const bin = path.join(s.lumenDataDir, "bin");
+  const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH") || "PATH";
+  const parts = String(env[pathKey] || "").split(path.delimiter).filter(Boolean);
+  if (!parts.some((part) => path.resolve(part) === path.resolve(bin))) env[pathKey] = [bin, ...parts].join(path.delimiter);
+  return env;
+}
 function accountEnvironment(s, base = process.env) {
   const env = { ...base };
   if (!s.accountId) {
     if (s.agent === "claude" && s.claudeHome) env.CLAUDE_CONFIG_DIR = s.claudeHome;
-    return env;
+    return lumenEnvironment(s, env);
   }
   for (const key of Object.keys(env)) if (authVariable(s.agent, key)) delete env[key];
   if (s.agent === "claude") { env.CLAUDE_CONFIG_DIR = s.claudeHome || s.accountHome; env.ANTHROPIC_CONFIG_DIR = path.join(s.accountHome, "anthropic"); }
   else env.CODEX_HOME = s.accountHome;
-  return env;
+  return lumenEnvironment(s, env);
 }
 // Codex reads its MCP servers from config.toml, and an account's private home gets a one-time copy
 // of that table when the account is created. A server the user later removed, or one that never

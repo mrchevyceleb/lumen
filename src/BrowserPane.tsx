@@ -334,7 +334,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
               const next = event.key === "Home" ? 0 : event.key === "End" ? state.tabs.length - 1 : (index + (event.key === "ArrowLeft" ? -1 : 1) + state.tabs.length) % state.tabs.length;
               event.currentTarget.closest(".browser-tabs")?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
               void action({ action: "select", id: state.tabs[next].id });
-            }} onClick={() => void action({ action: "select", id: tab.id })}>{tab.loading ? <RefreshCw size={12} className="browser-loading" /> : <Globe size={12} />}<span>{tab.title || "New tab"}</span></button>
+            }} onClick={() => void action({ action: "select", id: tab.id })}>{tab.loading ? <RefreshCw size={12} className="browser-loading" /> : <Globe size={12} />}<span>{tab.title || "New tab"}</span>{tab.agentDriving && <span className="browser-driving-dot" title="An agent is driving this tab" />}</button>
           <button aria-label={`Close browser tab ${tab.title}`} onClick={() => void action({ action: "close", id: tab.id })}><X size={12} /></button>
         </div>)}
         <IconButton label="New browser tab" onClick={() => void action({ action: "open", chatId, workspace })}><Plus size={15} /></IconButton>
@@ -362,6 +362,8 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         </span>
       </div>
       {error && <div className="browser-error" role="alert">{error}<button aria-label="Dismiss browser error" onClick={() => setError("")}><X size={12} /></button></div>}
+      {current?.agentDriveBlocked ? <div className="browser-driving browser-driving-stopped" role="status"><span className="browser-driving-dot" /><span>Agent driving is stopped on this tab. The agent cannot click, type, run scripts or change this page until you allow it.</span><button onClick={() => void action({ action: "agent-allow", id: current.id })}>Allow agent</button></div>
+        : current?.agentDriving && <div className="browser-driving" role="status"><span className="browser-driving-dot" /><span>An agent is driving this tab. Watch its cursor, or stop it here.</span><button onClick={() => void action({ action: "agent-stop", id: current.id })}>Stop agent</button></div>}
       {markupMode && current && <div className="browser-markup-bar">
         <strong>Mark up the screenshot</strong>
         <span className="browser-markup-hint">Click the picture to drop a pin, type what it means, then Add. Pins are numbered for the chat.</span>

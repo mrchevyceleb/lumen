@@ -507,7 +507,9 @@ startup.then(async (start) => {
   handle("attachments:import", (id, files) => attachments.import(sessions.get(id).controlId, files));
   agentControl = new AgentControl({ dataDir, window: () => window, browser: (body) => {
     if (!browser) throw new Error("Lumen's browser is starting.");
-    return browser.control(body);
+    // Mark agent-API calls (overriding any client-sent flag) so the pane's
+    // per-tab "stop agent" switch can block agents without blocking the user.
+    return browser.control({ ...body, viaAgent: true });
   }, notify: (status) => {
     if (window && !window.isDestroyed()) window.webContents.send("agent-control:status", status);
   } });

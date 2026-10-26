@@ -115,7 +115,118 @@ const buildMarkupHTML = (imageDataURL, marks, width, height) => {
 };
 // Actions that need an existing tab. Anything outside this set is a client error.
 const TAB_ACTIONS = new Set(["navigate", "select", "close", "view", "inspect", "screenshot", "markup-begin",
-  "screenshot-markup", "back", "forward", "reload", "stop", "devtools", "evaluate"]);
+  "screenshot-markup", "back", "forward", "reload", "stop", "devtools", "evaluate",
+  "snapshot", "click", "hover", "type", "press", "scroll", "agent-stop", "agent-allow"]);
+// How long the pane keeps saying "an agent is driving" after the last input.
+const DRIVE_IDLE_MS = 60000;
+// Drive scripts run in their own JS world: the DOM is shared (so the cursor
+// shows and elements measure the same) but page script cannot see, replace
+// or hang the cursor object.
+const DRIVE_WORLD = 901;
+// The agent's visible cursor, injected into the page itself so it is seen
+// exactly where the real input lands (and appears in screenshots): a bright
+// arrow with a ring that glides to each target, pulses on click, and outlines
+// the element about to be used. Positions are page CSS pixels. Idempotent.
+const CURSOR_SCRIPT = `(() => {
+  if (window.__lumenCursor) return { x: window.__lumenCursor.x, y: window.__lumenCursor.y };
+  const root = document.createElement("div");
+  root.id = "__lumen-cursor";
+  root.setAttribute("aria-hidden", "true");
+  root.style.cssText = "position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;opacity:0;transition:opacity .18s ease;filter:drop-shadow(0 2px 6px rgba(0,0,0,.45))";
+  root.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24"><path d="M4 2 L20 12 L12.5 13.5 L16 21 L13 22.5 L9.6 14.6 L4 19 Z" fill="#7c5cff" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg><span style="position:absolute;left:20px;top:16px;background:#7c5cff;color:#fff;font:600 10px/1.5 -apple-system,Segoe UI,sans-serif;padding:1px 6px;border-radius:8px;white-space:nowrap">Lumen agent</span>';
+  const ring = document.createElement("div");
+  ring.style.cssText = "position:fixed;left:0;top:0;width:34px;height:34px;margin:-17px 0 0 -17px;border-radius:50%;border:2.5px solid #7c5cff;z-index:2147483646;pointer-events:none;opacity:0";
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;z-index:2147483645;pointer-events:none;border:2px solid #7c5cff;border-radius:6px;background:rgba(124,92,255,.12);opacity:0;transition:opacity .15s ease";
+  (document.documentElement || document.body).append(root, ring, box);
+  const ease = (t) => t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  const cursor = window.__lumenCursor = {
+    x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2), raf: 0,
+    place(x, y) { this.x = x; this.y = y; root.style.transform = "translate(" + x + "px," + y + "px)"; root.style.opacity = "1"; },
+    glide(x, y, ms) {
+      cancelAnimationFrame(this.raf);
+      if (this.glideDone) this.glideDone({ x: this.x, y: this.y });
+      const sx = this.x, sy = this.y, t0 = performance.now();
+      return new Promise((resolve) => {
+        this.glideDone = resolve;
+        const step = (now) => {
+          const t = Math.min(1, (now - t0) / Math.max(1, ms)), e = ease(t);
+          this.place(Math.round(sx + (x - sx) * e), Math.round(sy + (y - sy) * e));
+          if (t < 1) this.raf = requestAnimationFrame(step);
+          else { this.glideDone = null; resolve({ x: this.x, y: this.y }); }
+        };
+        this.raf = requestAnimationFrame(step);
+      });
+    },
+    hide() { root.style.opacity = "0"; box.style.opacity = "0"; },
+    pulse() {
+      ring.style.transform = "translate(" + this.x + "px," + this.y + "px) scale(.45)";
+      ring.style.opacity = "1"; ring.style.transition = "none";
+      requestAnimationFrame(() => { ring.style.transition = "transform .45s ease,opacity .45s ease"; ring.style.transform = "translate(" + this.x + "px," + this.y + "px) scale(1.5)"; ring.style.opacity = "0"; });
+    },
+    highlight(rect) {
+      if (!rect) { box.style.opacity = "0"; return; }
+      box.style.left = (rect.x - 3) + "px"; box.style.top = (rect.y - 3) + "px";
+      box.style.width = (rect.width + 6) + "px"; box.style.height = (rect.height + 6) + "px";
+      box.style.opacity = "1";
+      clearTimeout(this.boxTimer); this.boxTimer = setTimeout(() => { box.style.opacity = "0"; }, 1400);
+    },
+  };
+  cursor.place(cursor.x, cursor.y);
+  return { x: cursor.x, y: cursor.y };
+})()`;
+// Resolves a drive target in the page: a CSS selector, visible text, or a
+// stored snapshot selector. Scrolls the element into view and returns its
+// center in CSS pixels, or null when nothing visible matches.
+const RESOLVE_SCRIPT = (target) => `(() => {
+  const wanted = ${JSON.stringify(target)};
+  const visible = (el) => { const r = el.getBoundingClientRect(), s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden" && Number(s.opacity) !== 0; };
+  let el = null;
+  if (wanted.selector) { try { el = [...document.querySelectorAll(wanted.selector)].find(visible) || null; } catch { return { error: "That CSS selector is not valid." }; } }
+  else if (wanted.text) {
+    const text = wanted.text.trim().toLowerCase();
+    const label = (node) => (node.innerText || node.value || node.getAttribute?.("aria-label") || node.getAttribute?.("placeholder") || "").trim().toLowerCase();
+    const all = [...document.querySelectorAll("a,button,input,select,textarea,[role=button],[role=link],[role=tab],[role=menuitem],label,summary")].filter(visible);
+    el = all.find((node) => label(node) === text) || all.find((node) => label(node).includes(text)) || null;
+  }
+  if (!el) return null;
+  el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  const r = el.getBoundingClientRect();
+  const cx = Math.round(r.left + r.width / 2), cy = Math.round(r.top + r.height / 2);
+  const hit = document.elementFromPoint(cx, cy);
+  const covered = !!hit && hit !== el && !el.contains(hit) && !hit.contains(el);
+  return { x: cx, y: cy, rect: { x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) },
+    tag: el.tagName.toLowerCase(), text: (el.innerText || el.value || el.getAttribute?.("aria-label") || "").trim().slice(0, 120),
+    ...(covered ? { warning: "Something else covers this element (a banner or dialog?), so the click may land on that instead." } : {}) };
+})()`;
+// Lists the visible interactive elements with a generated selector each, so
+// an agent can pick one by ref instead of guessing pixel coordinates.
+const SNAPSHOT_SCRIPT = `(() => {
+  const visible = (el) => { const r = el.getBoundingClientRect(), s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden" && Number(s.opacity) !== 0; };
+  const selector = (el) => {
+    if (el.id && document.querySelectorAll("#" + CSS.escape(el.id)).length === 1) return "#" + CSS.escape(el.id);
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1 && parts.length < 6; node = node.parentElement) {
+      let part = node.tagName.toLowerCase();
+      const siblings = node.parentElement ? [...node.parentElement.children].filter((c) => c.tagName === node.tagName) : [];
+      if (siblings.length > 1) part += ":nth-of-type(" + (siblings.indexOf(node) + 1) + ")";
+      parts.unshift(part);
+      if (node.id) { parts[0] = "#" + CSS.escape(node.id); break; }
+    }
+    return parts.join(" > ");
+  };
+  const label = (el) => (el.innerText || el.value || el.getAttribute?.("aria-label") || el.getAttribute?.("placeholder") || el.getAttribute?.("title") || el.name || "").trim().replace(/\\s+/g, " ").slice(0, 120);
+  const all = [...document.querySelectorAll("a[href],button,input,select,textarea,[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[role=radio],[tabindex],summary,label")]
+    .filter((el) => visible(el) && el.getAttribute?.("tabindex") !== "-1");
+  const nodes = all.slice(0, 200);
+  return { url: location.href, title: document.title, viewport: { width: innerWidth, height: innerHeight }, truncated: all.length > nodes.length, frames: document.querySelectorAll("iframe").length,
+    elements: nodes.map((el, i) => { const r = el.getBoundingClientRect(); return { ref: i + 1, selector: selector(el), tag: el.tagName.toLowerCase(), type: el.getAttribute?.("type") || el.getAttribute?.("role") || "", text: label(el), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), width: Math.round(r.width), height: Math.round(r.height) }; }) };
+})()`;
+// Chromium key names for sendInputEvent. Single characters pass through.
+const DRIVE_KEYS = { enter: "Enter", return: "Enter", tab: "Tab", escape: "Escape", esc: "Escape", backspace: "Backspace", delete: "Delete", insert: "Insert",
+  home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown", " ": "Space", space: "Space", spacebar: "Space",
+  arrowup: "Up", up: "Up", arrowdown: "Down", down: "Down", arrowleft: "Left", left: "Left", arrowright: "Right", right: "Right",
+  f1: "F1", f2: "F2", f3: "F3", f4: "F4", f5: "F5", f6: "F6", f7: "F7", f8: "F8", f9: "F9", f10: "F10", f11: "F11", f12: "F12" };
 const MARK_TOKEN_TTL_MS = 15 * 60 * 1000;
 class BrowserService {
   constructor(window, directory, knownChat = null) {
@@ -301,7 +412,9 @@ class BrowserService {
     const live = contents && !contents.isDestroyed();
     return { id: tab.id, title: tab.title, url: tab.url, error: tab.error, unloaded: !live && tab.url !== "about:blank",
       loading: !!live && contents.isLoading(), canGoBack: !!live && contents.navigationHistory.canGoBack(),
-      canGoForward: !!live && contents.navigationHistory.canGoForward(), view: tab.view || { mode: "desktop" } };
+      canGoForward: !!live && contents.navigationHistory.canGoForward(), view: tab.view || { mode: "desktop" },
+      agentDriving: !!tab.agentDriveAt && Date.now() - tab.agentDriveAt < DRIVE_IDLE_MS && !tab.agentDriveBlocked,
+      agentDriveBlocked: !!tab.agentDriveBlocked };
   }
   state() {
     const group = this.group();
@@ -636,6 +749,7 @@ class BrowserService {
   }
   close(id) {
     const { group, tab } = this.find(id), index = group.tabs.indexOf(tab);
+    clearTimeout(tab.driveTimer);
     if (this.attached === tab.nativeView) this.detach();
     if (tab.nativeView && !this.window.isDestroyed()) this.window.contentView.removeChildView(tab.nativeView);
     group.tabs.splice(index, 1);
@@ -853,6 +967,222 @@ class BrowserService {
     if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again.", 409);
     return { image, page };
   }
+  // --- Agent driving: real Chromium input with a cursor the user can watch.
+  // Every action glides the injected cursor to its target while real
+  // mouseMove events travel the same path, so hover states, focus and click
+  // behave exactly as they do for a person. The user can stop an agent from
+  // the pane banner; a stopped tab refuses input until they allow it again.
+  // One drive action at a time per tab: two agents (or parallel commands)
+  // must never interleave mouse paths on the same page.
+  async driveLocked(tab, fn) {
+    const previous = tab.driveChain || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    tab.driveChain = previous.catch(() => {}).then(() => gate);
+    await previous.catch(() => {});
+    try { return await fn(); } finally { release(); }
+  }
+  // Drive page script, isolated from the page's own JS and bounded: a page
+  // showing alert()/beforeunload never answers executeJavaScript, and an
+  // unbounded await would wedge this tab's drive queue behind it.
+  driveScript(contents, code, ms = 3000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(bad("The page did not answer. It may be showing a dialog, or its main thread is busy.", 409)), ms);
+      Promise.resolve(contents.executeJavaScriptInIsolatedWorld(DRIVE_WORLD, [{ code }], true))
+        .then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+    });
+  }
+  driveContents(tab) {
+    if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+    if (tab.url === "about:blank") throw bad("Open a page before driving it.");
+    const contents = this.ensure(tab).webContents;
+    if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
+    if (contents.isLoadingMainFrame()) throw bad("Wait for the page to finish loading and try again.", 409);
+    if (tab.error) throw new Error(tab.error);
+    tab.agentDriveAt = Date.now();
+    clearTimeout(tab.driveTimer);
+    tab.driveTimer = setTimeout(() => {
+      const live = tab.nativeView?.webContents;
+      if (live && !live.isDestroyed()) void this.driveScript(live, "window.__lumenCursor && window.__lumenCursor.hide()", 1000).catch(() => {});
+      this.emit();
+    }, DRIVE_IDLE_MS + 50);
+    tab.driveTimer.unref?.();
+    this.emit();
+    return contents;
+  }
+  drivePoint(tab, x, y) {
+    // sendInputEvent takes view (DIP) coordinates; under device emulation the
+    // page is drawn at appliedScale, so CSS pixels scale by the same factor.
+    const scale = tab.appliedScale && tab.appliedScale > 0 ? tab.appliedScale : 1;
+    return { x: Math.max(0, Math.round(x * scale)), y: Math.max(0, Math.round(y * scale)) };
+  }
+  async cursorAt(contents) {
+    const at = await this.driveScript(contents, CURSOR_SCRIPT);
+    return at && Number.isFinite(at.x) && Number.isFinite(at.y) ? at : { x: 0, y: 0 };
+  }
+  async resolveTarget(tab, contents, body) {
+    const hasPoint = typeof body.x === "number" && typeof body.y === "number" && Number.isFinite(body.x) && Number.isFinite(body.y);
+    let target = null;
+    if (body.ref !== undefined) {
+      const ref = Number(body.ref);
+      const found = tab.driveSnapshot?.generation === tab.generation
+        ? tab.driveSnapshot.elements.find((el) => el.ref === ref) : null;
+      if (!found) throw bad(`No snapshot element ${String(body.ref).slice(0, 20)} on this page. Run snapshot again; refs belong to the page they were taken on.`, 409);
+      target = await this.driveScript(contents, RESOLVE_SCRIPT({ selector: found.selector }));
+      if (!target) throw bad(`Snapshot element ${ref} is no longer on the page. Run snapshot again.`, 409);
+    } else if (typeof body.selector === "string" && body.selector || typeof body.text === "string" && body.text) {
+      target = await this.driveScript(contents, RESOLVE_SCRIPT({ selector: String(body.selector || ""), text: String(body.text || "") }));
+      if (target?.error) throw bad(target.error);
+      if (!target) throw bad(`Nothing visible matches ${body.selector ? `selector ${String(body.selector).slice(0, 120)}` : `text ${JSON.stringify(String(body.text).slice(0, 80))}`}. Run snapshot to see what is clickable.`, 404);
+    } else if (hasPoint) {
+      target = { x: Math.round(Number(body.x)), y: Math.round(Number(body.y)), rect: null, tag: "", text: "" };
+    }
+    return target;
+  }
+  async glide(tab, contents, x, y) {
+    const from = await this.cursorAt(contents);
+    const distance = Math.hypot(x - from.x, y - from.y);
+    const ms = Math.round(Math.min(650, Math.max(140, distance * 0.55)));
+    const page = this.driveScript(contents, `window.__lumenCursor.glide(${x}, ${y}, ${ms})`, ms + 3000).catch(() => {});
+    const steps = Math.max(2, Math.round(ms / 16)), t0 = Date.now();
+    for (let i = 1; i <= steps; i++) {
+      if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
+      if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
+      const t = i / steps, e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const point = this.drivePoint(tab, Math.round(from.x + (x - from.x) * e), Math.round(from.y + (y - from.y) * e));
+      contents.sendInputEvent({ type: "mouseMove", ...point });
+      const wait = t0 + (ms * i) / steps - Date.now();
+      if (wait > 0 && i < steps) await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    await page;
+  }
+  async settle(contents, body) {
+    const limit = Math.min(10000, Math.max(0, Number.isFinite(Number(body.waitMs)) ? Number(body.waitMs) : 3000));
+    const deadline = Date.now() + limit;
+    // A click often starts a navigation a beat later; give it a moment to begin.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    while (!contents.isDestroyed() && contents.isLoadingMainFrame() && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  driveResult(tab, extra = {}) {
+    tab.agentDriveAt = Date.now();
+    clearTimeout(tab.driveTimer);
+    tab.driveTimer = setTimeout(() => this.emit(), DRIVE_IDLE_MS + 50);
+    tab.driveTimer.unref?.();
+    this.emit();
+    return { ...this.metadata(tab), ...extra };
+  }
+  async agentSnapshot(id) {
+    const { tab } = this.find(id), contents = this.driveContents(tab);
+    const shot = await this.driveScript(contents, SNAPSHOT_SCRIPT);
+    tab.driveSnapshot = { generation: tab.generation, elements: shot.elements };
+    return this.driveResult(tab, { snapshot: { url: shot.url, title: shot.title, viewport: shot.viewport,
+      ...(shot.truncated ? { truncated: true } : {}), ...(shot.frames ? { frames: shot.frames, note: "Elements inside iframes are not listed; navigate to the frame URL or use evaluate there." } : {}),
+      elements: shot.elements.map(({ selector, ...el }) => el) } });
+  }
+  async agentClick(id, body, doubleClick = false) {
+    const { tab } = this.find(id), contents = this.driveContents(tab);
+    const target = await this.resolveTarget(tab, contents, body);
+    if (!target) throw bad("Choose what to click: --ref from snapshot, --selector, --text, or --x/--y in page pixels.");
+    if (target.rect) await this.driveScript(contents, `window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`).catch(() => {});
+    await this.glide(tab, contents, target.x, target.y);
+    const point = this.drivePoint(tab, target.x, target.y);
+    await this.driveScript(contents, "window.__lumenCursor.pulse()").catch(() => {});
+    if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
+    // A real double-click is two down/up pairs, counts 1 then 2.
+    for (let count = 1; count <= (doubleClick ? 2 : 1); count++) {
+      contents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: count, ...point });
+      await new Promise((resolve) => setTimeout(resolve, 55));
+      if (!contents.isDestroyed()) contents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: count, ...point });
+    }
+    if (!contents.isDestroyed()) await this.settle(contents, body);
+    return this.driveResult(tab, { clicked: { x: target.x, y: target.y, tag: target.tag, text: target.text, ...(target.warning ? { warning: target.warning } : {}) } });
+  }
+  async agentHover(id, body) {
+    const { tab } = this.find(id), contents = this.driveContents(tab);
+    const target = await this.resolveTarget(tab, contents, body);
+    if (!target) throw bad("Choose what to hover: --ref from snapshot, --selector, --text, or --x/--y in page pixels.");
+    if (target.rect) await this.driveScript(contents, `window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`).catch(() => {});
+    await this.glide(tab, contents, target.x, target.y);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return this.driveResult(tab, { hovered: { x: target.x, y: target.y, tag: target.tag, text: target.text } });
+  }
+  async agentType(id, body) {
+    const { tab } = this.find(id);
+    if (typeof body.text !== "string" || !body.text || body.text.length > 5000) throw bad("Provide text to type, under 5,000 characters.");
+    const targeted = body.ref !== undefined || body.selector || body.x !== undefined;
+    // body.text is the text to type here, never an element matcher.
+    if (targeted) await this.agentClick(id, { ref: body.ref, selector: body.selector, x: body.x, y: body.y, waitMs: 0 });
+    const contents = this.driveContents(tab);
+    for (const char of body.text) {
+      if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
+      if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
+      if (char === "\n" || char === "\r") {
+        contents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+        contents.sendInputEvent({ type: "char", keyCode: "Enter" });
+        contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      } else if (char === "\t") {
+        contents.sendInputEvent({ type: "keyDown", keyCode: "Tab" });
+        contents.sendInputEvent({ type: "keyUp", keyCode: "Tab" });
+      } else if (char.length > 1 || char.codePointAt(0) > 127) {
+        await contents.insertText(char);
+      } else {
+        contents.sendInputEvent({ type: "keyDown", keyCode: char });
+        contents.sendInputEvent({ type: "char", keyCode: char });
+        contents.sendInputEvent({ type: "keyUp", keyCode: char });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 14));
+    }
+    if (body.submit === true) {
+      if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
+      contents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
+      contents.sendInputEvent({ type: "char", keyCode: "Enter" });
+      contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      await this.settle(contents, body);
+    }
+    return this.driveResult(tab, { typed: body.text.length });
+  }
+  async agentPress(id, body) {
+    const { tab } = this.find(id), contents = this.driveContents(tab);
+    if (typeof body.key !== "string" || !body.key) throw bad("Choose a key to press, like Enter, Tab, Escape or ArrowDown.");
+    const keyCode = DRIVE_KEYS[body.key.toLowerCase()] || body.key;
+    const aliases = { control: "control", ctrl: "control", ctl: "control", shift: "shift", alt: "alt", option: "alt", meta: "meta", cmd: "meta", command: "meta", super: "meta", win: "meta" };
+    const modifiers = [];
+    for (const m of Array.isArray(body.modifiers) ? body.modifiers : []) {
+      const mapped = aliases[String(m).toLowerCase()];
+      if (!mapped) throw bad(`Unknown modifier ${JSON.stringify(String(m).slice(0, 30))}. Use control, shift, alt or meta.`);
+      if (!modifiers.includes(mapped)) modifiers.push(mapped);
+    }
+    if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
+    contents.sendInputEvent({ type: "keyDown", keyCode, modifiers });
+    if (!modifiers.length && (keyCode.length === 1 || keyCode === "Enter" || keyCode === "Space")) contents.sendInputEvent({ type: "char", keyCode: keyCode === "Space" ? " " : keyCode });
+    contents.sendInputEvent({ type: "keyUp", keyCode, modifiers });
+    await this.settle(contents, body);
+    return this.driveResult(tab, { pressed: keyCode, modifiers });
+  }
+  async agentScroll(id, body) {
+    const { tab } = this.find(id), contents = this.driveContents(tab);
+    const neither = body.deltaY === undefined && body.dy === undefined && body.deltaX === undefined && body.dx === undefined;
+    const deltaY = Math.round(Math.min(5000, Math.max(-5000, Number(body.deltaY ?? body.dy ?? (neither ? 600 : 0)) || 0)));
+    const deltaX = Math.round(Math.min(5000, Math.max(-5000, Number(body.deltaX ?? body.dx ?? 0) || 0)));
+    if (!deltaX && !deltaY) throw bad("Choose a scroll distance with --dy (pixels, negative scrolls up).");
+    const target = await this.resolveTarget(tab, contents, body)
+      || await this.driveScript(contents, "({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) })");
+    await this.glide(tab, contents, target.x, target.y);
+    // Wheel input lands like a person's: precise pixel deltas in a quick run
+    // of steps. A single coarse tick delta is dropped by pages that smooth.
+    const point = this.drivePoint(tab, target.x, target.y), steps = 6;
+    for (let i = 0; i < steps; i++) {
+      if (contents.isDestroyed() || tab.agentDriveBlocked) break;
+      // Chromium wheel deltas run opposite the page direction: a negative
+      // deltaY scrolls down. Callers ask in page direction (--dy 600 = down).
+      contents.sendInputEvent({ type: "mouseWheel", ...point, canScroll: true, hasPreciseScrollingDeltas: true,
+        deltaX: -Math.round(deltaX / steps), deltaY: -Math.round(deltaY / steps) });
+      await new Promise((resolve) => setTimeout(resolve, 35));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return this.driveResult(tab, { scrolled: { deltaX, deltaY } });
+  }
   async control(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw bad("Send a browser action object.");
     const { action, id } = body;
@@ -905,6 +1235,35 @@ class BrowserService {
         && !Object.hasOwn(DEVICE_PROFILES, requested.device))
         throw bad(`Unknown phone size: ${String(requested.device).slice(0, 40)}. Choose iphone, pixel or ipad.`);
       return this.setView(id, body.view);
+    }
+    if (action === "agent-stop" || action === "agent-allow") {
+      // Only the user (pane UI) can hand a stopped tab back to an agent.
+      if (action === "agent-allow" && body.viaAgent === true)
+        throw bad("Only the user can allow agent driving again, from the browser pane.", 403);
+      const { tab } = this.find(id);
+      tab.agentDriveBlocked = action === "agent-stop";
+      if (tab.agentDriveBlocked) {
+        tab.agentDriveAt = 0;
+        const live = tab.nativeView?.webContents;
+        if (live && !live.isDestroyed()) void this.driveScript(live, "window.__lumenCursor && window.__lumenCursor.hide()", 1000).catch(() => {});
+      }
+      this.emit();
+      return this.metadata(tab);
+    }
+    // The pane's stop switch blocks everything an agent could use to change
+    // this page (input, navigation, scripts), never the user's own clicks.
+    if (body.viaAgent === true && ["navigate", "back", "forward", "reload", "stop", "evaluate", "close", "view"].includes(action)) {
+      const { tab } = this.find(id);
+      if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+    }
+    if (["snapshot", "click", "hover", "type", "press", "scroll"].includes(action)) {
+      const { tab } = this.find(id);
+      return this.driveLocked(tab, () => action === "snapshot" ? this.agentSnapshot(id)
+        : action === "click" ? this.agentClick(id, body, body.doubleClick === true)
+        : action === "hover" ? this.agentHover(id, body)
+        : action === "type" ? this.agentType(id, body)
+        : action === "press" ? this.agentPress(id, body)
+        : this.agentScroll(id, body));
     }
     if (action === "inspect") return this.inspect(id);
     if (action === "screenshot") return { image: (await this.capture(id)).toDataURL() };

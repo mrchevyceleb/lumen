@@ -743,6 +743,7 @@ class Sessions {
       extraArgs,
       sessionRef,
       controlId,
+      lumenDataDir: this.dataDir,
       ...account,
       ...controls,
       busy: false,
@@ -1419,7 +1420,25 @@ class Sessions {
     this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], delivery: "send", deliveryState: "sending" });
     try {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
-      else await this.agentTurn(s, await sharedPrompts.expand(prompt), queuedMessage);
+      else {
+        let expanded = await sharedPrompts.expand(prompt);
+        // Once per chat, tell the agent it lives inside Lumen and can run the
+        // place: the `lumen` command (already on PATH, token handled) lists,
+        // creates, messages, steers and stops the other visible chats, and
+        // drives this chat's embedded browser with a visible cursor. The
+        // transcript keeps showing the user's own words, like a shared
+        // prompt expansion.
+        // Never prefix a CLI command (/model, $skill): leading text would stop
+        // the CLI treating it as a command. And only promise the command
+        // while agent control is actually on (its connection file exists).
+        const deliverContext = !s.lumenContextSent && !/^\s*[\/$]/.test(prompt)
+          && fsSync.existsSync(path.join(this.dataDir, "agent-control.json"));
+        if (deliverContext) {
+          expanded = `[You are running inside Lumen as task ${s.controlId}. You can talk to and orchestrate the other Lumen agents, and drive this chat's in-app browser, from your shell with the \`lumen\` command (already on PATH and authenticated): \`lumen whoami\`, \`lumen list\`, \`lumen create --agent codex --root <folder> --name <title> --text <task>\`, \`lumen send <task-id> --text <message>\`, \`lumen watch <task-id>\`, \`lumen get <task-id>\`, \`lumen stop|focus|rename|configure <task-id> …\`. Every chat you create or message is a real visible chat the user can watch. Browser: \`lumen browser open --chat-id ${s.controlId} --url <url>\`, then \`lumen browser snapshot <tab-id>\` to see clickable elements, \`lumen browser click <tab-id> --ref N\` (or --selector/--text/--x --y), \`type\`, \`press\`, \`scroll\`, \`inspect\`, \`screenshot --output <file>\`. Your mouse moves visibly in the pane while you drive it. Run \`lumen guide\` for the full guide. Use this only when the task calls for other agents or browser testing.]\n\n${expanded}`;
+        }
+        await this.agentTurn(s, expanded, queuedMessage);
+        if (deliverContext) s.lumenContextSent = true;
+      }
       if (queuedMessage) this.event(s, { type: "message-delivered", messageId: queuedMessage.id });
     } catch (error) {
       if (queuedMessage) this.event(s, { type: "user-message-retracted", messageId: queuedMessage.id });
