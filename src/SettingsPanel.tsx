@@ -410,7 +410,8 @@ export default function SettingsPanel({
                   </label>
                   <DefaultModelPicker agent={agent} config={s.agents[agent]} loadShellProfile={s.loadShellProfile}
                     onChange={(model) => update({ ...s, agents: { ...s.agents, [agent]: { ...s.agents[agent],
-                      model: model?.id || "", modelName: model?.name || "", effort: model?.defaultEffort || "" } } })} />
+                      model: model?.id || "", modelName: model?.name || "", effort: model?.defaultEffort || "" } } })}
+                    onEffortChange={(effort) => agentSet(agent, "effort", effort)} />
                   <ArgsField
                     value={s.agents[agent].extraArgs}
                     onChange={(value) => agentSet(agent, "extraArgs", value)}

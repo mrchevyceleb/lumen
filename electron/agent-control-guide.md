@@ -12,6 +12,7 @@ An agent already running in a Lumen chat gets all of this for free. A `lumen` co
 lumen whoami                 # your own task ID and state
 lumen list                   # every open chat, yours included
 lumen create --agent claude --root 'C:\repo' --name 'Write the tests' --owner 'Task <your id>' --text '…'
+lumen create --agent codex --root 'C:\repo' --worktree agent/login-fix --base main --model MODEL_ID --effort high --name 'Fix login' --owner 'Task <your id>' --text 'Fix the login bug'
 lumen watch TASK_ID          # follow it until it finishes or asks a question
 lumen send TASK_ID --text 'Now run the full suite'
 lumen guide                  # this guide
@@ -43,6 +44,10 @@ node $lumen rename TASK_ID --name 'Login repair'
 
 Choose `pi`, `codex`, `claude`, `grok`, or `shell`. Omit `--root` for no workspace. `--cwd` must be inside the selected workspace. `--account-id` selects a saved account; omitting it uses the app's default. Empty strings select CLI defaults for model/effort/account. Configure uses the same supported-model validation as the UI. Claude/Grok support `--work-mode plan` or `default`; other agents retain their own planning workflows. Codex models also accept `--speed` with a service tier id from the model catalog (`priority` is Fast, `ultrafast` where offered, `default` is standard speed); tasks report it as `serviceTier`.
 
+For an isolated job, add `--worktree BRANCH` to `create` together with `--root`. Lumen creates that branch in the repository's dedicated `<repository>.worktrees/` folder and starts the chat there. Omit `--cwd` for a worktree job; it always starts at the new worktree root. `--base REF` chooses its starting commit and defaults to `HEAD`. After a job creates its worktree, retrying with the same task ID reuses it. A different task ID cannot silently join an existing branch or worktree; choose a new branch for each new job. Model and effort may be chosen per job; omitted values use the defaults under **Settings → Agents**. Use `models TASK_ID` to inspect the installed CLI's real model and effort catalog, or `configure` to change them while the task is idle.
+
+Worktree creation is serialized and journaled by Lumen's main process before Git is changed. The journal records the task ID, repository identity, exact starting commit, branch, and destination. Lumen creates a detached worktree first and then attaches its branch, so an interrupted create cannot leave an ambiguous branch-only state. Retry the same ID after an interruption. Recovery uses the recorded commit even if the original base ref has moved or been deleted. A branch without its original worktree is never attached automatically, and a failure that provably changed nothing releases its reservation.
+
 Task IDs are stable across normal app restarts. List includes all open chats, including ones created by a human. Native chats can be inspected or focused, but must return to readable view in the app before sending prompts or changing controls. Shell commands retain their PowerShell process and must finish before another is sent. Closing requires an idle readable chat with an empty queue. Closing removes that tab just as closing it in the UI does; saved files and native CLI history remain.
 
 Create and send accept `--id UUID` for retry safety. Save your chosen UUID before sending a request. Retrying a create with the same open task ID returns that task and does not resend an initial prompt already in its transcript or queue. If initial submission fails before acceptance, create returns the opened task with `deliveryError`; retry with the same ID and text to submit the missing prompt. Retrying a send with a retained transcript/queue message ID returns the previous message. A timeout is an uncertain result: read/list before retrying. IDs of closed tasks or messages outside the saved transcript are not retained forever.
@@ -72,7 +77,7 @@ Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON
 | --- | --- |
 | GET /v1 | Protocol version, capabilities, ready |
 | GET /v1/tasks | `{ tasks: [...] }` with metadata, queues, context usage, pending questions |
-| POST /v1/tasks | `id?`, `agent?`, `root?`, `cwd?`, `name?`, `owner?`, `accountId?`, `model?`, `effort?`, `workMode?`, `serviceTier?`, `text?`; returns visible task |
+| POST /v1/tasks | `id?`, `agent?`, `root?`, `cwd?`, `worktree?`, `base?`, `name?`, `owner?`, `accountId?`, `model?`, `effort?`, `workMode?`, `serviceTier?`, `text?`; returns visible task |
 | GET /v1/tasks/ID | Metadata plus the last 200 visible messages (up to 80,000 characters each); `transcriptLimited` reports truncation |
 | POST /v1/tasks/ID/messages | `{ id?: UUID, text: string }`; returns `messageId`, queue and current task |
 | POST /v1/tasks/ID/queue | `{ messageId: UUID, action: "steer" or "remove" }` |

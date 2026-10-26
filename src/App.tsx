@@ -88,6 +88,7 @@ import SessionTabs from "./SessionTabs";
 import BrowserPane from "./BrowserPane";
 import PiCustomControl from "./PiCustomControl";
 import SessionStart from "./SessionStart";
+import WorktreeJobDialog from "./WorktreeJobDialog";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
 import { chatText } from "./chat-export";
 const EditorPane = lazy(() => import("./EditorPane"));
@@ -131,7 +132,7 @@ type Bootstrap = {
   administrator: AdministratorStatus;
 };
 type Dialog =
-  "settings" | "worktrees" | "palette" | "open" | "newfile" | "tab" | null;
+  "settings" | "worktrees" | "worktree-job" | "palette" | "open" | "newfile" | "tab" | null;
 export default function App() {
   const updateStatus = useUpdates();
   const { accounts } = useAccounts();
@@ -1238,50 +1239,116 @@ export default function App() {
       });
     else action();
   };
-  useAgentControl(loaded, async ({ action, id, body }) => {
-    const find = () => tabsRef.current.find((t) => (t.controlId || t.id) === id);
-    const view = (tab: Tab, full = true) => taskView(tab, uiRequestsRef.current, full);
-    const audit = (tab: Tab, text: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: crypto.randomUUID(), role: "notice", title: "Agent control", text }] } : t));
-    const submit = async (tab: Tab, messageId: string, text: string) => {
-      if (tab.messages.some((m) => m.id === messageId) || tab.queuedMessages?.some((m) => m.id === messageId)) return true;
-      if (tab.mode !== "rich") throw new Error("Return this task to readable view before submitting its prompt.");
-      if (tab.agent === "shell") {
-        if (tab.busy) throw new Error("Wait for this shell command to finish.");
-        setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: messageId, role: "user", text }] } : t));
-        try { await api("session:send", tab.id, text, { id: messageId, text }); }
-        catch (e) { setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: t.messages.filter((m) => m.id !== messageId) } : t)); throw e; }
-      } else await api("session:submit", tab.id, { id: messageId, text });
-      return false;
-    };
-    if (action === "list") return { tasks: tabsRef.current.map((t) => view(t, false)) };
-    if (action === "create") {
-      let created = tabsRef.current.find((t) => t.controlId === body.id);
-      const reused = !!created;
-      if (!created) {
-        let folder = "";
-        if (body.root) {
-          const opened = await api<Workspace>("workspace:register", body.root);
-          folder = opened.root; setWorkspaces((old) => ({ ...old, [folder]: opened }));
+  const find = (id: string) => tabsRef.current.find((t) => (t.controlId || t.id) === id);
+  const view = (tab: Tab, full = true) => taskView(tab, uiRequestsRef.current, full);
+  const audit = (tab: Tab, text: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: crypto.randomUUID(), role: "notice", title: "Agent control", text }] } : t));
+  const submit = async (tab: Tab, messageId: string, text: string) => {
+    if (tab.messages.some((m) => m.id === messageId) || tab.queuedMessages?.some((m) => m.id === messageId)) return true;
+    if (tab.mode !== "rich") throw new Error("Return this task to readable view before submitting its prompt.");
+    if (tab.agent === "shell") {
+      if (tab.busy) throw new Error("Wait for this shell command to finish.");
+      setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: messageId, role: "user", text }] } : t));
+      try { await api("session:send", tab.id, text, { id: messageId, text }); }
+      catch (e) { setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: t.messages.filter((m) => m.id !== messageId) } : t)); throw e; }
+    } else await api("session:submit", tab.id, { id: messageId, text });
+    return false;
+  };
+  const resolveWorktreeWorkspace = async (target: string) => {
+    if (!target) throw new Error("Open a Git repository first.");
+    const known = Object.values(workspaces).find((item) => samePath(item.root, target) || samePath(item.git.root, target));
+    if (known?.git.available) return known;
+    const inspected = await api<Workspace>("workspace:inspect", target);
+    if (!inspected.git.available) throw new Error("The selected project is not a Git repository with at least one commit.");
+    setWorkspaces((old) => ({ ...old, [inspected.root]: inspected }));
+    return inspected;
+  };
+  const openWorktreeJob = async (target: string) => {
+    try {
+      const selected = await resolveWorktreeWorkspace(target);
+      setWorktreeFocus(gitRootOf(selected));
+      setDialog("worktree-job");
+    } catch (error: any) { notify(error.message); }
+  };
+  const controlledTaskCreates = useRef(new Map<string, { signature: string; promise: Promise<any> }>());
+  const createControlledTask = (body: Record<string, any>, human = false) => {
+    const id = typeof body.id === "string" ? body.id.trim() : "";
+    if (!id) return Promise.reject(new Error("A task ID is required."));
+    const signature = JSON.stringify({
+      agent: body.agent || "", name: body.name || "", nameCustom: body.nameCustom === true, owner: body.owner || "", human,
+      root: typeof body.root === "string" ? normalizePath(body.root) : "",
+      cwd: typeof body.cwd === "string" ? normalizePath(body.cwd) : "",
+      worktree: typeof body.worktree === "string" ? body.worktree.trim() : "",
+      base: typeof body.base === "string" && body.base.trim() ? body.base.trim() : "HEAD",
+      model: body.model || "", effort: body.effort || "", accountId: body.accountId || "",
+      workMode: body.workMode || "", serviceTier: body.serviceTier || "", text: body.text || "",
+    });
+    const pending = controlledTaskCreates.current.get(id);
+    if (pending) {
+      if (pending.signature !== signature) return Promise.reject(new Error("This task ID already has a different create in flight. Retry the original request or use a new task ID."));
+      return pending.promise;
+    }
+    const promise = (async () => {
+      let created = tabsRef.current.find((t) => t.controlId === id);
+      let reused = !!created;
+      if (body.worktree && !body.root) throw new Error("A worktree job needs a root folder.");
+      const binding = await api<Record<string, any> | null>("git:worktree-job:binding", id);
+      if (binding && !body.worktree) throw new Error("This task ID is already bound to a different worktree request.");
+      if (created && body.worktree && !binding) throw new Error("This task ID has no durable worktree binding.");
+      let opened: Workspace | undefined;
+      if (body.worktree) {
+        const result = await api<{ workspace: Workspace; source: Workspace }>("git:worktree-job", id, body.root, body.worktree, body.base);
+        opened = result.workspace;
+        setWorkspaces((old) => ({ ...old, [result.source.root]: result.source, [opened!.root]: opened! }));
+        void refreshGit(result.source.root);
+      } else if (body.root) {
+        opened = await api<Workspace>("workspace:register", body.root);
+        setWorkspaces((old) => ({ ...old, [opened!.root]: opened! }));
+      }
+      const concurrent = tabsRef.current.find((t) => t.controlId === id);
+      if (concurrent) { created = concurrent; reused = true; }
+      if (created) {
+        if (body.worktree) {
+          if (!opened || !samePath(created.root, opened.root)) throw new Error("This task ID is already bound to a different worktree request.");
+        } else {
+          const workspaceMatches = body.root ? !!opened && samePath(created.root, opened.root) : created.projectless;
+          if (!workspaceMatches) throw new Error("This task ID is already bound to a different workspace request.");
         }
-        created = await addTab(body.agent, "rich", folder, undefined, body.cwd, body.accountId, undefined, {
-          controlId: body.id, managedBy: body.owner || "Local agent", name: body.name || `Agent task · ${agentNames[body.agent as Agent]}`,
+      }
+      if (!created) {
+        created = await addTab(body.agent, "rich", opened?.root || "", undefined, body.cwd, body.accountId, undefined, {
+          controlId: id, managedBy: body.owner || (human ? "You" : "Local agent"), name: body.name || `Agent task · ${agentNames[body.agent as Agent]}`, nameCustom: body.nameCustom === true,
           model: body.model, effort: body.effort, workMode: body.workMode, serviceTier: body.serviceTier,
         });
         if (!created) throw new Error("Could not create the chat.");
-        audit(created, `${created.managedBy} created this task through Lumen's local interface.`);
-        notify(`Agent control started ${created.name}`);
+        audit(created, `${created.managedBy} created this ${body.worktree ? `worktree job on ${body.worktree}` : "task"}${human ? "." : " through Lumen's local interface."}`);
+        notify(`${human ? "Started" : "Agent control started"} ${created.name}`);
+        if (human) {
+          rememberProject(created.root, undefined, true);
+          setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root); setStartingProjectless(false);
+        }
+      } else if (human) {
+        setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root);
       }
       await settleControl();
       let deliveryError = "";
       if (body.text) {
         try {
-          await submit(created, body.id, body.text);
-        } catch (e: any) { deliveryError = e.message; audit(created, `Initial prompt was not submitted: ${e.message}. Retry create with task ID ${body.id}.`); }
+          await submit(created, id, body.text);
+        } catch (e: any) { deliveryError = e.message; audit(created, `Initial prompt was not submitted: ${e.message}. Retry create with task ID ${id}.`); }
       }
-      await settleControl(); persist();
+      await settleControl(); await persist();
       return { ...view(tabsRef.current.find((t) => t.id === created!.id) || created), reused, ...(deliveryError ? { deliveryError } : {}) };
-    }
-    const tab = find();
+    })();
+    const tracked = promise.finally(() => {
+      if (controlledTaskCreates.current.get(id)?.promise === tracked) controlledTaskCreates.current.delete(id);
+    });
+    controlledTaskCreates.current.set(id, { signature, promise: tracked });
+    return tracked;
+  };
+  useAgentControl(loaded, async ({ action, id, body }) => {
+    if (action === "list") return { tasks: tabsRef.current.map((t) => view(t, false)) };
+    if (action === "create") return createControlledTask(body);
+    const tab = find(id);
     if (!tab) throw Object.assign(new Error("This task is no longer open. Use list to find available chats."), { status: 404 });
     if (action === "get") return view(tab);
     if (action === "focus") {
@@ -1326,7 +1393,7 @@ export default function App() {
     }
     if (action !== "message") audit(tab, `Local agent requested ${action}${action === "queue" ? ` · ${body.action}` : ""}.`);
     await settleControl(); persist();
-    return { ...view(find() || tab), ...(action === "message" ? { messageId: body.id } : {}) };
+    return { ...view(find(id) || tab), ...(action === "message" ? { messageId: body.id } : {}) };
   });
   const openEditorDoc = async (normalized: string, folder: string) => {
     // A split only makes sense with room for both halves. On a narrow window the
@@ -1747,6 +1814,7 @@ export default function App() {
         } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
         {agents.map((agent) => <button key={agent} onClick={() => { setAgentMenu(false); setAgentMenuRoot(undefined); void addTab(agent, "rich", agentMenuRoot ?? root); }}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
         <div className="menu-divider" /><button onClick={() => { setAgentMenu(false); void addTab("shell", "rich", ""); }}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={() => { setAgentMenu(false); startWithoutWorkspace(); }}><Sparkles size={17} /><span>New chat without workspace</span></button>
+        <button onClick={() => { const target = agentMenuRoot ?? worktreeTarget.current; setAgentMenu(false); setAgentMenuRoot(undefined); void openWorktreeJob(target); }}><Sparkles size={17} /><span>Worktree agent job</span><small>Model + effort</small></button>
         <button onClick={() => { setAgentMenu(false); setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
       </div>, appRootRef.current || document.body)}
     </div>
@@ -2391,6 +2459,25 @@ export default function App() {
           recent={boot.recent}
           onClose={() => setDialog(null)}
           onOpen={openWorkspace}
+        />
+      )}
+      {dialog === "worktree-job" && (
+        <WorktreeJobDialog
+          workspace={Object.values(workspaces).find((item) => samePath(item.root, worktreeFocus) || samePath(item.git.root, worktreeFocus))}
+          settings={settings}
+          available={boot.agents}
+          onClose={() => { setDialog(null); setWorktreeFocus(""); }}
+          onCreate={async (input) => {
+            const selected = await resolveWorktreeWorkspace(worktreeFocus);
+            const source = gitRootOf(selected);
+            const result = await createControlledTask({
+              id: input.id, agent: input.agent, root: source, worktree: input.branch, base: input.base,
+              name: input.name || `${agentNames[input.agent]} worktree job`, nameCustom: !!input.name, owner: "You",
+              model: input.model, effort: input.effort, text: input.text || undefined,
+            }, true);
+            if (result.deliveryError) notify(`The job is open, but its first instruction was not sent: ${result.deliveryError}`);
+            setDialog(null); setWorktreeFocus("");
+          }}
         />
       )}
       {dialog === "worktrees" && (

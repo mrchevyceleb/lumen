@@ -21,6 +21,7 @@ const { RecoveryStore } = require("./recovery.cjs");
 const { Dictation } = require("./dictation.cjs");
 const { Attachments } = require("./attachments.cjs");
 const { BrowserService, browserURL } = require("./browser.cjs");
+const { WorktreeJobs } = require("./worktree-jobs.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
   app.setPath("userData", process.env.LUMEN_TEST_DATA);
@@ -30,7 +31,7 @@ const startup = waitForRestartParent().then(() => {
   if (!app.requestSingleInstanceLock({ openPaths: initialPaths })) { app.exit(0); return false; }
   return true;
 });
-let window, workspace, sessions, updates, accounts, agentControl, recovery, attachments, browser, defaultModels, modelCache, dictation;
+let window, workspace, worktreeJobs, sessions, updates, accounts, agentControl, recovery, attachments, browser, defaultModels, modelCache, dictation;
 let restartForUpdate = false;
 let restartForAdministrator = false, administratorRestartPending = false;
 const administrator = createAdministrator(app);
@@ -473,7 +474,7 @@ function handle(name, callback) {
     try {
       return { data: await callback(...args) };
     } catch (error) {
-      return { error: error.message };
+      return { error: error.message, ...(typeof error.code === "string" ? { code: error.code } : {}) };
     }
   });
 }
@@ -483,6 +484,8 @@ startup.then(async (start) => {
   const dataDir = app.getPath("userData");
   workspace = new WorkspaceService(dataDir);
   await workspace.init();
+  worktreeJobs = new WorktreeJobs(workspace, dataDir);
+  await worktreeJobs.init();
   dictation = new Dictation(dataDir);
   let googleInstall;
   const installGoogle = () => googleInstall ||= require("./google.cjs").install(dataDir, resolveLauncher).finally(() => { googleInstall = null; });
@@ -616,6 +619,8 @@ startup.then(async (start) => {
   handle("git:worktree", (root, branch, base) =>
     workspace.worktree(root, branch, base),
   );
+  handle("git:worktree-job", (id, root, branch, base) => worktreeJobs.create(id, root, branch, base));
+  handle("git:worktree-job:binding", (id) => worktreeJobs.binding(id));
   handle("git:prs", (root) => workspace.prs(root));
   handle("session:create", (options) => { const created = sessions.create(options); accounts.notify({ type: "changed" }); return created; });
   handle("session:start", (id) => sessions.startNative(id));

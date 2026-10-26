@@ -11,7 +11,7 @@ const object = (value) => value && typeof value === "object" && !Array.isArray(v
 function validate(action, body) {
   if (!object(body)) throw new ControlError("Send a JSON object.");
   const fields = {
-    create: ["id", "agent", "name", "owner", "root", "cwd", "model", "effort", "workMode", "serviceTier", "accountId", "text"],
+    create: ["id", "agent", "name", "owner", "root", "cwd", "worktree", "base", "model", "effort", "workMode", "serviceTier", "accountId", "text"],
     message: ["id", "text"], queue: ["messageId", "action"], configure: ["model", "effort", "workMode", "serviceTier"],
     rename: ["name"], answer: ["requestId", "response"], stop: [], focus: [], close: [], resume: [],
   }[action];
@@ -21,7 +21,7 @@ function validate(action, body) {
     if (body[key] !== undefined && typeof body[key] !== "string") throw new ControlError(`${key} must be a string.`);
   }
   for (const key of ["id", "messageId"]) if (body[key] !== undefined && !uuid.test(body[key])) throw new ControlError(`${key} must be a UUID.`);
-  for (const key of ["name", "owner", "model", "effort", "workMode", "serviceTier", "accountId"]) {
+  for (const key of ["name", "owner", "model", "effort", "workMode", "serviceTier", "accountId", "worktree", "base"]) {
     if (body[key] !== undefined && (body[key].length > 300 || /[\x00-\x1f]/.test(body[key]))) throw new ControlError(`Invalid ${key}.`);
   }
   if (action === "create") {
@@ -29,6 +29,10 @@ function validate(action, body) {
     if (!["shell", "pi", "codex", "claude", "grok", "google"].includes(body.agent)) throw new ControlError("Choose shell, pi, codex, claude, grok, or google.");
     for (const key of ["root", "cwd"]) if (body[key] && !path.isAbsolute(body[key])) throw new ControlError(`${key} must be an absolute folder.`);
     if (body.cwd && !body.root) throw new ControlError("Choose a workspace root when specifying cwd.");
+    if (body.worktree && !body.root) throw new ControlError("Choose a Git workspace root when creating a worktree.");
+    if (body.worktree && body.cwd) throw new ControlError("Worktree jobs start at the new worktree root; omit cwd.");
+    if (body.base && !body.worktree) throw new ControlError("Choose a worktree branch when specifying its base.");
+    if (body.worktree !== undefined && !body.worktree.trim()) throw new ControlError("Enter a worktree branch name.");
     // Sessions.create resolves real paths and rejects cwd outside the registered root.
   }
   if (action === "message" || (action === "create" && body.text !== undefined)) {
@@ -166,7 +170,7 @@ class AgentControl {
         for await (const chunk of req) { bytes += chunk.length; if (bytes > 900000) throw new ControlError("Request is too large.", 413); chunks.push(chunk); }
         try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new ControlError("Invalid JSON."); }
       }
-      if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close", "browser", "browser-drive"] });
+      if (req.method === "GET" && url.pathname === "/v1") return send(200, { version: 1, ready: this.ready, capabilities: ["tasks", "worktrees", "messages", "queue", "steer", "stop", "models", "configure", "focus", "answer", "close", "browser", "browser-drive"] });
       if (url.pathname === "/v1/browser" && ["GET", "POST"].includes(req.method)) {
         if (!this.ready || !this.browser) throw new ControlError("Lumen's browser is starting. Try again shortly.", 503);
         try { return send(200, await this.browser(req.method === "GET" ? { action: "list" } : body)); }
