@@ -931,7 +931,12 @@ class Sessions {
     if (s.discoveryPromise) await s.discoveryPromise.catch(() => {});
   }
   rejectPiCommands(s, message) {
-    for (const request of s.piRequests?.values() || []) { clearTimeout(request.timer); request.reject(new Error(message)); }
+    for (const request of s.piRequests?.values() || []) {
+      clearTimeout(request.timer);
+      const error = new Error(message);
+      if (request.type === "steer") error.deliveryUncertain = true;
+      request.reject(error);
+    }
     s.piRequests?.clear();
     if (!s.piCommands) return;
     const request = s.piCommands;
@@ -1042,10 +1047,11 @@ class Sessions {
     if (s.piRpcProcess && type === "prompt") await this.piRpc(s, "track_prompt", { ...data, deliveryId: id });
     return new Promise((resolve, reject) => {
       s.piRequests ||= new Map();
-      const timer = setTimeout(() => { s.piRequests.delete(id); reject(new Error("Pi did not finish this control.")); }, type === "prompt" ? 24 * 60 * 60 * 1000 : 30000);
-      s.piRequests.set(id, { resolve, reject, timer });
+      const timer = setTimeout(() => { s.piRequests.delete(id); const error = new Error("Pi did not finish this control."); error.deliveryUncertain = true; reject(error); }, type === "prompt" ? 24 * 60 * 60 * 1000 : 30000);
+      s.piRequests.set(id, { resolve, reject, timer, type });
       const failed = (error) => {
         if (type === "prompt") this.writePiBridge(s, { id: uuid(), type: "prompt_preflight", deliveryId: id, failed: true });
+        if (type === "steer") error.deliveryUncertain = true;
         clearTimeout(timer); s.piRequests.delete(id); reject(error);
       };
       try {
@@ -1467,10 +1473,10 @@ class Sessions {
     s.cwd = cwd;
     this.event(s, { type: "cwd", cwd });
   }
-  finish(s, code = 0) {
+  finish(s, code = 0, piCwdSynced = false) {
     if (s.stopping) return;
     if (!s.busy) return;
-    if (s.agent === "pi") {
+    if (s.agent === "pi" && !piCwdSynced) {
       // Single-flight: a second completion signal while the cwd sync is pending
       // merges its exit code and returns. Only the sync continuation closes the
       // turn, so done never fires with a stale checkout.
@@ -1482,8 +1488,7 @@ class Sessions {
       void this.syncPiCwd(s).catch(() => {}).finally(() => {
         s.piCwdSyncing = false;
         const merged = s.piFinishCode ?? code;
-        s.piFinishCode = undefined;
-        if (s.turn === turn) this.finish(s, merged);
+        if (s.turn === turn) { s.piFinishCode = undefined; this.finish(s, merged, true); }
       });
       return;
     }
@@ -1924,7 +1929,9 @@ class Sessions {
       }
     }
     if (e.type === "response" && e.success === false) {
-      this.event(s, { type: "error", message: e.error });
+      // The queue presents steering rejection and its fallback; a second red
+      // error card makes an ordinary next-turn fallback look like a failure.
+      if (e.command !== "steer") this.event(s, { type: "error", message: e.error });
       if (e.command === "prompt" || (s.piCompletionStateId && e.id === s.piCompletionStateId)) this.finish(s, 1);
     }
     if (e.type === "pi_assistant_error") {
