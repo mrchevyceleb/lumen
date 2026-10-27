@@ -190,8 +190,18 @@ export default function lumenControls(pi) {
           throw new Error("This command needs Native CLI. The message was not submitted.");
         }
         if (request.type === "prompt" && !context.isIdle()) throw new Error("Pi is already running a turn.");
+        if (request.type === "steer" && context.isIdle()) throw new Error("Pi's active turn has finished; the message stays queued.");
         deliveries.set(request.clientId || request.id, request);
-        try { pi.sendUserMessage(content, { ...(request.type === "steer" ? { deliverAs: "steer" } : {}), expandPromptTemplates: true }); }
+        try {
+          if (request.type === "steer") {
+            // Like Pi's native RPC steer command, await only acceptance into its
+            // steering queue, never the later model run or transcript replay.
+            await pi.sendUserMessage(content, { deliverAs: "steer", expandPromptTemplates: true });
+            request.accepted = true; respond(request, state());
+          } else pi.sendUserMessage(content, { expandPromptTemplates: true });
+          // Native steering is accepted here. Its user event can wait for a long
+          // tool boundary, so persistence acknowledgement belongs to prompts only.
+        }
         catch (error) { deliveries.delete(request.clientId || request.id); throw error; }
         return;
       }
@@ -228,7 +238,8 @@ export default function lumenControls(pi) {
         if (delivery) {
           delivery.started = true;
           if (ctx.mode !== "rpc") output({ ...message, clientId: delivery.clientId });
-          if (event === "message_end") {
+          if (event === "message_end" && delivery.accepted) deliveries.delete(delivery.clientId || delivery.id);
+          else if (event === "message_end") {
             delivery.confirming = true;
             // Extension message_end runs BEFORE SessionManager.appendMessage.
             // Yield the hook, then verify that this exact entry reached disk.
@@ -250,7 +261,10 @@ export default function lumenControls(pi) {
           }
         } else if (ctx.mode !== "rpc") output(message);
         if (event === "agent_settled") {
-          for (const [id, request] of deliveries) if (!request.confirming) { output({ type: "response", id: request.id, command: request.type, success: false, error: "Pi ended before confirming this message. Inspect its history before resending." }); deliveries.delete(id); }
+          for (const [id, request] of deliveries) {
+            if (request.accepted) { deliveries.delete(id); continue; }
+            if (!request.confirming) { output({ type: "response", id: request.id, command: request.type, success: false, error: "Pi ended before confirming this message. Inspect its history before resending." }); deliveries.delete(id); }
+          }
         }
         if (["agent_settled", "model_select", "session_compact"].includes(event)) output({ type: "response", command: "get_state", success: true, data: state() });
       });

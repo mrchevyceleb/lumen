@@ -65,9 +65,18 @@ class MessageQueue {
       this.owner.event(this.s, { type: "message-delivered", messageId: entry.id });
       this.items = this.items.filter((m) => m !== entry);
       this.owner.event(this.s, { type: "user-message", messageId: entry.id, text: entry.text, attachments: entry.attachments, delivery: "steer" });
-    } catch (error) { entry.state = "queued"; entry.deliveryUncertain = true; this.paused = true; throw new Error("Steering was not confirmed; inspect history before resending this queued message. " + error.message); }
+    } catch (error) {
+      entry.state = "queued";
+      entry.deliveryUncertain = error.deliveryUncertain === true;
+      if (entry.deliveryUncertain) this.paused = true;
+      if (entry.deliveryUncertain) throw new Error("Steering was not confirmed; inspect history before resending this queued message. " + error.message);
+      // A native turn-boundary rejection is not a delivery failure. Keep the
+      // message in the normal queue so it sends as soon as this turn finishes.
+      this.owner.event(this.s, { type: "diagnostic", text: "The active turn did not accept steering; the message stays queued for the next turn. " + error.message });
+      return { ...this.state(), steered: false, reason: error.message };
+    }
     finally { this.pending = false; this.emit(); if (!this.closed) void this.drain(); }
-    return this.state();
+    return { ...this.state(), steered: true };
   }
   finish(code) { if (code !== 0) this.pause(); else void this.drain(); }
   reconcile(messages, accepted = []) {

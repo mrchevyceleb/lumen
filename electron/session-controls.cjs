@@ -465,6 +465,8 @@ class Runtime {
     this.uiRequests = new Map();
     this.serverUiRequests = new Map();
     this.userAcks = new Map();
+    this.steeredInputs = new Set();
+    this.steeredResult = undefined;
     this.hadPrompt = !!s.sessionRef;
     this.context = s.contextTokens ?? null;
     this.contextWindow = s.contextWindow ?? null;
@@ -477,20 +479,30 @@ class Runtime {
   request(method, params = {}, timeout = 45000, onWritten) {
     const id = uuid();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`The CLI did not finish ${method}. Try again or use native view.`)); }, timeout);
-      this.pending.set(id, { resolve, reject, timer });
+      const timer = setTimeout(() => { this.pending.delete(id); const error = new Error(`The CLI did not finish ${method}. Try again or use native view.`); error.deliveryUncertain = true; reject(error); }, timeout);
+      this.pending.set(id, { resolve, reject, timer, method, written: false });
       try {
         this.write(this.s.agent === "claude" ? { type: "control_request", request_id: id, request: { subtype: method, ...params } } :
           { jsonrpc: "2.0", id, method, params }, (error) => {
-            if (error && this.pending.has(id)) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+            const pending = this.pending.get(id);
+            if (pending) pending.written = true;
+            if (error && pending) { clearTimeout(timer); this.pending.delete(id); if (["turn/steer", "_x.ai/interject"].includes(method)) error.deliveryUncertain = true; reject(error); }
             onWritten?.(error);
           });
+        const pending = this.pending.get(id);
+        if (pending) pending.written = true;
       } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
   close(message = "The CLI session closed.") {
     this.closed = true;
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(message)); }
+    this.steeredInputs.clear(); this.clearSteeredResult();
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      const error = new Error(message);
+      if (pending.written && ["turn/steer", "_x.ai/interject"].includes(pending.method)) error.deliveryUncertain = true;
+      pending.reject(error);
+    }
     this.pending.clear();
     for (const id of this.uiRequests.keys()) this.owner.event(this.s, { type: "agent_ui_cancel", request: { id } });
     this.uiRequests.clear();
@@ -501,6 +513,23 @@ class Runtime {
     this.terminals?.close();
     this.compactionDone?.reject(new Error(message)); this.compactionDone = null;
     if (this.s.runtime === this) this.s.runtime = null;
+  }
+  clearSteeredResult() {
+    clearTimeout(this.steeredResult?.timer);
+    this.steeredResult = undefined;
+  }
+  releaseSteeredResult() {
+    if (this.steeredInputs.size || !this.steeredResult) return;
+    const { turn, code } = this.steeredResult;
+    this.clearSteeredResult();
+    if (this.s.busy && this.s.turn === turn) this.owner.finish(this.s, code);
+  }
+  holdSteeredResult(code) {
+    this.clearSteeredResult();
+    const turn = this.s.turn;
+    const timer = setTimeout(() => { this.steeredInputs.clear(); this.releaseSteeredResult(); }, 15000);
+    timer.unref?.();
+    this.steeredResult = { turn, code, timer };
   }
   receive(e) {
     const { owner: o, s } = this;
@@ -580,6 +609,9 @@ class Runtime {
         })).catch(() => {});
       }
       if (e.type === "user" && this.userAcks.has(e.uuid)) { const ack = this.userAcks.get(e.uuid); clearTimeout(ack.timer); this.userAcks.delete(e.uuid); ack.resolve(); }
+      // A replay proves Claude consumed the correction. Its own later result,
+      // not the held result from the previous run, will finish this Lumen turn.
+      if (e.type === "user") { this.steeredInputs.delete(e.uuid); if (!this.steeredInputs.size) this.clearSteeredResult(); }
       if (e.type === "system") {
         s.nativeBackgroundTasks ||= new Set();
         if (e.subtype === "background_tasks_changed") { s.nativeBackgroundTasks = new Set((e.tasks || []).map((task) => task.task_id)); this.backgroundSnapshot = true; }
@@ -628,7 +660,14 @@ class Runtime {
         if (!this.contextWindow && usage?.contextWindow) this.contextWindow = usage.contextWindow;
         this.reportContext();
         void this.contextUsage().catch(() => {});
-        o.finish(s, e.is_error ? 1 : 0);
+        // A result can precede streamed steering that Claude has accepted but not
+        // replayed yet. Its next run is part of this Lumen turn, so keep the queue
+        // held until every accepted correction has had its own result boundary.
+        // Stop and error results always finish; a missing replay gets a bounded
+        // fallback rather than leaving the composer busy forever.
+        if (e.is_error || s.stopRequested) { this.steeredInputs.clear(); this.clearSteeredResult(); }
+        if (!this.steeredInputs.size) { this.clearSteeredResult(); o.finish(s, e.is_error ? 1 : 0); }
+        else this.holdSteeredResult(0);
       }
     } else if (s.agent === "codex") this.codexEvent(e);
     else this.grokEvent(e);
@@ -979,14 +1018,25 @@ class Runtime {
     }
     await this.owner.attachments.resolve(this.s.controlId, attachments);
   }
-  async userInput(text, id, attachments = []) {
-    const content = attachments.length ? await this.content(text, attachments) : text;
+  async userInput(text, id, attachments = [], acknowledge = true, preparedContent) {
+    const content = preparedContent ?? (attachments.length ? await this.content(text, attachments) : text);
     id ||= uuid();
+    const input = { type: "user", uuid: id, session_id: this.s.sessionRef || "", parent_tool_use_id: null, message: { role: "user", content } };
+    if (!acknowledge) {
+      // --replay-user-messages acknowledges at the next loop boundary, which can
+      // be minutes away behind a tool. A flushed native stream write is the same
+      // handoff the interactive CLI provides, so do not turn that wait into an error.
+      await new Promise((resolve, reject) => {
+        try { this.write(input, (error) => { if (error) { error.deliveryUncertain = true; reject(error); } else resolve(); }); }
+        catch (error) { reject(error); }
+      });
+      return;
+    }
     await new Promise((resolve, reject) => {
       const fail = (error) => { const ack = this.userAcks.get(id); if (!ack) return; clearTimeout(ack.timer); this.userAcks.delete(id); reject(error); };
       const timer = setTimeout(() => fail(new Error("Claude did not acknowledge this message. Inspect the saved conversation before resending.")), 45000);
       this.userAcks.set(id, { resolve, reject, timer });
-      try { this.write({ type: "user", uuid: id, session_id: this.s.sessionRef || "", parent_tool_use_id: null, message: { role: "user", content } }, (error) => { if (error) fail(error); }); }
+      try { this.write(input, (error) => { if (error) fail(error); }); }
       catch (error) { fail(error); }
     });
   }
@@ -999,14 +1049,22 @@ class Runtime {
       if (!this.grokPromptActive) throw new Error("Grok has not started its turn or is finishing it.");
       if (message.attachments?.length) throw new Error("Grok interjections accept text only. Keep this image message queued for the next turn.");
       const result = await this.request("_x.ai/interject", { sessionId: this.s.sessionRef, text: message.text, interjectionId: message.id });
-      if (result.status !== "queued") throw new Error("Grok did not acknowledge the interjection.");
+      if (result.status !== "queued") {
+        const error = new Error(typeof result.status === "string" ? `Grok did not accept the interjection (${result.status}).` : "Grok did not acknowledge the interjection.");
+        if (typeof result.status !== "string") error.deliveryUncertain = true;
+        throw error;
+      }
     } else {
-      // Native streaming input is consumed by Claude at its next loop boundary.
-      // Keep the current process/tools alive; never emulate steering by killing it.
       const turn = this.s.turn;
-      await this.userInput(message.text, message.id, message.attachments);
-      if (this.closed || !this.s.busy || this.s.turn !== turn || this.s.stopping)
-        throw new Error("Claude finished before steering was confirmed. The correction may have reached the CLI; review it before retrying.");
+      const content = message.attachments?.length ? await this.content(message.text, message.attachments) : message.text;
+      // Image preparation yields to the event loop. Do not write into an idle
+      // Claude (or a newer turn) if the original result arrived meanwhile.
+      if (this.closed || !this.s.busy || this.s.turn !== turn || this.s.stopping) throw new Error("This turn finished while the steering message was being prepared.");
+      // Claude owns the correction once its native input stream accepts it, even
+      // if this turn finishes before the replay or the next loop boundary.
+      this.steeredInputs.add(message.id);
+      try { await this.userInput(message.text, message.id, [], false, content); }
+      catch (error) { if (!error.deliveryUncertain) { this.steeredInputs.delete(message.id); this.releaseSteeredResult(); } throw error; }
     }
   }
   async prompt(text, message = {}) {
@@ -1257,6 +1315,7 @@ class Runtime {
     s.codexReconfigure = false;
   }
   async cancel() {
+    this.steeredInputs.clear(); this.releaseSteeredResult();
     for (const [id, reply] of this.uiRequests) { reply({ cancelled: true, confirmed: false }); this.owner.event(this.s, { type: "agent_ui_cancel", request: { id } }); }
     this.uiRequests.clear();
     this.serverUiRequests.clear();
