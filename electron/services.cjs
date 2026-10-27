@@ -1078,7 +1078,7 @@ class Sessions {
     try { const [info] = await Promise.all([result, ack]); return info; }
     finally { const pending = s.piRequests.get(id); if (pending) { clearTimeout(pending.timer); s.piRequests.delete(id); pending.reject(new Error("Pi control canceled.")); } }
   }
-  async models(id, refresh = false) {
+  async models(id, refresh = false, applying = false) {
     const s = this.get(id);
     if (this.accounts?.signingIn(s)) throw new Error("Finish sign-in before refreshing models.");
     if (s.agent === "shell") throw new Error("Choose an agent to use model controls.");
@@ -1103,7 +1103,7 @@ class Sessions {
     }
     if (s.catalogPromise) return s.catalogPromise;
     if (!refresh && s.catalog && Date.now() - s.catalogAt < 60000) return s.catalog;
-    if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") {
+    if (s.busy || s.stopping || s.transitioning || (s.setting && !applying) || s.mode !== "rich") {
       if (s.catalog) return s.catalog;
       throw new Error("Finish this turn to load model controls.");
     }
@@ -1154,16 +1154,18 @@ class Sessions {
   async configure(id, change) {
     const s = this.get(id);
     if (s.busy || s.stopping || s.transitioning || s.setting || s.mode !== "rich") throw new Error("Finish this turn before changing its controls.");
-    const info = await this.models(id, !!s.catalogCached && s.agent !== "google");
-    if (s.busy || s.stopping || s.transitioning || s.setting || !this.sessions.has(id)) throw new Error("This chat is busy or closing.");
-    // Captured after models(): discovery itself can settle effort or a stale
-    // tier, and a rollback must return to that settled state, not before it.
-    const previousModel = s.model;
-    const previousEffort = s.effort;
-    const previousWorkMode = s.workMode;
-    const previousTier = s.serviceTier || "";
+    // Claim delivery before the catalog await. Otherwise a queued or external
+    // send can win the race and run on the old model while this change rejects.
     s.setting = true;
     try {
+      const info = await this.models(id, !!s.catalogCached && s.agent !== "google", true);
+      if (s.busy || s.stopping || s.transitioning || !this.sessions.has(id)) throw new Error("This chat is busy or closing.");
+      // Captured after models(): discovery itself can settle effort or a stale
+      // tier, and a rollback must return to that settled state, not before it.
+      const previousModel = s.model;
+      const previousEffort = s.effort;
+      const previousWorkMode = s.workMode;
+      const previousTier = s.serviceTier || "";
       if (change.cycle && s.agent !== "pi") throw new Error("Native cycling is available for Pi.");
       if (change.cycle) {
         if (change.cycle === "backward") await this.piBridge(s, "backward");
@@ -1398,7 +1400,7 @@ class Sessions {
   }
   async send(id, prompt, queuedMessage) {
     const s = this.get(id);
-    if (s.stopping || s.stopRequested || s.transitioning || s.setting || (s.catalogPromise && s.agent !== "google"))
+    if (s.stopping || s.stopRequested || s.transitioning || s.setting)
       throw new Error(
         "This session is stopping. Wait a moment before continuing.",
       );

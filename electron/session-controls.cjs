@@ -6,7 +6,7 @@ const os = require("node:os");
 const TOML = require("@iarna/toml");
 const net = require("node:net");
 const WebSocket = require("ws");
-const { cliOptions, speedId } = require("./models.cjs");
+const { catalog, cliOptions, speedId } = require("./models.cjs");
 const { codexAccountOptions, renameWithRetry } = require("./accounts.cjs");
 const uuid = () => crypto.randomUUID();
 const withoutNulls = (value) => Array.isArray(value) ? value.map(withoutNulls) : value && typeof value === "object" ?
@@ -346,7 +346,15 @@ function codexConfig(s) {
 
 // Grok's MCP toggles persist. Give every Lumen chat its own preferences/auth cache;
 // never call server toggles (which can also write project configuration).
+// Model discovery and the first message can both need the per-chat home. Share
+// the real setup instead of serializing the whole composer behind discovery.
 async function grokHome(owner, s) {
+  if (s.grokHomePreparing) return s.grokHomePreparing;
+  const pending = prepareGrokHome(owner, s); s.grokHomePreparing = pending;
+  try { return await pending; }
+  finally { if (s.grokHomePreparing === pending) s.grokHomePreparing = null; }
+}
+async function prepareGrokHome(owner, s) {
   if (owner.accounts?.signingIn(s)) throw new Error("Finish Grok's sign-in, then retry your message.");
   const base = process.env.GROK_HOME || path.join(os.homedir(), ".grok");
   const target = path.join(owner.dataDir, "grok", s.controlId);
@@ -362,7 +370,7 @@ async function grokHome(owner, s) {
   }
   for (const name of ["plugins", "installed-plugins", "marketplace-cache", "skills", "agents", "commands", "workflows", "hooks", "memory", "memory-v2"])
     if (!await fs.stat(path.join(target, name)).then(() => true, () => false) && await fs.stat(path.join(base, name)).then((st) => st.isDirectory(), () => false))
-      await fs.symlink(path.join(base, name), path.join(target, name), process.platform === "win32" ? "junction" : "dir");
+      await fs.symlink(path.join(base, name), path.join(target, name), process.platform === "win32" ? "junction" : "dir").catch((error) => { if (error.code !== "EEXIST") throw error; });
   // Migrate a conversation created by Lumen's earlier headless adapter once.
   if (s.sessionRef) {
     if (!sessionId(s.sessionRef)) throw new Error("Invalid Grok conversation identifier.");
@@ -382,6 +390,12 @@ async function grokHome(owner, s) {
   return target;
 }
 async function claudeHome(owner, s) {
+  if (s.claudeHomePreparing) return s.claudeHomePreparing;
+  const pending = prepareClaudeHome(owner, s); s.claudeHomePreparing = pending;
+  try { return await pending; }
+  finally { if (s.claudeHomePreparing === pending) s.claudeHomePreparing = null; }
+}
+async function prepareClaudeHome(owner, s) {
   if (owner.accounts?.signingIn(s)) throw new Error("Finish Claude's sign-in, then retry your message.");
   const source = s.accountHome || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   const target = path.join(owner.dataDir, "claude", s.controlId);
@@ -401,7 +415,7 @@ async function claudeHome(owner, s) {
   // copying their large caches. The private .claude.json owns MCP preferences.
   for (const name of ["plugins", "skills", "agents", "commands", "projects", "hooks", "memory-bank", "plans"])
     if (!await fs.stat(path.join(target, name)).then(() => true, () => false) && await fs.stat(path.join(source, name)).then((st) => st.isDirectory(), () => false))
-      await fs.symlink(path.join(source, name), path.join(target, name), process.platform === "win32" ? "junction" : "dir");
+      await fs.symlink(path.join(source, name), path.join(target, name), process.platform === "win32" ? "junction" : "dir").catch((error) => { if (error.code !== "EEXIST") throw error; });
   await fs.chmod(path.join(target, ".claude.json"), 0o600).catch(() => {});
   s.claudeHome = target;
   await owner.accounts?.syncClaude(s);
@@ -1075,7 +1089,18 @@ class Runtime {
     else if (s.agent === "codex") {
       await this.servers();
       const disabledPluginIds = [...new Set(this.rawServers.filter((r) => r.pluginId && s.mcpOverrides[r.name] === false).map((r) => r.pluginId))];
-      const collaborationMode = s.workMode ? { mode: s.workMode, settings: { model: s.model || (await this.request("model/list")).data?.find((model) => model.isDefault)?.model, reasoning_effort: s.effort || null, developer_instructions: null } } : undefined;
+      const needsModels = !!(s.workMode && !s.model) || !!(s.serviceTier && s.serviceTier !== "default");
+      const available = needsModels ? (await this.request("model/list")).data || [] : [];
+      const defaultModel = available.find((model) => model.isDefault)?.model || "";
+      const selected = needsModels ? catalog("codex", available).models.find((model) => model.id === (s.model || defaultModel)) : undefined;
+      // A recovered tier can outlive the model's capabilities. Validate it at
+      // the native turn boundary, without waiting for passive picker discovery.
+      if (s.serviceTier && s.serviceTier !== "default" && selected?.speeds?.length && !selected.speeds.some((speed) => speed.id === s.serviceTier)) {
+        s.serviceTier = "default";
+        o.event(s, { type: "config", model: s.model, effort: s.effort, workMode: s.workMode, serviceTier: "default" });
+        if (s.catalog) { s.catalog = { ...s.catalog, currentSpeed: "default" }; o.event(s, { type: "models", catalog: s.catalog }); }
+      }
+      const collaborationMode = s.workMode ? { mode: s.workMode, settings: { model: s.model || defaultModel, reasoning_effort: s.effort || null, developer_instructions: null } } : undefined;
       const result = await this.request("turn/start", { threadId: s.sessionRef, clientUserMessageId: message.id, input: await this.content(text, message.attachments), disabledPluginIds, ...(collaborationMode ? { collaborationMode } : {}), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}), ...(s.serviceTier ? { serviceTier: s.serviceTier } : {}) });
       if (s.busy && result.turn?.status === "inProgress") this.activeTurnId = result.turn.id;
     }
