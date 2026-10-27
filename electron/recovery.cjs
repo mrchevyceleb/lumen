@@ -97,14 +97,14 @@ class RecoveryStore {
       const old = this.state.tabs.find((saved) => saved.controlId === (tab.controlId || tab.id));
       // Renderer updates presentation/drafts. Runtime fields already have a
       // newer, authoritative journal entry and must not be overwritten.
-      const ui = { name: tab.name, nameCustom: tab.nameCustom === true, color: tab.color, draft: tab.draft || "", nativeDraft: tab.nativeDraft || "",
+      const ui = { name: tab.name, nameCustom: tab.nameCustom === true, color: tab.color, projectRoot: tab.projectRoot || "", draft: tab.draft || "", nativeDraft: tab.nativeDraft || "",
         draftAttachments: tab.draftAttachments || [], mode: tab.mode, managedBy: tab.managedBy, archived: tab.archived === true, browserOpen: tab.browserOpen === true };
       return old ? { ...old, ...ui } : { ...tab, controlId: tab.controlId || tab.id, messages: tab.messages || [] };
     });
     for (const tab of this.state.tabs) if (!tabs.some((value) => value.controlId === tab.controlId)) tabs.push(tab);
     const compact = tabs.map((tab) => {
       if (!this.state.tabs.some((saved) => saved.controlId === tab.controlId)) return tab;
-      return Object.fromEntries(["controlId", "name", "nameCustom", "color", "draft", "nativeDraft", "draftAttachments", "mode", "managedBy", "archived", "browserOpen"].map((key) => [key, tab[key]]));
+      return Object.fromEntries(["controlId", "name", "nameCustom", "color", "projectRoot", "draft", "nativeDraft", "draftAttachments", "mode", "managedBy", "archived", "browserOpen"].map((key) => [key, tab[key]]));
     });
     this.record("workspace", { tabs: compact, active: value.active || "", root: value.root || "", projects: value.projects || [] }, true);
   }

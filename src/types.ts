@@ -102,6 +102,8 @@ export interface CheckoutInfo { path: string; name: string; branch: string; link
 export interface Tab {
   id: string;
   root: string;
+  // Display-only project grouping. Runtime file and Git boundaries still use root.
+  projectRoot?: string;
   projectless?: boolean;
   scratchId?: string;
   agent: Agent;

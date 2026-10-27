@@ -455,12 +455,14 @@ class WorkspaceService {
       const text = line.replace(/\r/g, "");
       if (!text || text === "\n") continue;
       if (text.startsWith("worktree ")) {
-        current = { path: text.slice("worktree ".length), branch: "detached HEAD", detached: true, primary: true, current: false };
+        current = { path: text.slice("worktree ".length), branch: "detached HEAD", detached: true, bare: false, primary: true, current: false };
         worktrees.push(current);
       } else if (!current) continue;
       else if (text.startsWith("branch ")) {
         current.branch = text.slice("branch ".length).replace(/^refs\/heads\//, "");
         current.detached = false;
+      } else if (text === "bare") {
+        current.bare = true;
       } else if (text === "detached") {
         current.detached = true;
         current.branch = "detached HEAD";
@@ -469,7 +471,7 @@ class WorkspaceService {
     const here = gitPathKey(cwd);
     await Promise.all(worktrees.map(async (tree) => {
       try { tree.path = await fs.realpath(tree.path); } catch {}
-      tree.primary = !(await linkedWorktree(tree.path));
+      tree.primary = !tree.bare && !(await linkedWorktree(tree.path));
       tree.current = gitPathKey(tree.path) === here;
     }));
     return worktrees;

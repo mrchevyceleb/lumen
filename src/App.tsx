@@ -80,7 +80,7 @@ import SettingsPanel from "./SettingsPanel";
 import Conversation, { AgentMark } from "./Conversation";
 import NativeTerminal from "./NativeTerminal";
 import AgentForm from "./AgentForm";
-import ProjectSidebar, { normalizeProjects, restoreProjects, sameProject, type Project } from "./ProjectSidebar";
+import ProjectSidebar, { inProject, normalizeProjects, projectRootOf, restoreProjects, sameProject, type Project } from "./ProjectSidebar";
 import { useUpdates } from "./UpdatesPanel";
 import { AccountLogin, AccountPicker, useAccounts } from "./AccountsPanel";
 import ContextIndicator from "./ContextIndicator";
@@ -476,8 +476,9 @@ export default function App() {
     }
     setBrowserOpenFor(chat, next);
   };
-  if (active && !active.projectless) projectTabsRef.current[active.root] = active.id;
+  if (active && !active.projectless) projectTabsRef.current[projectRootOf(active)] = active.id;
   const root = active?.projectless ? "" : active?.root || selectedRoot;
+  const activeProjectRoot = active?.projectless ? "" : active ? projectRootOf(active) : selectedRoot;
   const rootRef = useRef(root);
   rootRef.current = root;
   const workspace = workspaces[root];
@@ -640,6 +641,7 @@ export default function App() {
     replacementControlId?: string,
   ) => {
     const config = settingsRef.current.agents[agent];
+    const projectRoot = resume?.projectRoot || control?.projectRoot || (active?.projectRoot && samePath(folder, active.root) ? active.projectRoot : undefined);
     const selection = { root: rootRef.current, id: activeIdRef.current };
     try {
       const request = {
@@ -662,7 +664,7 @@ export default function App() {
         queuedMessages: resume?.queuedMessages || [],
         loadShellProfile: settingsRef.current.loadShellProfile,
         shellCommand: settingsRef.current.agents.shell.command,
-        savedTab: resume || {},
+        savedTab: { ...(resume || {}), ...(projectRoot ? { projectRoot } : {}) },
       };
       let created: { id: string; root: string; cwd: string; projectless: boolean; scratchId: string; controlId: string; accountId: string; accountName: string; contextTokens?: number | null; contextWindow?: number | null };
       created = await api("session:create", request);
@@ -670,6 +672,7 @@ export default function App() {
       const tab: Tab = {
         id: created.id,
         root: created.root,
+        projectRoot,
         cwd: created.cwd,
         projectless: created.projectless,
         scratchId: created.scratchId,
@@ -715,13 +718,14 @@ export default function App() {
       });
       const selectionUnchanged = rootRef.current === selection.root && activeIdRef.current === selection.id;
       const canFocusArchived = showArchivedRef.current || resume?.archived !== true;
-      const canFocusProject = created.projectless || showArchivedRef.current || !isHiddenProject(created.root);
+      const displayRoot = projectRootOf(tab);
+      const canFocusProject = created.projectless || showArchivedRef.current || !isHiddenProject(displayRoot);
       if ((resume || control || selectionUnchanged) && (!control || !activeIdRef.current) && (!resume || (canFocusArchived && canFocusProject))) {
         setActiveId(tab.id);
         setSelectedRoot(folder);
         setStartingProjectless(false);
       }
-      if (!created.projectless) rememberProject(created.root, undefined, !resume && !isHiddenProject(created.root));
+      if (!created.projectless) rememberProject(displayRoot, undefined, !resume && !isHiddenProject(displayRoot));
       if (selectionUnchanged) {
         setAgentMenu(false);
         setAgentMenuRoot(undefined);
@@ -760,11 +764,11 @@ export default function App() {
     setWorkspaces((old) => ({ ...old, [next.root]: next }));
     setSelectedRoot(next.root);
     setStartingProjectless(false);
-    rememberProject(next.root, next.name, reveal);
     setDialog(null);
     setAgentMenu(false);
     setAgentMenuRoot(undefined);
-    const existing = tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root));
+    const existing = tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root)) || tabsRef.current.find((t) => inProject(t, next.root));
+    rememberProject(existing ? projectRootOf(existing) : next.root, next.name, reveal);
     setActiveId(existing?.id || "");
     if (!existing) pendingCwds.current[next.root] = cwd;
     setBoot((old) => ({ ...old, recent: [next.root, ...old.recent.filter((x) => x !== next.root)] }));
@@ -792,9 +796,9 @@ export default function App() {
   const archiveProject = (project: Project) => {
     const remaining = projectsRef.current.filter((p) => !p.hidden && !sameProject(p.root, project.root));
     setProjects((old) => old.map((p) => sameProject(p.root, project.root) ? { ...p, hidden: true } : p));
-    if (sameProject(rootRef.current, project.root)) {
+    if (sameProject(activeProjectRoot, project.root)) {
       const next = remaining.find((p) => p.pinned) || remaining[0];
-      const existing = next ? tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root)) : tabsRef.current.find((t) => t.projectless);
+      const existing = next ? tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => inProject(t, next.root)) : tabsRef.current.find((t) => t.projectless);
       setActiveId(existing?.id || "");
       setSelectedRoot(existing && !existing.projectless ? existing.root : "");
       if (!existing && next) void openWorkspace(next.root);
@@ -832,12 +836,43 @@ export default function App() {
         }
         const persisted: Partial<Tab>[] = current.restoreSessions ? recovered.tabs : [];
         const last = current.restoreSessions ? recovered.root : "";
+        // Older jobs used their checkout as the sidebar project. Their durable binding
+        // supplies display-only grouping; root and cwd keep their runtime meaning.
+        const migrated = await Promise.all(persisted.map(async (tab, index) => {
+          if (tab.projectless || !tab.root || !tab.controlId || tab.projectRoot) return null;
+          const binding = await api<Record<string, any> | null>("git:worktree-job:binding", tab.controlId).catch(() => null);
+          if (!binding || typeof binding.root !== "string" || !samePath(binding.folder, tab.root)) return null;
+          const name = tab.root.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || tab.root;
+          const checkoutProject = projectsRef.current.find((project) => sameProject(project.root, tab.root!));
+          // Customized or archived checkout projects are already arranged by the user.
+          if (checkoutProject && (checkoutProject.pinned || checkoutProject.hidden || checkoutProject.collapsed || checkoutProject.color || checkoutProject.name !== name)) return null;
+          const source = await api<Workspace>("workspace:inspect", binding.root).catch(() => undefined);
+          const projectRoot = source ? sourceProjectRoot(source) : binding.root;
+          if (samePath(projectRoot, tab.root) || projectsRef.current.some((project) => project.hidden && sameProject(project.root, projectRoot))) return null;
+          return { index, checkout: tab.root, projectRoot, name };
+        }));
+        const migrations = migrated.filter((item): item is NonNullable<typeof item> => !!item);
+        for (const migration of migrations) persisted[migration.index] = { ...persisted[migration.index], projectRoot: migration.projectRoot };
+        if (migrations.length) setProjects((old) => {
+          const next = old.filter((project) => {
+            const migration = migrations.find((item) => sameProject(item.checkout, project.root));
+            if (!migration) return true;
+            const untouched = !project.pinned && !project.hidden && !project.collapsed && !project.color && project.name === migration.name;
+            const stillUsed = persisted.some((tab) => !tab.projectless && tab.root && sameProject(projectRootOf(tab), project.root));
+            return !untouched || stillUsed;
+          });
+          projectsRef.current = next;
+          return next;
+        });
         const roots = [
           ...new Set(
-            [last, ...persisted.filter((t) => !t.projectless).map((t) => t.root)].filter(Boolean) as string[],
+            [last, ...persisted.filter((t) => !t.projectless).flatMap((t) => [t.root, t.projectRoot])].filter(Boolean) as string[],
           ),
         ];
-        for (const folder of roots) rememberProject(folder);
+        for (const folder of roots) {
+          const projectRoot = persisted.find((tab) => !tab.projectless && tab.projectRoot && tab.root && samePath(tab.root, folder))?.projectRoot;
+          rememberProject(projectRoot || folder);
+        }
         const opened: Record<string, Workspace> = {};
         for (const folder of roots) {
           try {
@@ -854,10 +889,11 @@ export default function App() {
         for (const tab of restoring) {
           if (tab.agent) {
             const restored = await addTab(tab.agent, tab.mode || "rich", tab.projectless ? "" : tab.root, tab, tab.cwd);
-            if (tab.id === savedActive && restored && (showArchivedRef.current || !restored.archived) && (tab.projectless || showArchivedRef.current || !isHiddenProject(restored.root))) restoredActive = restored.id;
+            if (tab.id === savedActive && restored && (showArchivedRef.current || !restored.archived) && (tab.projectless || showArchivedRef.current || !isHiddenProject(projectRootOf(restored)))) restoredActive = restored.id;
           }
         }
-        if (last && opened[last] && (showArchivedRef.current || !isHiddenProject(last))) {
+        const lastProjectRoot = persisted.find((tab) => tab.projectRoot && tab.root && samePath(tab.root, last))?.projectRoot || last;
+        if (last && opened[last] && (showArchivedRef.current || !isHiddenProject(lastProjectRoot))) {
           setSelectedRoot(last);
           if (!persisted.some((t) => t.root === last))
             setActiveId("");
@@ -1223,9 +1259,9 @@ export default function App() {
         setTabs((old) => {
           const next = old.filter((t) => t.id !== tab.id);
           if (activeIdRef.current === tab.id) {
-            const sibling = next.filter((t) => tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root)).at(-1);
+            const sibling = next.filter((t) => tab.projectless ? t.projectless : inProject(t, projectRootOf(tab))).at(-1);
             setActiveId(sibling?.id || "");
-            setSelectedRoot(tab.projectless ? "" : tab.root);
+            setSelectedRoot(tab.projectless ? "" : projectRootOf(tab));
           }
           return next;
         });
@@ -1269,6 +1305,19 @@ export default function App() {
       setDialog("worktree-job");
     } catch (error: any) { notify(error.message); }
   };
+  const sourceProjectRoot = (source: Workspace) => {
+    const trees = source.git.worktrees || [];
+    const primary = trees.find((tree) => tree.primary)?.path;
+    const linked = trees.find((tree) => samePath(tree.path, source.root))?.primary === false;
+    // A job started from another job still belongs to the original project. Only
+    // the source and primary checkout can own it, never an arbitrary sibling.
+    for (const folder of (linked ? [primary, source.root] : [source.root, primary])) {
+      if (!folder) continue;
+      const project = projectsRef.current.find((item) => sameProject(item.root, folder));
+      if (project) return project.root;
+    }
+    return (linked && primary) || source.root;
+  };
   const controlledTaskCreates = useRef(new Map<string, { signature: string; promise: Promise<any> }>());
   const createControlledTask = (body: Record<string, any>, human = false) => {
     const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -1295,10 +1344,19 @@ export default function App() {
       if (binding && !body.worktree) throw new Error("This task ID is already bound to a different worktree request.");
       if (created && body.worktree && !binding) throw new Error("This task ID has no durable worktree binding.");
       let opened: Workspace | undefined;
+      let projectRoot = "";
       if (body.worktree) {
         const result = await api<{ workspace: Workspace; source: Workspace }>("git:worktree-job", id, body.root, body.worktree, body.base);
         opened = result.workspace;
-        setWorkspaces((old) => ({ ...old, [result.source.root]: result.source, [opened!.root]: opened! }));
+        projectRoot = sourceProjectRoot(result.source);
+        const projectWorkspace = projectRoot && !samePath(projectRoot, result.source.root)
+          ? await api<Workspace>("workspace:register", projectRoot).catch(() => {
+            // Grouping is optional; the already-created Git worktree must still open.
+            projectRoot = result.source.root;
+            return undefined;
+          })
+          : undefined;
+        setWorkspaces((old) => ({ ...old, [result.source.root]: result.source, [opened!.root]: opened!, ...(projectWorkspace ? { [projectWorkspace.root]: projectWorkspace } : {}) }));
         void refreshGit(result.source.root);
       } else if (body.root) {
         opened = await api<Workspace>("workspace:register", body.root);
@@ -1317,13 +1375,14 @@ export default function App() {
       if (!created) {
         created = await addTab(body.agent, "rich", opened?.root || "", undefined, body.cwd, body.accountId, undefined, {
           controlId: id, managedBy: body.owner || (human ? "You" : "Local agent"), name: body.name || `Agent task · ${agentNames[body.agent as Agent]}`, nameCustom: body.nameCustom === true,
+          projectRoot: projectRoot || undefined,
           model: body.model, effort: body.effort, workMode: body.workMode, serviceTier: body.serviceTier,
         });
         if (!created) throw new Error("Could not create the chat.");
         audit(created, `${created.managedBy} created this ${body.worktree ? `worktree job on ${body.worktree}` : "task"}${human ? "." : " through Lumen's local interface."}`);
         notify(`${human ? "Started" : "Agent control started"} ${created.name}`);
         if (human) {
-          rememberProject(created.root, undefined, true);
+          rememberProject(projectRootOf(created), undefined, true);
           setActiveId(created.id); setSelectedRoot(created.projectless ? "" : created.root); setStartingProjectless(false);
         }
       } else if (human) {
@@ -1352,7 +1411,7 @@ export default function App() {
     if (!tab) throw Object.assign(new Error("This task is no longer open. Use list to find available chats."), { status: 404 });
     if (action === "get") return view(tab);
     if (action === "focus") {
-      if (!tab.projectless) rememberProject(tab.root, undefined, true);
+      if (!tab.projectless) rememberProject(projectRootOf(tab), undefined, true);
       setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
     } else if (action === "rename") setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, name: body.name, nameCustom: true } : t));
     else if (action === "close") {
@@ -1362,8 +1421,8 @@ export default function App() {
       setTabs((old) => {
         const next = old.filter((t) => t.id !== tab.id);
         if (activeIdRef.current === tab.id) {
-          const selected = next.filter((t) => tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root)).at(-1) || next[Math.min(old.findIndex((t) => t.id === tab.id), next.length - 1)];
-          setActiveId(selected?.id || ""); setSelectedRoot(selected && !selected.projectless ? selected.root : "");
+          const selected = next.filter((t) => tab.projectless ? t.projectless : inProject(t, projectRootOf(tab))).at(-1) || next[Math.min(old.findIndex((t) => t.id === tab.id), next.length - 1)];
+          setActiveId(selected?.id || ""); setSelectedRoot(selected && !selected.projectless ? selected.root : tab.projectless ? "" : projectRootOf(tab));
         }
         return next;
       });
@@ -1564,7 +1623,7 @@ export default function App() {
       } else if (e.shiftKey && e.key.toLowerCase() === "t") {
         e.preventDefault(); void addTab("shell");
       } else if (e.key === "Tab") {
-        const visible = tabsRef.current.filter((tab) => root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless);
+        const visible = tabsRef.current.filter((tab) => activeProjectRoot ? inProject(tab, activeProjectRoot) : tab.projectless);
         if (visible.length > 1) { e.preventDefault(); const index = visible.findIndex((tab) => tab.id === activeIdRef.current); const next = visible[(index + (e.shiftKey ? -1 : 1) + visible.length) % visible.length]; retractBeforeSwitch(next.id); announceChat(next); setActiveId(next.id); }
       } else if ((e.target as HTMLElement)?.closest(".native-terminal")) return;
       else if (e.key.toLowerCase() === "s") {
@@ -1731,9 +1790,9 @@ export default function App() {
     retractBeforeSwitch(tab.id);
     announceChat(tab);
     setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
-    if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, tab.root) && p.collapsed ? { ...p, collapsed: false } : p));
+    if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, projectRootOf(tab)) && p.collapsed ? { ...p, collapsed: false } : p));
   };
-  const listedTab = (tab: Tab) => !tab.archived && (tab.projectless || !isHiddenProject(tab.root));
+  const listedTab = (tab: Tab) => !tab.archived && (tab.projectless || !isHiddenProject(projectRootOf(tab)));
   const exportChat = async (tab: Tab) => {
     const text = chatText(tab);
     if (!text) { notify("This chat has nothing to export yet."); return; }
@@ -1746,17 +1805,17 @@ export default function App() {
     const archived = !tab.archived;
     setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, archived } : t));
     if (archived && !showArchivedRef.current && activeIdRef.current === tab.id) {
-      const sibling = tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t) && (tab.projectless ? t.projectless : !t.projectless && sameProject(t.root, tab.root))).at(-1)
+      const sibling = tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t) && (tab.projectless ? t.projectless : inProject(t, projectRootOf(tab)))).at(-1)
         || tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t)).at(-1);
       retractBeforeSwitch(sibling?.id || "");
       announceChat(sibling);
       setActiveId(sibling?.id || "");
-      setSelectedRoot(sibling && !sibling.projectless ? sibling.root : "");
+      setSelectedRoot(sibling && !sibling.projectless ? sibling.root : tab.projectless ? "" : projectRootOf(tab));
     }
   };
   const leaveHiddenView = () => {
     const activeTab = tabsRef.current.find((t) => t.id === activeIdRef.current);
-    const shownRoot = activeTab ? (activeTab.projectless ? "" : activeTab.root) : selectedRoot;
+    const shownRoot = activeTab ? (activeTab.projectless ? "" : projectRootOf(activeTab)) : selectedRoot;
     if (!((activeTab?.archived) || (shownRoot && isHiddenProject(shownRoot)))) return;
     const sibling = tabsRef.current.filter((t) => t.id !== activeTab?.id && listedTab(t)).at(-1);
     retractBeforeSwitch(sibling?.id || "");
@@ -1777,7 +1836,7 @@ export default function App() {
       void (async () => {
         // Create the replacement FIRST. Closing first would remove the old chat from
         // recovery before we know the new one exists, and a failed create would orphan it.
-        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, nameCustom: tab.nameCustom === true, color: tab.color, model: tab.model, effort: tab.effort, workMode: tab.workMode, serviceTier: tab.serviceTier, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides }, tab.controlId || tab.id);
+        const created = await addTab(tab.agent, "rich", tab.projectless ? "" : tab.root, undefined, tab.cwd, tab.accountId, undefined, { name: tab.nameCustom ? tab.name : undefined, nameCustom: tab.nameCustom === true, color: tab.color, projectRoot: tab.projectRoot, model: tab.model, effort: tab.effort, workMode: tab.workMode, serviceTier: tab.serviceTier, autoCompactTokens: tab.autoCompactTokens ?? undefined, mcpOverrides: tab.mcpOverrides }, tab.controlId || tab.id);
         if (!created) throw new Error("Could not start the fresh chat. This chat was kept.");
         await api("session:close", tab.id);
         delete browserOpenRef.current[tab.controlId || tab.id];
@@ -1961,7 +2020,7 @@ export default function App() {
         {visibleSidebar && (
           <>
             <aside id="projects-sidebar" aria-label="Projects and chats" className="sidebar projects-panel" style={{ width: sidebarWidth }}>
-              <ProjectSidebar projects={projects} activeRoot={root} ready={loaded} onCollapse={hideProjects}
+              <ProjectSidebar projects={projects} activeRoot={activeProjectRoot} ready={loaded} onCollapse={hideProjects}
                 tabs={tabs} activeId={activeId} settings={settings} {...tabActions} onLayout={toggleChatLayout} newChatRoot={agentMenu ? agentMenuRoot : undefined}
                 onNewChat={(folder) => {
                   const open = () => { setAgentMenuRoot(folder); setAgentMenu(true); };
@@ -1970,7 +2029,7 @@ export default function App() {
                     void openWorkspace(folder, !projectsRef.current.some((p) => p.hidden && sameProject(p.root, folder))).then((value) => { if (value) { setAgentMenuRoot(value.root); setAgentMenu(true); } });
                   } else open();
                 }}
-                counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => !t.projectless && sameProject(t.root, p.root) && (showArchived || p.hidden || !t.archived)).length]))}
+                counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => inProject(t, p.root) && (showArchived || p.hidden || !t.archived)).length]))}
                 showArchived={showArchived} onToggleArchived={toggleArchived} onLeaveHidden={leaveHiddenView}
                 onOpen={(project, reveal = true) => { void openWorkspace(project.root, reveal); }} onAdd={() => setDialog("open")} onTerminal={() => { void addTab("shell", "rich", ""); }} onScratch={startWithoutWorkspace}
                 onChange={setProjects} onArchive={archiveProject} />
@@ -2000,7 +2059,7 @@ export default function App() {
         )}
         <main className="main" ref={setMainElement}>
           {(!verticalChats || !active) && <div className="tabbar">
-            <SessionTabs tabs={tabs.filter((tab) => (root ? !tab.projectless && sameProject(tab.root, root) : tab.projectless) && (showArchived || !tab.archived))} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
+            <SessionTabs tabs={tabs.filter((tab) => (activeProjectRoot ? inProject(tab, activeProjectRoot) : tab.projectless) && (showArchived || !tab.archived))} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
             {sessionActions}
           </div>}
           {active || workspace || startingProjectless ? (
