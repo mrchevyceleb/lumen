@@ -465,7 +465,7 @@ export default function Conversation({
   const color = settings.coloredAgents
     ? settings.agents[tab.agent].color
     : settings.accent;
-  const statusCaption = controlPending ? "Reading or applying CLI controls…" : isCommandInput && commandLoading ? "Discovering commands…" : isCommandInput && commandError ? commandError : tab.phase === "finishing" ? "Grok has finished its response; the CLI is closing." : tab.phase === "waiting" ? "Grok's output has paused. Its CLI may still be running hooks or continuing the turn." : "";
+  const statusCaption = controlPending ? "Applying CLI controls…" : isCommandInput && commandLoading ? "Discovering commands…" : isCommandInput && commandError ? commandError : tab.phase === "finishing" ? "Grok has finished its response; the CLI is closing." : tab.phase === "waiting" ? "Grok's output has paused. Its CLI may still be running hooks or continuing the turn." : "";
   const compactLabel = tab.autoCompactTokens ? `Auto-compact · ${tab.autoCompactTokens.toLocaleString()} tokens` : "Auto-compact · CLI default";
   return (
     <div

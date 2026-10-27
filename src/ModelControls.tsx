@@ -33,7 +33,9 @@ export default function ModelControls({ tab, panel, setPanel, onConfig, onPendin
     const unsubscribe = window.lumen.onSession((event) => { if (event.id === tab.id && event.type === "models" && event.catalog) setInfo(event.catalog); });
     return () => { alive.current = false; unsubscribe(); };
   }, [tab.id]);
-  useEffect(() => { onPending(applying || (loading && tab.agent !== "google")); }, [loading, applying, tab.agent]);
+  // Reading a catalog is passive background work. Only an actual configuration
+  // change owns the composer; switching chats must never wait for CLI discovery.
+  useEffect(() => { onPending(applying); }, [applying]);
   const load = async (refresh = false) => {
     if (inFlight.current) return;
     inFlight.current = true; setLoading(true); setError("");

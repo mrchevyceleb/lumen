@@ -16,7 +16,7 @@ class MessageQueue {
   state() {
     const s = this.s;
     const dispatchReady = !this.closed && !this.pending && !this.paused && !s.busy && !s.piCompacting && !s.stopping && !s.transitioning &&
-      !s.setting && (!s.catalogPromise || s.agent === "google") && !s.discoveryPromise && !s.nativeOwned && s.mode === "rich";
+      !s.setting && !s.nativeOwned && s.mode === "rich";
     return { queuedMessages: this.items.map((m, i) => ({ ...m, dispatchReady: i === 0 && !m.deliveryUncertain && dispatchReady })), queuePaused: this.paused };
   }
   emit() { this.owner.event(this.s, { type: "queue", ...this.state() }); }
@@ -33,7 +33,9 @@ class MessageQueue {
     clearTimeout(this.timer);
     const s = this.s;
     if (this.closed || this.pending || this.paused || s.busy || s.piCompacting || s.stopping || s.transitioning || s.mode !== "rich" || !this.items.length) return;
-    if (s.setting || (s.catalogPromise && s.agent !== "google") || s.discoveryPromise) { this.timer = setTimeout(() => void this.drain(), 100); return; }
+    // Discovery only populates pickers. Message delivery shares the runtime's
+    // own single-flight startup, so it must not inherit a catalog loading lock.
+    if (s.setting) { this.timer = setTimeout(() => void this.drain(), 100); return; }
     const entry = this.items[0];
     if (entry.deliveryUncertain) { this.paused = true; this.emit(); return; }
     this.pending = true;
