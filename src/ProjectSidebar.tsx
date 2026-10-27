@@ -6,6 +6,8 @@ import type { Settings, Tab } from "./types";
 
 export interface Project { root: string; name: string; pinned?: boolean; hidden?: boolean; collapsed?: boolean; color?: string }
 export const sameProject = (a: string, b: string) => a.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase() === b.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+export const projectRootOf = (tab: { root?: string; projectRoot?: string }) => tab.projectRoot || tab.root || "";
+export const inProject = (tab: { root?: string; projectRoot?: string; projectless?: boolean }, root: string) => !tab.projectless && sameProject(projectRootOf(tab), root);
 const projectColors = [["Red", "#f87171"], ["Amber", "#fbbf24"], ["Green", "#4ade80"], ["Cyan", "#22d3ee"], ["Blue", "#60a5fa"], ["Violet", "#c084fc"]];
 
 export function restoreProjects(): Project[] {
@@ -108,7 +110,7 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   useEffect(() => {
     if (showArchived) return;
     const active = tabs.find((tab) => tab.id === activeId);
-    const folder = active && !active.projectless ? active.root : activeRoot;
+    const folder = active && !active.projectless ? projectRootOf(active) : activeRoot;
     const project = folder ? projects.find((item) => sameProject(item.root, folder)) : undefined;
     const revealed = !!project && !!query.trim() && `${project.name} ${project.root}`.toLowerCase().includes(query.toLowerCase());
     const projectVisible = !project?.hidden || revealed;
@@ -136,8 +138,8 @@ export default function ProjectSidebar({ projects, activeRoot, counts, ready, on
   const matches = visible.filter(matchesQuery);
   const archivedMatches = archived.filter(matchesQuery);
   const revealArchived = showArchived || !!query.trim();
-  const archiveCount = archived.length + tabs.filter((tab) => tab.archived && (tab.projectless || !archived.some((project) => sameProject(project.root, tab.root)))).length;
-  const projectChats = (project: Project) => tabs.filter((tab) => !tab.projectless && sameProject(tab.root, project.root) && (project.hidden || showArchived || !tab.archived));
+  const archiveCount = archived.length + tabs.filter((tab) => tab.archived && (tab.projectless || !archived.some((project) => sameProject(project.root, projectRootOf(tab))))).length;
+  const projectChats = (project: Project) => tabs.filter((tab) => inProject(tab, project.root) && (project.hidden || showArchived || !tab.archived));
   const colorProject = (project: Project, color?: string) => onChange(projects.map((p) => p.root === project.root ? { ...p, color } : p));
   const move = (source: string, target: Project, after = false) => {
     const project = projects.find((p) => p.root === source);

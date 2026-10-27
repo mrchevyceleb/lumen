@@ -161,7 +161,7 @@ Click files in the explorer to view or edit them beside the conversation. Save w
 
 The Git panel supports individual/all staging and unstaging, readable diffs, commits, fetch, pull, push, and recent history. Pull uses fast-forward only. A first push sets the branch's upstream. The GitHub view lists PRs when the GitHub CLI is installed and signed in, and opens them in your browser. Git remote authentication uses your existing Git configuration.
 
-Open **Worktrees** to create a branch and checkout, or switch to an existing checkout. New worktrees are created beside the repository under `<repository>.worktrees/`. Existing sessions remain in their original checkout. Choose **+ → Worktree agent job** to create a worktree and launch a visible agent chat in one step, with its own model, effort, and optional first instruction. **Settings → Agents** supplies the default model and effort for new jobs. Worktree removal and destructive Git resets are left to the terminal.
+Open **Worktrees** to create a branch and checkout, or switch to an existing checkout. New worktrees are created beside the repository under `<repository>.worktrees/`. Existing sessions remain in their original checkout. Choose **+ → Worktree agent job** to create a worktree and launch a visible agent chat in one step, with its own model, effort, and optional first instruction. The job stays inside its source project while its agent works in the new checkout. **Settings → Agents** supplies the default model and effort for new jobs. Worktree removal and destructive Git resets are left to the terminal.
 
 ## Personalize
 
