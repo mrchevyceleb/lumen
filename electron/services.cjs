@@ -11,7 +11,7 @@ const { catalog, efforts, piShortcuts, cliOptions, extraOptions, speedId } = req
 const { policy, launchOptions, ensureRuntime, grokHome, claudeHome, resetMcpPreferences, syncNativeMcp, tailCwd } = require("./session-controls.cjs");
 const { accountEnvironment } = require("./accounts.cjs");
 const { MessageQueue } = require("./message-queue.cjs");
-const { prepareProfile, profiledLaunch } = require("./profile-launcher.cjs");
+const { prepareProfile, profiledLaunch, importAgentModule } = require("./profile-launcher.cjs");
 const { TerminalState } = require("./terminal-state.cjs");
 const sharedPrompts = require("./shared-prompts.cjs");
 const OMIT = new Set([
@@ -1278,7 +1278,7 @@ class Sessions {
       launch = { file: shell, args: [...s.extraArgs] };
       if (process.platform === "win32" && s.powerShell) {
         launch.args.unshift("-NoLogo", ...(s.loadShellProfile ? [] : ["-NoProfile"]), "-NoExit", "-EncodedCommand",
-          Buffer.from(`$global:lumenPromptBlock=(Get-Item function:prompt).ScriptBlock; function global:prompt { [Console]::Write([char]27+']9;9;"'+(Get-Location).Path+'"'+[char]7); & $global:lumenPromptBlock }`, "utf16le").toString("base64"));
+          Buffer.from(`${importAgentModule}; $global:lumenPromptBlock=(Get-Item function:prompt).ScriptBlock; function global:prompt { [Console]::Write([char]27+']9;9;"'+(Get-Location).Path+'"'+[char]7); & $global:lumenPromptBlock }`, "utf16le").toString("base64"));
       } else if (/(?:^|[\\/])cmd(?:\.exe)?$/i.test(shell)) {
         s.cmdShell = true;
         launch.args.unshift("/Q", "/K", 'prompt $E]9;9;"$P"\x07$P$G ');

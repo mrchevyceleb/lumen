@@ -46,6 +46,29 @@ JSON snapshots as the visible transcript changes; it exits when idle or awaiting
 your input. Use get to inspect its status. Lumen must be running.
 Set LUMEN_CONTROL_FILE for portable/custom profiles. Never share its token.`;
 async function main() {
+  // PowerShell's binary launcher transports arguments in a temporary file:
+  // native command-line quoting can lose them, and environment variables cap
+  // otherwise valid long prompts at 32K characters.
+  const forwardedFile = process.env.LUMEN_AGENT_ARGS_FILE;
+  if (forwardedFile) {
+    delete process.env.LUMEN_AGENT_ARGS_FILE;
+    let forwarded;
+    try { forwarded = await fs.readFile(forwardedFile, "utf8"); }
+    finally { await fs.unlink(forwardedFile).catch(() => {}); }
+    const match = /^(\d+):(.*)$/s.exec(forwarded);
+    if (!match) throw new Error("Invalid forwarded Lumen arguments.");
+    const count = Number(match[1]);
+    const encoded = count ? match[2].split(",") : [];
+    if (encoded.length !== count) throw new Error("Invalid forwarded Lumen argument count.");
+    const values = encoded.map((value) => {
+      const bytes = Buffer.from(value, "base64");
+      if (bytes.toString("base64") !== value) throw new Error("Invalid forwarded Lumen arguments.");
+      return bytes.toString("utf8");
+    });
+    const helperFile = process.env.LUMEN_AGENT_CLI_BASE64 ? Buffer.from(process.env.LUMEN_AGENT_CLI_BASE64, "base64").toString("utf8") : process.env.LUMEN_AGENT_CLI || "";
+    delete process.env.LUMEN_AGENT_CLI_BASE64;
+    process.argv = [process.argv[0], helperFile, ...values];
+  }
   const options = {}, args = [];
   for (let i = 2; i < process.argv.length; i++) {
     const arg = process.argv[i];
@@ -89,6 +112,7 @@ async function main() {
     return console.log(JSON.stringify({ taskId, task }, null, 2));
   }
   if (command === "browser") {
+    if (!id) return console.log(help);
     const number = (value) => value === undefined ? undefined : Number(value);
     const body = { action: id, id: messageId, url: options.url, chatId: options["chat-id"], workspace: options.workspace,
       text: options.text, selector: options.selector, ref: number(options.ref), x: number(options.x), y: number(options.y),

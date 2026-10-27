@@ -228,6 +228,28 @@ const DRIVE_KEYS = { enter: "Enter", return: "Enter", tab: "Tab", escape: "Escap
   arrowup: "Up", up: "Up", arrowdown: "Down", down: "Down", arrowleft: "Left", left: "Left", arrowright: "Right", right: "Right",
   f1: "F1", f2: "F2", f3: "F3", f4: "F4", f5: "F5", f6: "F6", f7: "F7", f8: "F8", f9: "F9", f10: "F10", f11: "F11", f12: "F12" };
 const MARK_TOKEN_TTL_MS = 15 * 60 * 1000;
+const CAPTURE_CONTEXT_SCRIPT = (id, phase) => `(() => {
+  const key = "__lumenAgentCaptureEpoch";
+  if (${JSON.stringify(phase === "before")}) {
+    const previous = window[key];
+    if (previous) { previous.observer.disconnect(); clearTimeout(previous.timer); }
+    const state = { id: ${JSON.stringify(id)}, mutations: 0, observer: null, timer: null };
+    state.observer = new MutationObserver(() => { state.mutations++; });
+    state.observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    state.timer = setTimeout(() => { state.observer.disconnect(); if (window[key] === state) delete window[key]; }, 20000);
+    window[key] = state;
+  }
+  const state = window[key], valid = state?.id === ${JSON.stringify(id)};
+  const mutations = valid ? state.mutations : -1;
+  if (valid && ${JSON.stringify(phase === "after")}) {
+    state.observer.disconnect(); clearTimeout(state.timer);
+    if (window[key] === state) delete window[key];
+  }
+  const text = String(document.body?.innerText || "");
+  let fingerprint = 0;
+  for (let i = 0; i < text.length; i++) fingerprint = (Math.imul(fingerprint, 31) + text.charCodeAt(i)) | 0;
+  return { url: location.href, title: document.title, text: text.slice(0, 16000), length: text.length, fingerprint, mutations };
+})()`;
 class BrowserService {
   constructor(window, directory, knownChat = null) {
     this.window = window;
@@ -470,6 +492,7 @@ class BrowserService {
     const scope = chatScope(chatId), group = this.groups.get(scope);
     if (!group) return;
     for (const tab of group.tabs) {
+      tab.closed = true;
       if (this.attached === tab.nativeView) this.detach();
       if (tab.nativeView && !this.window.isDestroyed()) this.window.contentView.removeChildView(tab.nativeView);
       if (tab.nativeView && !tab.nativeView.webContents.isDestroyed()) tab.nativeView.webContents.close();
@@ -543,7 +566,11 @@ class BrowserService {
     contents.on("did-start-loading", () => { tab.error = ""; update(); });
     contents.on("did-stop-loading", () => update(true));
     contents.on("did-navigate", () => update(true));
-    contents.on("did-navigate-in-page", () => update(true));
+    contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+      if (!isMainFrame) return;
+      tab.generation = (tab.generation || 0) + 1; tab.pendingURL = url;
+      update(true);
+    });
     contents.on("page-title-updated", () => update(true));
     contents.on("did-fail-load", (_event, code, description, url, mainFrame) => {
       if (!mainFrame || code === -3 || url !== tab.pendingURL) return;
@@ -749,6 +776,7 @@ class BrowserService {
   }
   close(id) {
     const { group, tab } = this.find(id), index = group.tabs.indexOf(tab);
+    tab.closed = true;
     clearTimeout(tab.driveTimer);
     if (this.attached === tab.nativeView) this.detach();
     if (tab.nativeView && !this.window.isDestroyed()) this.window.contentView.removeChildView(tab.nativeView);
@@ -841,20 +869,46 @@ class BrowserService {
   async beginCapture(id) {
     const { tab } = this.find(id);
     if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
-    const generation = tab.generation;
-    const image = await this.capture(id);
-    const size = image.getSize();
-    if (!size.width || !size.height) throw bad("The screenshot was empty. Reload the page and try again.", 409);
-    // Read the page text at the same moment as the pixels. Reading it later let an app that keeps
-    // rendering (a live dashboard, a chat) send text describing a page the screenshot no longer showed.
-    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
-    const page = await this.inspect(id).catch(() => null);
-    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
+    let mutationAttempts = 0;
+    const captured = await this.pageOperation(tab, async (contents) => {
+      // The retry boundary is the whole transaction, not either individual read.
+      // A navigation during inspect therefore restarts with fresh pixels too.
+      const generation = tab.generation, observerId = crypto.randomUUID();
+      let before = null;
+      try { before = await contents.executeJavaScript(CAPTURE_CONTEXT_SCRIPT(observerId, "before")); }
+      catch { /* A modal page can still supply pixels without DOM context. */ }
+      if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
+      const image = await contents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+      const size = image.getSize();
+      if (!size.width || !size.height) throw bad("The screenshot was empty. Reload the page and try again.", 409);
+      let after = null;
+      try { after = await contents.executeJavaScript(CAPTURE_CONTEXT_SCRIPT(observerId, "after")); }
+      catch { /* Keep the metadata fallback frozen with these pixels. */ }
+      if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
+      // Retry ordinary capture races, but do not make a live dashboard wait for
+      // a zero-mutation frame that will never come. The third complete attempt
+      // keeps its own pixels and context instead of failing after fifteen seconds.
+      const page = before && after
+        ? { url: after.url, title: after.title, text: after.text, console: [...tab.console] }
+        : { url: tab.url, title: tab.title, text: "", console: [...tab.console] };
+      const result = { generation, image, size, page };
+      if (before && after && (after.mutations !== 0 || before.fingerprint !== after.fingerprint || before.length !== after.length
+        || before.title !== after.title || before.url !== after.url)) {
+        // A URL change is a different document state, not harmless live-page
+        // churn. Never fall back to pixels and context from different routes.
+        if (before.url !== after.url) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
+        mutationAttempts++;
+        if (mutationAttempts < 3) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
+      }
+      return result;
+    });
+    // Tokens are a side effect of a completed transaction only. A timed-out
+    // operation may still finish inside Chromium, but it can never publish one.
     const token = crypto.randomUUID();
-    this.markCaptures.set(token, { tabId: tab.id, generation: tab.generation, image, page, createdAt: Date.now() });
+    this.markCaptures.set(token, { tabId: tab.id, generation: captured.generation, image: captured.image, page: captured.page, createdAt: Date.now() });
     for (const [key, capture] of this.markCaptures) if (Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) this.markCaptures.delete(key);
     while (this.markCaptures.size > 8) this.markCaptures.delete(this.markCaptures.keys().next().value);
-    return { token, image: image.toDataURL(), width: size.width, height: size.height };
+    return { token, image: captured.image.toDataURL(), width: captured.size.width, height: captured.size.height };
   }
   takeCapture(token, id) {
     const capture = typeof token === "string" ? this.markCaptures.get(token) : undefined;
@@ -894,12 +948,103 @@ class BrowserService {
     try { return await this.composeMarkedImageFor(this.takeCapture(begun.token, id).image, marks); }
     catch (error) { this.markCaptures.delete(begun.token); throw error; }
   }
-  async pageOperation(tab, operation) {
+  async waitForPageSettlement(promise, deadline) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw bad("The page took too long. Reload it and try again.", 504);
+    let timer;
+    try {
+      await Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(bad("The page took too long. Reload it and try again.", 504)), remaining); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+  trackPagePromise(tab, contents, operationPromise, retireOnNavigation = false) {
+    const pending = { promise: operationPromise, expired: false, recovering: false, clear: null };
+    pending.retired = new Promise((resolve) => { pending.retire = resolve; });
+    const clear = () => {
+      if (tab.pendingPageOperation === pending) tab.pendingPageOperation = null;
+      pending.retire();
+      contents.removeListener("destroyed", clear);
+      contents.removeListener("did-navigate", navigating);
+    };
+    pending.clear = clear;
+    tab.pendingPageOperation = pending;
+    // Document-scoped scripts belong to the old document. Chromium can leave
+    // their promises unanswered after navigation, but a started request can
+    // still abort and leave that document active. Retire only after a real
+    // main-frame cross-document commit (did-navigate), settlement or destruction.
+    const navigating = () => { if (retireOnNavigation) clear(); };
+    contents.once("destroyed", clear);
+    if (retireOnNavigation) contents.on("did-navigate", navigating);
+    operationPromise.then(clear, clear);
+    return operationPromise;
+  }
+  async pageLocked(tab, fn, deadline = Date.now() + 15000, recoverWithNavigation = false) {
+    // Captures and real-input driving share one lock. A rejected timeout does
+    // not cancel Chromium's promise, so the next owner waits for settlement or
+    // an allowed committed-navigation retirement before touching the page again.
+    const previous = tab.pageOperationChain || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    tab.pageOperationChain = previous.catch(() => {}).then(() => gate);
+    try {
+      await this.waitForPageSettlement(previous.catch(() => {}), deadline);
+      if (tab.closed) throw bad("The browser tab was closed.", 404);
+      const pending = tab.pendingPageOperation;
+      let recovery = null;
+      if (pending?.expired) {
+        // Arbitrary evaluate code may never settle. Only a command that replaces
+        // its document may abandon it; all other work still requires settlement.
+        if (recoverWithNavigation) recovery = pending;
+        else if (pending.recovering) await this.waitForPageSettlement(pending.retired, deadline);
+        else throw bad("The last page script did not finish. Navigate or reload the tab before using it again.", 409);
+      } else if (pending) await this.waitForPageSettlement(pending.retired, deadline);
+      if (tab.closed) throw bad("The browser tab was closed.", 404);
+      const result = await fn();
+      if (recovery) {
+        recovery.recovering = true;
+        // Do not mistake an invoked navigation for a replaced document. Wait
+        // until Chromium commits that navigation (or the old script settles).
+        try { await this.waitForPageSettlement(recovery.retired, deadline); }
+        catch (error) { recovery.recovering = false; throw error; }
+      }
+      return result;
+    } finally { release(); }
+  }
+  async pageOperation(tab, operation, deadline = Date.now() + 15000) {
+    return this.pageLocked(tab, async () => {
+      // Chromium can briefly have no compositor frame, and a capture can race a
+      // navigation even after the page looked idle. Both are normal transient
+      // states, so retry them here instead of making every agent add sleep loops.
+      for (;;) {
+        if (Date.now() >= deadline) throw bad("The page took too long. Reload it and try again.", 504);
+        try { return await this.pageOperationOnce(tab, operation, deadline); }
+        catch (error) {
+          const message = String(error?.message || error);
+          const capturePending = /^(?:UnknownVizError|Frame Gone|Timeout|EmbeddingTokenChanged|VizSentEmptyBitmap)$/.test(message);
+          const navigationPending = error?.status === 409 && /^(?:The page changed while capturing it\.|Wait for the page to finish loading)/.test(message);
+          if ((!capturePending && !navigationPending) || Date.now() >= deadline) {
+            if (capturePending) throw bad("Chromium could not capture a rendered frame. Try again once the page finishes rendering.", 409);
+            throw error;
+          }
+          if (tab.pendingPageOperation) await this.waitForPageSettlement(tab.pendingPageOperation.retired, deadline);
+          await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(0, deadline - Date.now()))));
+          if (Date.now() >= deadline) {
+            if (capturePending) throw bad("Chromium could not capture a rendered frame. Try again once the page finishes rendering.", 409);
+            throw error;
+          }
+        }
+      }
+    }, deadline);
+  }
+  async pageOperationOnce(tab, operation, deadline = Date.now() + 15000, recoverWithNavigation = false) {
+    if (tab.closed) throw bad("The browser tab was closed.", 404);
     const unloaded = !tab.nativeView || tab.nativeView.webContents.isDestroyed();
     const contents = this.ensure(tab).webContents;
-    if (unloaded && tab.ready) {
-      // loadURL can resolve just before Chromium clears its loading flag.
-      // Restored pages must reach that idle state before their first capture.
+    if ((unloaded && tab.ready) || contents.isLoadingMainFrame()) {
+      // loadURL can resolve just before Chromium clears its loading flag. Both
+      // restored and already-visible pages must be idle before reading them.
       await new Promise((resolve, reject) => {
         let done = false;
         const finish = (error) => {
@@ -912,7 +1057,7 @@ class BrowserService {
           if (contents.isDestroyed()) destroyed();
           else if (!contents.isLoadingMainFrame()) finish(tab.error ? new Error(tab.error) : null);
         };
-        const timer = setTimeout(() => finish(bad("The page took too long to load.", 504)), 15000);
+        const timer = setTimeout(() => finish(bad("The page took too long to load.", 504)), Math.max(0, deadline - Date.now()));
         contents.on("did-stop-loading", stopped); contents.once("destroyed", destroyed);
         Promise.resolve(tab.ready).then(stopped, (error) => {
           // A restored phone tab reloads to apply emulation, which aborts the original load.
@@ -922,21 +1067,28 @@ class BrowserService {
         });
       });
     }
+    if (tab.pendingPageOperation) await this.waitForPageSettlement(tab.pendingPageOperation.retired, deadline);
     if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
     if (contents.isLoadingMainFrame()) throw bad("Wait for the page to finish loading and try again.", 409);
     if (tab.error) throw new Error(tab.error);
+    const operationPromise = this.trackPagePromise(tab, contents, Promise.resolve().then(() => operation(contents)), recoverWithNavigation);
     return new Promise((resolve, reject) => {
-      let done = false;
+      let done = false, navigationError = null;
       const finish = (error, result) => {
         if (done) return; done = true; clearTimeout(timer);
         contents.removeListener("destroyed", destroyed); contents.removeListener("did-start-navigation", navigating);
         error ? reject(error) : resolve(result);
       };
       const destroyed = () => finish(bad("The browser tab was closed.", 404));
-      const navigating = (details) => { if (details.isMainFrame) finish(bad("The page changed while capturing it. Try again once it finishes loading.", 409)); };
-      const timer = setTimeout(() => finish(bad("The page took too long. Reload it and try again.", 504)), 15000);
+      // Do not abandon live capture/inspect work on a navigation event. Record
+      // the reason and reject only after that exact Chromium promise settles.
+      const navigating = (details) => { if (!done && details.isMainFrame) navigationError = bad("The page changed while capturing it. Try again once it finishes loading.", 409); };
+      const timer = setTimeout(() => {
+        if (recoverWithNavigation && tab.pendingPageOperation?.promise === operationPromise) tab.pendingPageOperation.expired = true;
+        finish(bad("The page took too long. Reload it and try again.", 504));
+      }, Math.max(0, deadline - Date.now()));
       contents.once("destroyed", destroyed); contents.on("did-start-navigation", navigating);
-      Promise.resolve().then(() => operation(contents)).then((result) => finish(null, result), (error) => finish(error));
+      operationPromise.then((result) => finish(navigationError, result), (error) => finish(navigationError || error));
     });
   }
   async inspect(id) {
@@ -945,27 +1097,17 @@ class BrowserService {
     return { url: tab.url, title: tab.title, text, console: [...tab.console] };
   }
   async captureContext(id, marks, captureToken = "") {
-    const { tab } = this.find(id);
-    if (captureToken) {
-      const frozen = this.takeCapture(captureToken, id);
-      // Use the text frozen with the pixels; a re-read here could describe a different page than the
-      // marked-up image the chat is about to show.
-      const page = frozen.page || await this.inspect(id);
-      return { image: await this.composeMarkedImageFor(frozen.image, marks || []), page };
-    }
-    if (marks !== undefined) {
+    let frozen;
+    if (captureToken) frozen = this.takeCapture(captureToken, id);
+    else {
       const begun = await this.beginCapture(id);
-      try {
-        const frozen = this.takeCapture(begun.token, id);
-        const page = frozen.page || await this.inspect(id);
-        return { image: await this.composeMarkedImageFor(frozen.image, marks), page };
-      } catch (error) { this.markCaptures.delete(begun.token); throw error; }
+      try { frozen = this.takeCapture(begun.token, id); }
+      catch (error) { this.markCaptures.delete(begun.token); throw error; }
     }
-    await this.pageOperation(tab, () => undefined);
-    const generation = tab.generation;
-    const [image, page] = await Promise.all([this.capture(id), this.inspect(id)]);
-    if (tab.generation !== generation) throw bad("The page changed while capturing it. Try again.", 409);
-    return { image, page };
+    // Every attachment uses the text frozen with its pixels. Never re-read a
+    // live page here: a later navigation could make it describe another page.
+    if (!frozen.page) throw bad("That screenshot has no page context. Capture it again.", 409);
+    return { image: marks === undefined ? frozen.image : await this.composeMarkedImageFor(frozen.image, marks), page: frozen.page };
   }
   // --- Agent driving: real Chromium input with a cursor the user can watch.
   // Every action glides the injected cursor to its target while real
@@ -975,22 +1117,55 @@ class BrowserService {
   // One drive action at a time per tab: two agents (or parallel commands)
   // must never interleave mouse paths on the same page.
   async driveLocked(tab, fn) {
-    const previous = tab.driveChain || Promise.resolve();
-    let release;
-    const gate = new Promise((resolve) => { release = resolve; });
-    tab.driveChain = previous.catch(() => {}).then(() => gate);
-    await previous.catch(() => {});
-    try { return await fn(); } finally { release(); }
+    return this.pageLocked(tab, async () => {
+      const generation = tab.generation;
+      tab.driveGeneration = generation;
+      try { return await fn(); }
+      finally { if (tab.driveGeneration === generation) delete tab.driveGeneration; }
+    });
+  }
+  assertDriveCurrent(tab, contents = tab.nativeView?.webContents) {
+    if (tab.closed || !contents || contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
+    if (tab.pendingPageOperation?.expired) throw bad("The last page script did not finish. Navigate or reload the tab before using it again.", 409);
+    if (tab.driveGeneration !== undefined && (tab.generation !== tab.driveGeneration || contents.isLoadingMainFrame()))
+      throw bad("The page changed during agent input. Run snapshot again.", 409);
+  }
+  driveInput(tab, contents, event) {
+    this.assertDriveCurrent(tab, contents);
+    if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
+    contents.sendInputEvent(event);
   }
   // Drive page script, isolated from the page's own JS and bounded: a page
   // showing alert()/beforeunload never answers executeJavaScript, and an
-  // unbounded await would wedge this tab's drive queue behind it.
-  driveScript(contents, code, ms = 3000) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(bad("The page did not answer. It may be showing a dialog, or its main thread is busy.", 409)), ms);
-      Promise.resolve(contents.executeJavaScriptInIsolatedWorld(DRIVE_WORLD, [{ code }], true))
-        .then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
-    });
+  // unbounded await would wedge this tab's drive queue behind it. The native
+  // promise stays tracked after a timeout so no later input or capture overlaps it.
+  async driveOperation(tab, start, ms = 3000, retireOnNavigation = false) {
+    const deadline = Date.now() + ms;
+    try {
+      if (tab.pendingPageOperation?.expired) throw bad("The last page script did not finish. Navigate or reload the tab before using it again.", 409);
+      if (tab.pendingPageOperation) await this.waitForPageSettlement(tab.pendingPageOperation.retired, deadline);
+      const contents = tab.nativeView?.webContents;
+      this.assertDriveCurrent(tab, contents);
+      const operation = this.trackPagePromise(tab, contents, Promise.resolve().then(() => start(contents)), retireOnNavigation);
+      let timer;
+      try {
+        const result = await Promise.race([
+          operation,
+          new Promise((_, reject) => { timer = setTimeout(() => {
+            if (retireOnNavigation && tab.pendingPageOperation?.promise === operation) tab.pendingPageOperation.expired = true;
+            reject(bad("The page did not answer. It may be showing a dialog, or its main thread is busy.", 409));
+          }, Math.max(0, deadline - Date.now())); }),
+        ]);
+        this.assertDriveCurrent(tab, contents);
+        return result;
+      } finally { clearTimeout(timer); }
+    } catch (error) {
+      if (error?.status === 504) throw bad("The page did not answer. It may be showing a dialog, or its main thread is busy.", 409);
+      throw error;
+    }
+  }
+  async driveScript(tab, code, ms = 3000) {
+    return this.driveOperation(tab, (contents) => contents.executeJavaScriptInIsolatedWorld(DRIVE_WORLD, [{ code }], true), ms, true);
   }
   driveContents(tab) {
     if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
@@ -999,11 +1174,12 @@ class BrowserService {
     if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
     if (contents.isLoadingMainFrame()) throw bad("Wait for the page to finish loading and try again.", 409);
     if (tab.error) throw new Error(tab.error);
+    this.assertDriveCurrent(tab, contents);
     tab.agentDriveAt = Date.now();
     clearTimeout(tab.driveTimer);
     tab.driveTimer = setTimeout(() => {
       const live = tab.nativeView?.webContents;
-      if (live && !live.isDestroyed()) void this.driveScript(live, "window.__lumenCursor && window.__lumenCursor.hide()", 1000).catch(() => {});
+      if (live && !live.isDestroyed()) void this.driveLocked(tab, () => this.driveScript(tab, "window.__lumenCursor && window.__lumenCursor.hide()", 1000)).catch(() => {});
       this.emit();
     }, DRIVE_IDLE_MS + 50);
     tab.driveTimer.unref?.();
@@ -1016,8 +1192,8 @@ class BrowserService {
     const scale = tab.appliedScale && tab.appliedScale > 0 ? tab.appliedScale : 1;
     return { x: Math.max(0, Math.round(x * scale)), y: Math.max(0, Math.round(y * scale)) };
   }
-  async cursorAt(contents) {
-    const at = await this.driveScript(contents, CURSOR_SCRIPT);
+  async cursorAt(tab) {
+    const at = await this.driveScript(tab, CURSOR_SCRIPT);
     return at && Number.isFinite(at.x) && Number.isFinite(at.y) ? at : { x: 0, y: 0 };
   }
   async resolveTarget(tab, contents, body) {
@@ -1028,10 +1204,10 @@ class BrowserService {
       const found = tab.driveSnapshot?.generation === tab.generation
         ? tab.driveSnapshot.elements.find((el) => el.ref === ref) : null;
       if (!found) throw bad(`No snapshot element ${String(body.ref).slice(0, 20)} on this page. Run snapshot again; refs belong to the page they were taken on.`, 409);
-      target = await this.driveScript(contents, RESOLVE_SCRIPT({ selector: found.selector }));
+      target = await this.driveScript(tab, RESOLVE_SCRIPT({ selector: found.selector }));
       if (!target) throw bad(`Snapshot element ${ref} is no longer on the page. Run snapshot again.`, 409);
     } else if (typeof body.selector === "string" && body.selector || typeof body.text === "string" && body.text) {
-      target = await this.driveScript(contents, RESOLVE_SCRIPT({ selector: String(body.selector || ""), text: String(body.text || "") }));
+      target = await this.driveScript(tab, RESOLVE_SCRIPT({ selector: String(body.selector || ""), text: String(body.text || "") }));
       if (target?.error) throw bad(target.error);
       if (!target) throw bad(`Nothing visible matches ${body.selector ? `selector ${String(body.selector).slice(0, 120)}` : `text ${JSON.stringify(String(body.text).slice(0, 80))}`}. Run snapshot to see what is clickable.`, 404);
     } else if (hasPoint) {
@@ -1040,17 +1216,18 @@ class BrowserService {
     return target;
   }
   async glide(tab, contents, x, y) {
-    const from = await this.cursorAt(contents);
+    const from = await this.cursorAt(tab);
     const distance = Math.hypot(x - from.x, y - from.y);
     const ms = Math.round(Math.min(650, Math.max(140, distance * 0.55)));
-    const page = this.driveScript(contents, `window.__lumenCursor.glide(${x}, ${y}, ${ms})`, ms + 3000).catch(() => {});
+    const page = this.driveScript(tab, `window.__lumenCursor.glide(${x}, ${y}, ${ms})`, ms + 3000);
+    void page.catch(() => {});
     const steps = Math.max(2, Math.round(ms / 16)), t0 = Date.now();
     for (let i = 1; i <= steps; i++) {
       if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
       if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
       const t = i / steps, e = t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
       const point = this.drivePoint(tab, Math.round(from.x + (x - from.x) * e), Math.round(from.y + (y - from.y) * e));
-      contents.sendInputEvent({ type: "mouseMove", ...point });
+      this.driveInput(tab, contents, { type: "mouseMove", ...point });
       const wait = t0 + (ms * i) / steps - Date.now();
       if (wait > 0 && i < steps) await new Promise((resolve) => setTimeout(resolve, wait));
     }
@@ -1074,7 +1251,7 @@ class BrowserService {
   }
   async agentSnapshot(id) {
     const { tab } = this.find(id), contents = this.driveContents(tab);
-    const shot = await this.driveScript(contents, SNAPSHOT_SCRIPT);
+    const shot = await this.driveScript(tab, SNAPSHOT_SCRIPT);
     tab.driveSnapshot = { generation: tab.generation, elements: shot.elements };
     return this.driveResult(tab, { snapshot: { url: shot.url, title: shot.title, viewport: shot.viewport,
       ...(shot.truncated ? { truncated: true } : {}), ...(shot.frames ? { frames: shot.frames, note: "Elements inside iframes are not listed; navigate to the frame URL or use evaluate there." } : {}),
@@ -1082,18 +1259,30 @@ class BrowserService {
   }
   async agentClick(id, body, doubleClick = false) {
     const { tab } = this.find(id), contents = this.driveContents(tab);
-    const target = await this.resolveTarget(tab, contents, body);
+    let target = await this.resolveTarget(tab, contents, body);
     if (!target) throw bad("Choose what to click: --ref from snapshot, --selector, --text, or --x/--y in page pixels.");
-    if (target.rect) await this.driveScript(contents, `window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`).catch(() => {});
-    await this.glide(tab, contents, target.x, target.y);
+    // scrollIntoView and smooth scrolling can move the target after its first
+    // read. Re-read after each glide and never send a click to stale coordinates.
+    for (let attempt = 0; ; attempt++) {
+      if (target.rect) await this.driveScript(tab, `window.__lumenCursor && window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`);
+      await this.glide(tab, contents, target.x, target.y);
+      if (!target.rect) break;
+      const current = await this.resolveTarget(tab, contents, body);
+      if (!current) throw bad("The click target disappeared before the click. Run snapshot again.", 409);
+      const moved = current.x !== target.x || current.y !== target.y;
+      target = current;
+      if (!moved) break;
+      if (attempt === 2) throw bad("The click target kept moving. Try again once it settles.", 409);
+    }
+    if (target.rect) await this.driveScript(tab, `window.__lumenCursor && window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`);
     const point = this.drivePoint(tab, target.x, target.y);
-    await this.driveScript(contents, "window.__lumenCursor.pulse()").catch(() => {});
+    await this.driveScript(tab, "window.__lumenCursor && window.__lumenCursor.pulse()");
     if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
     // A real double-click is two down/up pairs, counts 1 then 2.
     for (let count = 1; count <= (doubleClick ? 2 : 1); count++) {
-      contents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: count, ...point });
+      this.driveInput(tab, contents, { type: "mouseDown", button: "left", clickCount: count, ...point });
       await new Promise((resolve) => setTimeout(resolve, 55));
-      if (!contents.isDestroyed()) contents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: count, ...point });
+      if (!contents.isDestroyed()) this.driveInput(tab, contents, { type: "mouseUp", button: "left", clickCount: count, ...point });
     }
     if (!contents.isDestroyed()) await this.settle(contents, body);
     return this.driveResult(tab, { clicked: { x: target.x, y: target.y, tag: target.tag, text: target.text, ...(target.warning ? { warning: target.warning } : {}) } });
@@ -1102,7 +1291,7 @@ class BrowserService {
     const { tab } = this.find(id), contents = this.driveContents(tab);
     const target = await this.resolveTarget(tab, contents, body);
     if (!target) throw bad("Choose what to hover: --ref from snapshot, --selector, --text, or --x/--y in page pixels.");
-    if (target.rect) await this.driveScript(contents, `window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`).catch(() => {});
+    if (target.rect) await this.driveScript(tab, `window.__lumenCursor && window.__lumenCursor.highlight(${JSON.stringify(target.rect)})`);
     await this.glide(tab, contents, target.x, target.y);
     await new Promise((resolve) => setTimeout(resolve, 350));
     return this.driveResult(tab, { hovered: { x: target.x, y: target.y, tag: target.tag, text: target.text } });
@@ -1118,26 +1307,26 @@ class BrowserService {
       if (contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
       if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
       if (char === "\n" || char === "\r") {
-        contents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
-        contents.sendInputEvent({ type: "char", keyCode: "Enter" });
-        contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+        this.driveInput(tab, contents, { type: "keyDown", keyCode: "Enter" });
+        this.driveInput(tab, contents, { type: "char", keyCode: "Enter" });
+        this.driveInput(tab, contents, { type: "keyUp", keyCode: "Enter" });
       } else if (char === "\t") {
-        contents.sendInputEvent({ type: "keyDown", keyCode: "Tab" });
-        contents.sendInputEvent({ type: "keyUp", keyCode: "Tab" });
+        this.driveInput(tab, contents, { type: "keyDown", keyCode: "Tab" });
+        this.driveInput(tab, contents, { type: "keyUp", keyCode: "Tab" });
       } else if (char.length > 1 || char.codePointAt(0) > 127) {
-        await contents.insertText(char);
+        await this.driveOperation(tab, (live) => live.insertText(char));
       } else {
-        contents.sendInputEvent({ type: "keyDown", keyCode: char });
-        contents.sendInputEvent({ type: "char", keyCode: char });
-        contents.sendInputEvent({ type: "keyUp", keyCode: char });
+        this.driveInput(tab, contents, { type: "keyDown", keyCode: char });
+        this.driveInput(tab, contents, { type: "char", keyCode: char });
+        this.driveInput(tab, contents, { type: "keyUp", keyCode: char });
       }
       await new Promise((resolve) => setTimeout(resolve, 14));
     }
     if (body.submit === true) {
       if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
-      contents.sendInputEvent({ type: "keyDown", keyCode: "Enter" });
-      contents.sendInputEvent({ type: "char", keyCode: "Enter" });
-      contents.sendInputEvent({ type: "keyUp", keyCode: "Enter" });
+      this.driveInput(tab, contents, { type: "keyDown", keyCode: "Enter" });
+      this.driveInput(tab, contents, { type: "char", keyCode: "Enter" });
+      this.driveInput(tab, contents, { type: "keyUp", keyCode: "Enter" });
       await this.settle(contents, body);
     }
     return this.driveResult(tab, { typed: body.text.length });
@@ -1154,9 +1343,9 @@ class BrowserService {
       if (!modifiers.includes(mapped)) modifiers.push(mapped);
     }
     if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab.", 409);
-    contents.sendInputEvent({ type: "keyDown", keyCode, modifiers });
-    if (!modifiers.length && (keyCode.length === 1 || keyCode === "Enter" || keyCode === "Space")) contents.sendInputEvent({ type: "char", keyCode: keyCode === "Space" ? " " : keyCode });
-    contents.sendInputEvent({ type: "keyUp", keyCode, modifiers });
+    this.driveInput(tab, contents, { type: "keyDown", keyCode, modifiers });
+    if (!modifiers.length && (keyCode.length === 1 || keyCode === "Enter" || keyCode === "Space")) this.driveInput(tab, contents, { type: "char", keyCode: keyCode === "Space" ? " " : keyCode });
+    this.driveInput(tab, contents, { type: "keyUp", keyCode, modifiers });
     await this.settle(contents, body);
     return this.driveResult(tab, { pressed: keyCode, modifiers });
   }
@@ -1167,7 +1356,7 @@ class BrowserService {
     const deltaX = Math.round(Math.min(5000, Math.max(-5000, Number(body.deltaX ?? body.dx ?? 0) || 0)));
     if (!deltaX && !deltaY) throw bad("Choose a scroll distance with --dy (pixels, negative scrolls up).");
     const target = await this.resolveTarget(tab, contents, body)
-      || await this.driveScript(contents, "({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) })");
+      || await this.driveScript(tab, "({ x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) })");
     await this.glide(tab, contents, target.x, target.y);
     // Wheel input lands like a person's: precise pixel deltas in a quick run
     // of steps. A single coarse tick delta is dropped by pages that smooth.
@@ -1176,7 +1365,7 @@ class BrowserService {
       if (contents.isDestroyed() || tab.agentDriveBlocked) break;
       // Chromium wheel deltas run opposite the page direction: a negative
       // deltaY scrolls down. Callers ask in page direction (--dy 600 = down).
-      contents.sendInputEvent({ type: "mouseWheel", ...point, canScroll: true, hasPreciseScrollingDeltas: true,
+      this.driveInput(tab, contents, { type: "mouseWheel", ...point, canScroll: true, hasPreciseScrollingDeltas: true,
         deltaX: -Math.round(deltaX / steps), deltaY: -Math.round(deltaY / steps) });
       await new Promise((resolve) => setTimeout(resolve, 35));
     }
@@ -1214,11 +1403,18 @@ class BrowserService {
         const open = normalized !== "about:blank" && group?.tabs.find((tab) => tab.url === normalized || tab.pendingURL === normalized);
         if (open) {
           group.activeId = open.id;
-          // A page that failed last time gets another try instead of leaving the
-          // link pointing at its error screen.
-          if (open.error) { open.error = ""; this.load(open, normalized); }
-          this.sync(); this.emit(true);
-          return this.metadata(open);
+          const activate = () => {
+            // A page that failed last time gets another try instead of leaving the
+            // link pointing at its error screen.
+            if (open.error) {
+              if (body.viaAgent === true && open.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+              open.error = ""; this.load(open, normalized);
+            }
+            this.sync(); this.emit(true);
+            return this.metadata(open);
+          };
+          if (body.viaAgent === true && open.error) return this.pageLocked(open, activate);
+          return activate();
         }
       }
       return this.create(scope, target);
@@ -1226,7 +1422,12 @@ class BrowserService {
     // Validate the action before looking the tab up, so an unknown action names itself instead
     // of borrowing the misleading "That browser tab is closed" message.
     if (!TAB_ACTIONS.has(action)) throw bad(action ? `Unsupported browser action: ${action}.` : "Choose a browser action.");
-    if (action === "navigate") return this.navigate(id, body.url);
+    // The pane's stop switch blocks everything an agent could use to change
+    // this page (input, navigation, scripts, close), never the user's own clicks.
+    if (body.viaAgent === true && ["navigate", "back", "forward", "reload", "stop", "evaluate", "close", "view"].includes(action)) {
+      const { tab } = this.find(id);
+      if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+    }
     if (action === "select") return this.select(id);
     if (action === "close") return this.close(id);
     if (action === "view") {
@@ -1234,7 +1435,6 @@ class BrowserService {
       if (requested && typeof requested === "object" && requested.mode === "mobile"
         && !Object.hasOwn(DEVICE_PROFILES, requested.device))
         throw bad(`Unknown phone size: ${String(requested.device).slice(0, 40)}. Choose iphone, pixel or ipad.`);
-      return this.setView(id, body.view);
     }
     if (action === "agent-stop" || action === "agent-allow") {
       // Only the user (pane UI) can hand a stopped tab back to an agent.
@@ -1245,17 +1445,20 @@ class BrowserService {
       if (tab.agentDriveBlocked) {
         tab.agentDriveAt = 0;
         const live = tab.nativeView?.webContents;
-        if (live && !live.isDestroyed()) void this.driveScript(live, "window.__lumenCursor && window.__lumenCursor.hide()", 1000).catch(() => {});
+        if (live && !live.isDestroyed()) void this.driveLocked(tab, () => this.driveScript(tab, "window.__lumenCursor && window.__lumenCursor.hide()", 1000)).catch(() => {});
       }
       this.emit();
       return this.metadata(tab);
     }
-    // The pane's stop switch blocks everything an agent could use to change
-    // this page (input, navigation, scripts), never the user's own clicks.
-    if (body.viaAgent === true && ["navigate", "back", "forward", "reload", "stop", "evaluate", "close", "view"].includes(action)) {
+    if (body.viaAgent === true && ["navigate", "view", "back", "forward", "reload", "stop"].includes(action)) {
       const { tab } = this.find(id);
-      if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+      return this.pageLocked(tab, () => {
+        if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+        return this.control({ ...body, viaAgent: false });
+      }, Date.now() + 15000, action === "navigate" || action === "reload");
     }
+    if (action === "navigate") return this.navigate(id, body.url);
+    if (action === "view") return this.setView(id, body.view);
     if (["snapshot", "click", "hover", "type", "press", "scroll"].includes(action)) {
       const { tab } = this.find(id);
       return this.driveLocked(tab, () => action === "snapshot" ? this.agentSnapshot(id)
@@ -1279,8 +1482,11 @@ class BrowserService {
       if (typeof body.script !== "string" || body.script.length > 100000) throw bad("Provide a script under 100,000 characters.");
       // A script that throws is a problem with the script, not a broken app, so say so with a
       // 4xx instead of letting it surface as an internal 500.
-      try { return await contents.executeJavaScript(body.script, true); }
-      catch (e) { throw bad(`The page script failed: ${String((e && e.message) || e).slice(0, 300)}`, 422); }
+      try { return await this.pageLocked(tab, () => this.pageOperationOnce(tab, (live) => live.executeJavaScript(body.script, true), Date.now() + 15000, true)); }
+      catch (e) {
+        if (e?.status) throw e;
+        throw bad(`The page script failed: ${String((e && e.message) || e).slice(0, 300)}`, 422);
+      }
     }
     return this.metadata(tab);
   }

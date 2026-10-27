@@ -9,11 +9,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "start": "electron .",
+    "start": "npm run build:lumen-command && electron .",
     "build": "tsc --noEmit && vite build",
+    "build:lumen-command": "node scripts/build-lumen-command.cjs",
     "lint": "tsc --noEmit",
-    "package": "npm run build && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false",
-    "package:portable": "npm run build && electron-builder --win portable --x64 --publish never --config.win.signExecutable=false",
+    "package": "npm run build:lumen-command && npm run build && electron-builder --win nsis --x64 --publish never --config.win.signExecutable=false",
+    "package:portable": "npm run build:lumen-command && npm run build && electron-builder --win portable --x64 --publish never --config.win.signExecutable=false",
     "verify:release": "node scripts/verify-release.cjs"
   },
   "dependencies": {
@@ -58,6 +59,9 @@
     ],
     "asarUnpack": [
       "node_modules/node-pty/**/*"
+    ],
+    "extraResources": [
+      { "from": "build/lumen-agent/LumenAgent", "to": "lumen-agent/LumenAgent" }
     ],
     "npmRebuild": false,
     "win": {
