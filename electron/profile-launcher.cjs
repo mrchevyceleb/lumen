@@ -7,6 +7,9 @@ const execute = promisify(execFile);
 const literal = (value) => "'" + String(value).replace(/'/g, "''") + "'";
 const encoded = (script) => Buffer.from(script, "utf16le").toString("base64");
 const loadProfiles = `$lumenProfiles=@($PROFILE.AllUsersAllHosts,$PROFILE.AllUsersCurrentHost,$PROFILE.CurrentUserAllHosts,$PROFILE.CurrentUserCurrentHost); foreach($lumenProfile in $lumenProfiles){if($lumenProfile -and (Test-Path -LiteralPath $lumenProfile)){try{. $lumenProfile *>&1 | ForEach-Object {[Console]::Error.WriteLine([string]$_)}}catch{[Console]::Error.WriteLine($_.ToString())}}}`;
+// Profiles can replace PSModulePath or turn auto-loading off. Managed shells
+// explicitly import the versioned binary after their profiles have finished.
+const importAgentModule = `if ($env:LUMEN_AGENT_MODULE_ROOT) { Import-Module -Name (Join-Path $env:LUMEN_AGENT_MODULE_ROOT 'LumenAgent\\LumenAgent.dll') -ErrorAction Stop }`;
 async function prepareProfile(session, dataDir, findExecutable, resolveLauncher) {
   if (session.launchPrepared) return;
   if (process.platform !== "win32") { session.launchPrepared = true; session.profileEnvironment = { ...process.env }; return; }
@@ -43,6 +46,6 @@ function profiledLaunch(session, args, resolveLauncher) {
   // afterward so a profile cannot override the selected account's credentials.
   const restore = session.accountId ? `$lumenOriginal=@{}; Get-ChildItem Env: | ForEach-Object {$lumenOriginal[$_.Name]=$_.Value};` : "";
   const filter = session.accountId ? `Get-ChildItem Env: | ForEach-Object {if(!$lumenOriginal.ContainsKey($_.Name)){Remove-Item -LiteralPath ('Env:'+ $_.Name)}}; foreach($lumenKey in $lumenOriginal.Keys){[Environment]::SetEnvironmentVariable($lumenKey,$lumenOriginal[$lumenKey],'Process')};` : "";
-  return { file: session.shellExecutable, args: ["-NoLogo", "-NoProfile", "-OutputFormat", "Text", "-EncodedCommand", encoded(`${restore} ${loadProfiles}; ${filter} & ${literal(session.profileFunction)} ${args.map(literal).join(" ")}`)] };
+  return { file: session.shellExecutable, args: ["-NoLogo", "-NoProfile", "-OutputFormat", "Text", "-EncodedCommand", encoded(`${restore} ${loadProfiles}; ${filter} ${importAgentModule}; & ${literal(session.profileFunction)} ${args.map(literal).join(" ")}`)] };
 }
-module.exports = { prepareProfile, profiledLaunch, loadProfiles, literal, encoded };
+module.exports = { prepareProfile, profiledLaunch, loadProfiles, importAgentModule, literal, encoded };

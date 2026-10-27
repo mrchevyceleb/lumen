@@ -20,6 +20,7 @@ const installer = fs.readFileSync(path.join(root, artifact.url));
 assert.equal(crypto.createHash("sha512").update(installer).digest("base64"), artifact.sha512);
 assert.equal(installer.length, artifact.size);
 assert.ok(fs.statSync(path.join(root, artifact.url + ".blockmap")).size > 0);
+assert.ok(fs.statSync(path.join(root, "win-unpacked", "resources", "lumen-agent", "LumenAgent", "LumenAgent.dll")).size > 0, "PowerShell launcher is packaged");
 // Use the packaged Electron runtime and packaged native dependency, not Node's
 // ABI. A successful PTY is essential for releases built on another computer.
 const code = `const pty=require(${JSON.stringify(path.join(root, "win-unpacked", "resources", "app.asar", "node_modules", "node-pty"))});const p=pty.spawn('powershell.exe',['-NoLogo','-NoProfile','-Command','Write-Output LumenReleaseSmoke'],{cols:80,rows:24,cwd:process.cwd(),env:process.env});let text='';p.onData(d=>text+=d);const timer=setTimeout(()=>{p.kill();process.exit(2)},15000);p.onExit(e=>{clearTimeout(timer);if(e.exitCode!==0||!text.includes('LumenReleaseSmoke'))process.exit(1);console.log('Packaged PTY passed');process.exit(0)});`;

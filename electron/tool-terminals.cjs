@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { TerminalState } = require("./terminal-state.cjs");
-const { profiledLaunch, encoded, loadProfiles } = require("./profile-launcher.cjs");
+const { profiledLaunch, encoded, loadProfiles, importAgentModule, literal } = require("./profile-launcher.cjs");
 class AcpTerminals {
   constructor(owner, session) { this.owner = owner; this.session = session; this.items = new Map(); session.toolTerminals = this.items; }
   async handle(method, params) {
@@ -20,14 +20,29 @@ class AcpTerminals {
       }
       const { findExecutable, resolveLauncher } = require("./services.cjs");
       let launch;
-      if ((params.args || []).length) {
+      if (process.platform === "win32" && (params.args || []).length && /^(?:lumen|Invoke-Lumen)$/i.test(params.command)) {
+        const shell = session.shellExecutable || findExecutable("powershell", env);
+        if (/(?:pwsh|powershell)(?:\.exe)?$/i.test(path.basename(shell))) {
+          // Structured ACP calls do not pass through shell-source parsing. Read
+          // exact arguments from disk so long prompts never hit a command-line
+          // or environment limit, then splat them into the binary cmdlet.
+          const folder = path.join(session.lumenDataDir, "terminal-args");
+          const argumentFile = path.join(folder, crypto.randomUUID() + ".json");
+          fs.mkdirSync(folder, { recursive: true });
+          try { fs.writeFileSync(argumentFile, JSON.stringify(params.args), { mode: 0o600 }); }
+          catch (error) { fs.rmSync(argumentFile, { force: true }); throw error; }
+          const script = `${session.loadShellProfile ? loadProfiles + "; " : ""}$lumenArgsFile=${literal(argumentFile)}; try { $lumenStructuredArgs=[string[]](([IO.File]::ReadAllText($lumenArgsFile,[Text.Encoding]::UTF8)) | ConvertFrom-Json); ${importAgentModule}; Invoke-Lumen @lumenStructuredArgs -ErrorAction Continue; $lumenSucceeded=$?; $lumenExitCode=$LASTEXITCODE } finally { Remove-Item -LiteralPath $lumenArgsFile -Force -ErrorAction SilentlyContinue }; if (!$lumenSucceeded) { if ($lumenExitCode) { exit $lumenExitCode }; exit 1 }`;
+          launch = { file: shell, args: ["-NoLogo", "-NoProfile", "-EncodedCommand", encoded(script)], cleanup: [argumentFile] };
+        }
+      }
+      if (!launch && (params.args || []).length) {
         launch = profiledLaunch({ ...session, profileEnvironment: env, command: params.command, profileFunction: undefined, preparedLauncher: undefined }, params.args, resolveLauncher);
       }
       if (!launch && process.platform === "win32") {
         // Grok sends shell source (including pipelines and builtins) as command.
         const shell = session.shellExecutable || findExecutable("powershell", env);
         if (/(?:pwsh|powershell)(?:\.exe)?$/i.test(path.basename(shell))) {
-          launch = { file: shell, args: ["-NoLogo", "-NoProfile", "-EncodedCommand", encoded(`${session.loadShellProfile ? loadProfiles + "; " : ""}${params.command}\nif (!$?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }`)] };
+          launch = { file: shell, args: ["-NoLogo", "-NoProfile", "-EncodedCommand", encoded(`${session.loadShellProfile ? loadProfiles + "; " : ""}${importAgentModule}; $LASTEXITCODE=0; try { ${params.command}\nif (!$?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 } } catch { if ($LASTEXITCODE) { exit $LASTEXITCODE }; throw }`)] };
         } else if (/^cmd(?:\.exe)?$/i.test(path.basename(shell))) launch = { file: shell, args: ["/D", "/S", "/C", params.command] };
         else if (/^wsl(?:\.exe)?$/i.test(path.basename(shell))) {
           // WSL does not inherit arbitrary Windows environment variables. Keep
@@ -50,7 +65,10 @@ class AcpTerminals {
         else launch = { file: shell, args: [session.loadShellProfile ? "-lc" : "-c", params.command] };
       } else if (!launch) launch = { file: session.shellExecutable || env.SHELL || "/bin/sh", args: [session.loadShellProfile ? "-lc" : "-c", params.command] };
       const terminalId = crypto.randomUUID();
-      const pty = require("node-pty").spawn(launch.file, launch.args, { name: "xterm-256color", cols: 100, rows: 30, cwd, env, useConptyDll: process.platform === "win32" });
+      const cleanup = () => { for (const file of launch.cleanup || []) { try { fs.rmSync(file, { force: true }); } catch { /* PowerShell may already have removed it. */ } } };
+      let pty;
+      try { pty = require("node-pty").spawn(launch.file, launch.args, { name: "xterm-256color", cols: 100, rows: 30, cwd, env, useConptyDll: process.platform === "win32" }); }
+      catch (error) { cleanup(); throw error; }
       const item = { terminalId, pty, output: "", truncated: false, limit: Number.isSafeInteger(params.outputByteLimit) && params.outputByteLimit > 0 ? Math.min(params.outputByteLimit, 20 * 1024 * 1024) : 1024 * 1024 };
       item.state = new TerminalState(100, 30, (data) => pty.write(data));
       item.exited = new Promise((resolve) => { item.resolveExit = resolve; });
@@ -61,7 +79,7 @@ class AcpTerminals {
         if (bytes.length > item.limit) { item.output = bytes.subarray(bytes.length - item.limit).toString("utf8"); item.truncated = true; }
         item.state.write(data, (chunk) => owner.event(session, { type: "terminal", terminalId, ...chunk }));
       });
-      pty.onExit(({ exitCode, signal }) => { item.exitStatus = { exitCode, ...(signal ? { signal: String(signal) } : {}) }; item.resolveExit(item.exitStatus); owner.event(session, { type: "tool-terminal-exit", terminalId }); });
+      pty.onExit(({ exitCode, signal }) => { cleanup(); item.exitStatus = { exitCode, ...(signal ? { signal: String(signal) } : {}) }; item.resolveExit(item.exitStatus); owner.event(session, { type: "tool-terminal-exit", terminalId }); });
       owner.event(session, { type: "terminal-needed", terminalId, title: params.command });
       return { terminalId };
     }

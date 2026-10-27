@@ -22,11 +22,24 @@ function lumenEnvironment(s, env) {
   env.LUMEN_TASK_ID = s.controlId;
   env.LUMEN_CONTROL_FILE = path.join(s.lumenDataDir, "agent-control.json");
   env.LUMEN_AGENT_CLI = path.join(s.lumenDataDir, "lumen-agent.cjs");
+  env.LUMEN_AGENT_RUNTIME = process.execPath;
   env.LUMEN_GUIDE = path.join(s.lumenDataDir, "lumen-agent-guide.md");
+  if (process.env.LUMEN_AGENT_MODULE_ROOT) env.LUMEN_AGENT_MODULE_ROOT = process.env.LUMEN_AGENT_MODULE_ROOT;
   const bin = path.join(s.lumenDataDir, "bin");
+  const shell = String(s.shellExecutable || s.shellCommand || "");
+  const powerShell = process.platform === "win32" && (!shell.trim() || /(?:pwsh|powershell)(?:\.exe)?(?:\s|"|$)/i.test(shell));
+  // Descendant shells and native spawns inherit PATH. Every PowerShell entry
+  // point imports the binary module explicitly, so its alias still wins over
+  // lumen.cmd without hiding the shims from CMD, Bash, or child processes.
   const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH") || "PATH";
   const parts = String(env[pathKey] || "").split(path.delimiter).filter(Boolean);
   if (!parts.some((part) => path.resolve(part) === path.resolve(bin))) env[pathKey] = [bin, ...parts].join(path.delimiter);
+  if (powerShell && process.env.LUMEN_AGENT_MODULE_ROOT) {
+    const moduleKey = Object.keys(env).find((key) => key.toUpperCase() === "PSMODULEPATH") || "PSModulePath";
+    const modules = String(env[moduleKey] || "").split(path.delimiter).filter(Boolean);
+    if (!modules.length) modules.push(path.join(os.homedir(), "Documents", "WindowsPowerShell", "Modules"), path.join(process.env.ProgramFiles || "C:\\Program Files", "WindowsPowerShell", "Modules"), path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "Modules"));
+    if (!modules.some((part) => path.resolve(part) === path.resolve(process.env.LUMEN_AGENT_MODULE_ROOT))) env[moduleKey] = [process.env.LUMEN_AGENT_MODULE_ROOT, ...modules].join(path.delimiter);
+  }
   return env;
 }
 function accountEnvironment(s, base = process.env) {

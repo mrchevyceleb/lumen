@@ -80,12 +80,46 @@ class AgentControl {
     await fs.mkdir(bin, { recursive: true });
     // Run the helper on Lumen's own runtime (Electron as Node), so the command
     // works on machines with no system Node.js installed.
-    const cmdQuote = (value) => value.replace(/%/g, "%%").replace(/"/g, '\\"');
     const shQuote = (value) => value.replace(/([\\"$`])/g, "\\$1");
     await fs.writeFile(path.join(bin, "lumen.cmd"),
-      `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${cmdQuote(process.execPath)}" "${cmdQuote(this.helper)}" %*\r\n`);
+      `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\nset LUMEN_AGENT_ARGS_FILE=\r\nif not defined LUMEN_AGENT_RUNTIME (echo Lumen's agent runtime is not configured. Start a new chat and try again. ^>^&2 & exit /b 1)\r\nif not defined LUMEN_AGENT_CLI (echo Lumen's agent helper is not configured. Start a new chat and try again. ^>^&2 & exit /b 1)\r\n"%LUMEN_AGENT_RUNTIME%" "%LUMEN_AGENT_CLI%" %*\r\nexit /b %ERRORLEVEL%\r\n`);
+    // PowerShell 5.1 mangles native/CMD argument quotes, and Restricted or
+    // AllSigned blocks a generated .ps1. Its binary cmdlet receives the exact
+    // managed strings and works without changing the machine's script policy.
+    if (process.platform === "win32") {
+      const candidates = [path.join(process.resourcesPath || "", "lumen-agent", "LumenAgent", "LumenAgent.dll"), path.join(__dirname, "..", "build", "lumen-agent", "LumenAgent", "LumenAgent.dll")];
+      let assembly;
+      for (const candidate of candidates) {
+        try { assembly = await fs.readFile(candidate); break; }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+      if (!assembly) throw new Error("Lumen's PowerShell command is missing. Run npm start to build it before launching the app.");
+      const manifest = "@{ RootModule = 'LumenAgent.dll'; ModuleVersion = '1.0.0'; GUID = '0f149b83-93be-42f4-a2a5-f9b6a1d2b2a8'; CmdletsToExport = @('Invoke-Lumen'); AliasesToExport = @('lumen') }\r\n";
+      const moduleRoot = path.join(bin, "modules", crypto.createHash("sha256").update(assembly).update(manifest).digest("hex").slice(0, 16));
+      const moduleDir = path.join(moduleRoot, "LumenAgent");
+      await fs.mkdir(moduleDir, { recursive: true });
+      const installModuleFile = async (file, value) => {
+        const expected = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        const existing = await fs.readFile(file).catch((error) => { if (error.code !== "ENOENT") throw error; return null; });
+        if (existing?.equals(expected)) return;
+        // Publish only complete files. A crashed or concurrent install can leave
+        // an existing path, but its bytes must never be trusted just because it exists.
+        const temporary = file + ".tmp-" + process.pid + "-" + crypto.randomUUID();
+        try {
+          await fs.writeFile(temporary, expected, { flag: "wx" });
+          await fs.rename(temporary, file);
+        } catch (error) {
+          const winner = await fs.readFile(file).catch(() => null);
+          if (!winner?.equals(expected)) throw error;
+        } finally { await fs.unlink(temporary).catch(() => {}); }
+      };
+      await installModuleFile(path.join(moduleDir, "LumenAgent.dll"), assembly);
+      await installModuleFile(path.join(moduleDir, "LumenAgent.psd1"), manifest);
+      process.env.LUMEN_AGENT_MODULE_ROOT = moduleRoot;
+    }
+    await fs.unlink(path.join(bin, "lumen.ps1")).catch((error) => { if (error.code !== "ENOENT") throw error; });
     await fs.writeFile(path.join(bin, "lumen"),
-      `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${shQuote(process.execPath)}" "${shQuote(this.helper)}" "$@"\n`, { mode: 0o755 });
+      `#!/bin/sh\nLUMEN_AGENT_ARGS_FILE= ELECTRON_RUN_AS_NODE=1 exec "${shQuote(process.execPath)}" "${shQuote(this.helper)}" "$@"\n`, { mode: 0o755 });
     process.env.LUMEN_CONTROL_FILE = this.file;
     if (this.enabled) await this.start(); else await fs.unlink(this.file).catch(() => {});
   }
@@ -154,7 +188,8 @@ class AgentControl {
     const send = (status, value) => {
       if (res.destroyed) return;
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
-      res.end(JSON.stringify(value));
+      const serialized = JSON.stringify(value);
+      res.end(serialized === undefined ? "null" : serialized);
     };
     try {
       // A browser origin must never be able to use this local coding interface.
