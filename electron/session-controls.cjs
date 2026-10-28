@@ -478,7 +478,6 @@ class Runtime {
     this.owner = owner; this.s = s; this.pending = new Map(); this.closed = false;
     this.uiRequests = new Map();
     this.serverUiRequests = new Map();
-    this.userAcks = new Map();
     this.steeredInputs = new Set();
     this.steeredResult = undefined;
     this.hadPrompt = !!s.sessionRef;
@@ -525,8 +524,6 @@ class Runtime {
     for (const id of this.uiRequests.keys()) this.owner.event(this.s, { type: "agent_ui_cancel", request: { id } });
     this.uiRequests.clear();
     this.serverUiRequests.clear();
-    for (const ack of this.userAcks.values()) { clearTimeout(ack.timer); ack.reject(new Error(message)); }
-    this.userAcks.clear();
     this.socket?.close();
     this.terminals?.close();
     this.compactionDone?.reject(new Error(message)); this.compactionDone = null;
@@ -633,7 +630,6 @@ class Runtime {
           o.event(s, { type: "cwd", cwd });
         })).catch(() => {});
       }
-      if (e.type === "user" && this.userAcks.has(e.uuid)) { const ack = this.userAcks.get(e.uuid); clearTimeout(ack.timer); this.userAcks.delete(e.uuid); ack.resolve(); }
       // A replay proves Claude consumed the correction. Its own later result,
       // not the held result from the previous run, will finish this Lumen turn.
       if (e.type === "user") { this.steeredInputs.delete(e.uuid); if (!this.steeredInputs.size) this.clearSteeredResult(); }
@@ -1072,28 +1068,18 @@ class Runtime {
     }
     await this.owner.attachments.resolve(this.s.controlId, attachments);
   }
-  async userInput(text, id, attachments = [], acknowledge = true, preparedContent) {
+  async userInput(text, id, attachments = [], preparedContent) {
     const turn = this.s.turn;
     const content = preparedContent ?? (attachments.length ? await this.content(text, attachments) : text);
     if (this.closed || this.s.stopRequested || this.s.stopping || !this.s.busy || this.s.turn !== turn) throw new Error("The turn was stopped before the message was sent.");
     id ||= uuid();
     const input = { type: "user", uuid: id, session_id: this.s.sessionRef || "", parent_tool_use_id: null, message: { role: "user", content } };
-    if (!acknowledge) {
-      // --replay-user-messages acknowledges at the next loop boundary, which can
-      // be minutes away behind a tool. A flushed native stream write is the same
-      // handoff the interactive CLI provides, so do not turn that wait into an error.
-      await new Promise((resolve, reject) => {
-        try { this.write(input, (error) => { if (error) { error.deliveryUncertain = true; reject(error); } else resolve(); }); }
-        catch (error) { reject(error); }
-      });
-      return;
-    }
+    // --replay-user-messages emits at the next loop boundary, which can be
+    // minutes away behind a question or tool. Once the native input stream
+    // accepts a message, Claude owns it just as it does in the interactive CLI.
     await new Promise((resolve, reject) => {
-      const fail = (error) => { const ack = this.userAcks.get(id); if (!ack) return; clearTimeout(ack.timer); this.userAcks.delete(id); reject(error); };
-      const timer = setTimeout(() => fail(new Error("Claude did not acknowledge this message. Inspect the saved conversation before resending.")), 45000);
-      this.userAcks.set(id, { resolve, reject, timer });
-      try { this.write(input, (error) => { if (error) fail(error); }); }
-      catch (error) { fail(error); }
+      try { this.write(input, (error) => { if (error) { error.deliveryUncertain = true; reject(error); } else resolve(); }); }
+      catch (error) { reject(error); }
     });
   }
   async steer(message) {
@@ -1123,7 +1109,7 @@ class Runtime {
       // Claude owns the correction once its native input stream accepts it, even
       // if this turn finishes before the replay or the next loop boundary.
       this.steeredInputs.add(message.id);
-      try { await this.userInput(message.text, message.id, [], false, content); }
+      try { await this.userInput(message.text, message.id, [], content); }
       catch (error) { if (!error.deliveryUncertain) { this.steeredInputs.delete(message.id); this.releaseSteeredResult(); } throw error; }
     }
   }

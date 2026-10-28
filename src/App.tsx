@@ -42,6 +42,7 @@ import {
   PanelTop,
   ShieldCheck,
   Globe,
+  Bot,
 } from "lucide-react";
 import {
   api,
@@ -89,6 +90,7 @@ import BrowserPane from "./BrowserPane";
 import PiCustomControl from "./PiCustomControl";
 import SessionStart from "./SessionStart";
 import WorktreeJobDialog from "./WorktreeJobDialog";
+import AgentsPanel from "./AgentsPanel";
 import { useAgentControl, taskView, settleControl } from "./useAgentControl";
 import { chatText } from "./chat-export";
 const EditorPane = lazy(() => import("./EditorPane"));
@@ -132,7 +134,8 @@ type Bootstrap = {
   administrator: AdministratorStatus;
 };
 type Dialog =
-  "settings" | "worktrees" | "worktree-job" | "palette" | "open" | "newfile" | "tab" | null;
+  "settings" | "worktrees" | "worktree-job" | "palette" | "open" | "newfile" | "tab" | "agents" | null;
+type PiRequestDraft = { text: string; answers: Record<string, string[]>; custom: Record<string, string> };
 export default function App() {
   const updateStatus = useUpdates();
   const { accounts } = useAccounts();
@@ -435,9 +438,23 @@ export default function App() {
     session: string;
     request: PiRequest;
   }[]>([]);
+  const [piDrafts, setPiDrafts] = useState<Record<string, PiRequestDraft>>({});
+  useEffect(() => {
+    const live = new Set(uiRequests.map((item) => `${item.session}:${item.request.id}`));
+    setPiDrafts((old) => {
+      const entries = Object.entries(old).filter(([key]) => live.has(key));
+      return entries.length === Object.keys(old).length ? old : Object.fromEntries(entries);
+    });
+  }, [uiRequests]);
   const uiRequestsRef = useRef(uiRequests);
   uiRequestsRef.current = uiRequests;
   const piRequest = uiRequests[0];
+  const inputSessions = new Set(uiRequests.map((item) => item.session));
+  const workingAgentCount = tabs.filter((tab) => tab.agent !== "shell" && tab.busy && !tab.stalled && !inputSessions.has(tab.id)).length;
+  const stalledAgentCount = tabs.filter((tab) => tab.agent !== "shell" && tab.busy && tab.stalled && !inputSessions.has(tab.id)).length;
+  const inputAgentCount = inputSessions.size;
+  const pausedAgents = tabs.filter((tab) => tab.agent !== "shell" && !tab.busy && !inputSessions.has(tab.id) && tab.queuePaused && !!tab.queuedMessages?.length);
+  const railAgentCount = new Set([...tabs.filter((tab) => tab.agent !== "shell" && tab.busy).map((tab) => tab.id), ...inputSessions, ...pausedAgents.map((tab) => tab.id)]).size;
   const [diff, setDiff] = useState<{
     path: string;
     text: string;
@@ -2001,6 +2018,15 @@ export default function App() {
             >
               <Layers size={21} />
             </IconButton>
+            <IconButton
+              label={`Agents${workingAgentCount ? ` · ${workingAgentCount} working` : ""}${stalledAgentCount ? ` · ${stalledAgentCount} stalled` : ""}${inputAgentCount ? ` · ${inputAgentCount} needs input` : ""}${pausedAgents.length ? ` · ${pausedAgents.length} paused` : ""}`}
+              active={dialog === "agents"}
+              className={stalledAgentCount || inputAgentCount || pausedAgents.length ? "agents-attention" : ""}
+              onClick={() => setDialog("agents")}
+            >
+              <Bot size={21} />
+              {railAgentCount > 0 && <span className={`rail-badge ${stalledAgentCount || inputAgentCount || pausedAgents.length ? "attention" : ""}`}>{railAgentCount}</span>}
+            </IconButton>
             <IconButton label="New terminal" onClick={() => addTab("shell")}>
               <TerminalSquare size={21} />
             </IconButton>
@@ -2503,6 +2529,8 @@ export default function App() {
           </button>
         </div>
       </footer>
+      {dialog === "agents" && <AgentsPanel tabs={tabs} settings={settings} activeId={activeId} requests={uiRequests}
+        onOpen={(tab) => { setUiRequests((old) => [...old.filter((item) => item.session === tab.id), ...old.filter((item) => item.session !== tab.id)]); selectTab(tab); setDialog(null); }} onClose={() => setDialog(null)} />}
       {dialog === "settings" && (
         <SettingsPanel
           settings={settings}
@@ -2627,11 +2655,14 @@ export default function App() {
           </div>
         </Modal>
       )}
-      {piRequest && (
+      {piRequest && dialog !== "agents" && (
         <PiDialog
           key={`${piRequest.session}:${piRequest.request.id}`}
           value={piRequest.request}
           sessionName={(() => { const tab = tabs.find((value) => value.id === piRequest.session); return tab ? `${tab.name} · ${tab.root || "No workspace"}` : "Agent session"; })()}
+          onShowAgents={() => setDialog("agents")}
+          draft={piDrafts[`${piRequest.session}:${piRequest.request.id}`]}
+          onPreserveDraft={(draft) => setPiDrafts((old) => ({ ...old, [`${piRequest.session}:${piRequest.request.id}`]: draft }))}
           onReply={async (response) => {
             try {
               if (response.native && tabsRef.current.find((tab) => tab.id === piRequest.session)?.agent === "pi") {
@@ -3344,14 +3375,23 @@ function PiDialog({
   value: v,
   sessionName,
   onReply,
+  onShowAgents,
+  draft,
+  onPreserveDraft,
 }: {
   value: PiRequest;
   sessionName?: string;
   onReply: (value: any) => void;
+  onShowAgents: () => void;
+  draft?: PiRequestDraft;
+  onPreserveDraft: (draft: PiRequestDraft) => void;
 }) {
-  const [text, setText] = useState(v.prefill || "");
-  const [answers, setAnswers] = useState<Record<string, string[]>>({});
-  const [custom, setCustom] = useState<Record<string, string>>({});
+  const [text, setText] = useState(draft?.text ?? (v.prefill || ""));
+  const [answers, setAnswers] = useState<Record<string, string[]>>(draft?.answers || {});
+  const [custom, setCustom] = useState<Record<string, string>>(draft?.custom || {});
+  const draftRef = useRef<PiRequestDraft>({ text: "", answers: {}, custom: {} });
+  draftRef.current = { text, answers, custom };
+  useEffect(() => () => onPreserveDraft(draftRef.current), []);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const send = async (response: any) => {
@@ -3371,6 +3411,7 @@ function PiDialog({
       onClose={() => void send({ cancelled: true })}
     >
       <div className="dialog-form">
+        <button className="secondary agent-overview-return" onClick={onShowAgents}><Bot size={14} />All agents</button>
         {v.message && <pre className="agent-request-detail">{v.message}</pre>}
         {v.url && <button className="secondary" onClick={() => api("external:open", v.url).catch(() => {})}>Open authorization page ↗</button>}
         {v.method === "custom" ? <PiCustomControl lines={v.lines || []} onInput={(input) => send({ input })} /> : v.questions ? <>
