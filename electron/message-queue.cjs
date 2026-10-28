@@ -3,7 +3,7 @@ function validate(message) {
   if (!message || !uuid.test(message.id) || typeof message.text !== "string" || (!message.text.trim() && !message.attachments?.length) || message.text.length > 200000)
     throw new Error("Enter a message under 200,000 characters.");
   if (!Array.isArray(message.attachments || []) || (message.attachments || []).length > 8 || (message.attachments || []).some((attachment) => !uuid.test(attachment?.id))) throw new Error("Invalid image attachments.");
-  return { id: message.id, text: message.text, attachments: message.attachments || [], createdAt: message.createdAt || Date.now(), deliveryUncertain: !!message.deliveryUncertain || ["sending", "steering"].includes(message.state), state: "queued" };
+  return { id: message.id, text: message.text, attachments: message.attachments || [], createdAt: message.createdAt || Date.now(), deliveryUncertain: !!message.deliveryUncertain || ["sending", "steering"].includes(message.state), state: "queued", ...(typeof message.steerTurnId === "string" && message.steerTurnId.length <= 300 ? { steerTurnId: message.steerTurnId } : {}) };
 }
 class MessageQueue {
   constructor(owner, session, saved = []) {
@@ -11,7 +11,7 @@ class MessageQueue {
     this.owner = owner; this.s = session; this.items = saved.map(validate); this.paused = !!saved.length;
     if (this.items.reduce((n, m) => n + m.text.length, 0) > 1000000) throw new Error("The saved message queue is too large.");
     if (new Set(this.items.map((m) => m.id)).size !== this.items.length) throw new Error("Duplicate queued message.");
-    this.pending = false; this.closed = false;
+    this.pending = false; this.closed = false; this.steeringGeneration = 0; this.steered = new Map();
   }
   state() {
     const s = this.s;
@@ -39,6 +39,7 @@ class MessageQueue {
     const entry = this.items[0];
     if (entry.deliveryUncertain) { this.paused = true; this.emit(); return; }
     this.pending = true;
+    delete entry.steerTurnId;
     entry.state = "sending"; this.emit();
     try { await this.owner.send(s.id, entry.text, entry); this.items = this.items.filter((m) => m.id !== entry.id); }
     catch (error) { entry.state = "queued"; entry.deliveryUncertain = true; this.paused = true; this.owner.event(s, { type: "diagnostic", text: "Message delivery was not confirmed. Inspect history before retrying: " + error.message }); }
@@ -52,7 +53,7 @@ class MessageQueue {
       // chose to send this message again. Without clearing the flag, drain paused
       // straight back and the button could never do anything.
       const head = this.items[0];
-      if (head?.deliveryUncertain) { head.deliveryUncertain = false; head.state = "queued"; }
+      if (head?.deliveryUncertain) { head.deliveryUncertain = false; head.state = "queued"; delete head.steerTurnId; }
       this.paused = false; this.emit(); void this.drain(); return this.state();
     }
     const entry = this.items.find((m) => m.id === id);
@@ -62,12 +63,16 @@ class MessageQueue {
     if (!this.s.busy) { this.items = [entry, ...this.items.filter((m) => m !== entry)]; this.paused = false; this.emit(); void this.drain(); return this.state(); }
     if (this.s.agent === "google") throw new Error("Gemini does not support steering. This message stays queued for after the current turn.");
     this.pending = true; entry.state = "steering"; this.emit();
+    const generation = ++this.steeringGeneration;
     try {
       await this.owner.steer(this.s, entry);
-      this.owner.event(this.s, { type: "message-delivered", messageId: entry.id });
+      if (generation !== this.steeringGeneration) return this.state();
+      if (this.s.agent === "codex") this.steered.set(entry.id, entry);
+      else this.owner.event(this.s, { type: "message-delivered", messageId: entry.id });
       this.items = this.items.filter((m) => m !== entry);
-      this.owner.event(this.s, { type: "user-message", messageId: entry.id, text: entry.text, attachments: entry.attachments, delivery: "steer" });
+      this.owner.event(this.s, { type: "user-message", messageId: entry.id, text: entry.text, attachments: entry.attachments, delivery: "steer", deliveryState: this.s.agent === "codex" ? "sending" : undefined });
     } catch (error) {
+      if (generation !== this.steeringGeneration) return this.state();
       entry.state = "queued";
       entry.deliveryUncertain = error.deliveryUncertain === true;
       if (entry.deliveryUncertain) this.paused = true;
@@ -77,10 +82,51 @@ class MessageQueue {
       this.owner.event(this.s, { type: "diagnostic", text: "The active turn did not accept steering; the message stays queued for the next turn. " + error.message });
       return { ...this.state(), steered: false, reason: error.message };
     }
-    finally { this.pending = false; this.emit(); if (!this.closed) void this.drain(); }
+    finally {
+      if (generation === this.steeringGeneration) { this.pending = false; this.emit(); if (!this.closed) void this.drain(); }
+    }
     return { ...this.state(), steered: true };
   }
-  finish(code) { if (code !== 0) this.pause(); else void this.drain(); }
+  confirmSteering(id, turnId) {
+    const matches = (entry) => !turnId || !entry.steerTurnId || entry.steerTurnId === turnId;
+    const attempted = this.items.find((entry) => entry.id === id && (entry.state === "steering" || entry.steerTurnId) && matches(entry));
+    if (attempted) {
+      // Consumption is the strongest acknowledgement, even when its replay
+      // arrives after an RPC failure, recovery, or turn cleanup restored it.
+      if (attempted.state === "steering") { this.steeringGeneration++; this.pending = false; }
+      this.steered.delete(id);
+      this.items = this.items.filter((entry) => entry !== attempted);
+      this.emit();
+      this.owner.event(this.s, { type: "message-delivered", messageId: id });
+      return;
+    }
+    const accepted = this.steered.get(id);
+    if (accepted && matches(accepted) && this.steered.delete(id)) this.owner.event(this.s, { type: "message-delivered", messageId: id });
+  }
+  finish(code) {
+    const unconsumed = [...this.steered.values()];
+    this.steered.clear();
+    for (const entry of unconsumed) {
+      // turn/steer acceptance is not consumption. If the turn ends before its
+      // native userMessage arrives, hand the correction back like the TUI does.
+      entry.state = "queued"; entry.deliveryUncertain = true;
+      this.owner.event(this.s, { type: "user-message-retracted", messageId: entry.id });
+    }
+    if (unconsumed.length) {
+      this.items = [...unconsumed, ...this.items];
+      this.paused = true;
+    }
+    const steering = this.items.find((entry) => entry.state === "steering");
+    if (steering) {
+      // Every terminal outcome settles an outstanding steer RPC, not just an
+      // interruption. Its late response must not strand an unconsumed entry.
+      this.steeringGeneration++;
+      steering.state = "queued"; steering.deliveryUncertain = true;
+      this.pending = false; this.paused = true;
+    }
+    if (code !== 0 || unconsumed.length || steering) this.pause();
+    else void this.drain();
+  }
   reconcile(messages, accepted = []) {
     this.items = this.items.filter((entry) => !entry.deliveryUncertain || !(accepted.includes(entry.id) || messages.some((message) =>
       message.role === "user" && (message.id === entry.id || message.providerMessageId === entry.id || (!entry.attachments.length && message.timestamp >= entry.createdAt && message.text === entry.text)))));

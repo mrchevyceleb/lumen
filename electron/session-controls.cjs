@@ -508,7 +508,9 @@ class Runtime {
       } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
-  close(message = "The CLI session closed.") {
+  close(message = "The CLI session closed.", code) {
+    if (this.closed) return;
+    const unfinished = code !== undefined && this.s.runtime === this && this.s.busy && !this.s.stopping;
     this.closed = true;
     this.steeredInputs.clear(); this.clearSteeredResult();
     for (const pending of this.pending.values()) {
@@ -527,6 +529,10 @@ class Runtime {
     this.terminals?.close();
     this.compactionDone?.reject(new Error(message)); this.compactionDone = null;
     if (this.s.runtime === this) this.s.runtime = null;
+    // Codex has no separate owner-side child close handler. If its app-server
+    // dies without turn/completed, close the Lumen turn instead of leaving Stop,
+    // steering and every later message blocked on a dead runtime.
+    if (unfinished) this.owner.finish(this.s, this.s.stopRequested ? 130 : code || 1);
   }
   clearSteeredResult() {
     clearTimeout(this.steeredResult?.timer);
@@ -756,10 +762,18 @@ class Runtime {
         } catch (error) { if (Date.now() >= deadline) throw new Error("Codex's shared server did not become ready. " + error.message); await new Promise((resolve) => setTimeout(resolve, 100)); }
       }
       this.socket.on("message", (message) => { try { this.receive(JSON.parse(message.toString())); } catch (error) { o.event(s, { type: "diagnostic", text: "Codex protocol: " + error.message }); } });
-      this.socket.on("close", () => this.close("Codex disconnected. Reconnect this saved conversation."));
+      this.socket.on("close", () => {
+        this.close("Codex disconnected. Reconnect this saved conversation.", 1);
+        // A dropped transport does not stop the agent. Reap its child now, and
+        // make any replacement wait for that same single-flight process cleanup.
+        void o.reapProcess(s, this.child).catch((error) => o.event(s, { type: "diagnostic", text: "The disconnected Codex process is still running. Retry Stop before sending another message. " + error.message }));
+      });
       this.socket.on("error", () => {});
     } else o.jsonStream(s, this.child, (e) => this.receive(e));
-    this.child.once("close", () => this.close());
+    this.child.once("close", (code) => {
+      if (this.s.process === this.child) this.s.process = null;
+      this.close("The CLI session closed.", code ?? 1);
+    });
     this.child.once("error", (error) => this.close(error.message));
     if (s.agent === "claude") {
       this.metadata = await this.request("initialize");
@@ -1058,6 +1072,7 @@ class Runtime {
     if (this.closed || !this.s.busy) throw new Error("This turn has finished.");
     if (this.s.agent === "codex") {
       if (!this.activeTurnId) throw new Error("Codex is still starting its turn.");
+      message.steerTurnId = this.activeTurnId;
       await this.request("turn/steer", { threadId: this.s.sessionRef, clientUserMessageId: message.id, expectedTurnId: this.activeTurnId, input: await this.content(message.text, message.attachments) });
     } else if (this.s.agent === "grok") {
       if (!this.grokPromptActive) throw new Error("Grok has not started its turn or is finishing it.");
@@ -1254,11 +1269,21 @@ class Runtime {
       this.serverUiRequests.delete(id); this.uiRequests.delete(id); o.event(s, { type: "agent_ui_cancel", request: { id } });
     }
     if (e.method === "thread/closed") this.threadClosed?.();
-    if (e.method === "turn/started") { this.activeTurnId = p.turn?.id; if (!s.busy) { s.busy = true; s.turn = p.turn?.id; o.event(s, { type: "start", turn: s.turn }); } }
+    if (e.method === "turn/started") {
+      this.activeTurnId = p.turn?.id;
+      if (!s.busy) { s.busy = true; s.turn = p.turn?.id; o.event(s, { type: "start", turn: s.turn }); }
+      // Stop can arrive while turn/start is still pending. As soon as Codex
+      // supplies the id, give it the same native interrupt as an established turn.
+      if (s.stopRequested) void this.cancel().catch((error) => o.event(s, { type: "diagnostic", text: "Cancellation is still pending. " + error.message }));
+    }
     if (e.method === "item/agentMessage/delta") o.text(s, p.delta, p.itemId || "answer");
     if (["item/started", "item/completed"].includes(e.method)) {
       const item = p.item;
-      if (item?.type === "userMessage" && e.method === "item/started") o.event(s, { type: "user-message", messageId: item.clientId || item.id, text: item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
+      if (item?.type === "userMessage" && e.method === "item/started") {
+        const messageId = item.clientId || item.id;
+        s.messageQueue?.confirmSteering(messageId, turnId || this.activeTurnId);
+        o.event(s, { type: "user-message", messageId, text: item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") || "", delivery: "send" });
+      }
       else if (item?.type === "agentMessage" && e.method === "item/completed") o.text(s, item.text, item.id, true);
       else if (item && !["agentMessage", "userMessage"].includes(item.type)) o.tool(s, item.id, item.type === "commandExecution" ? item.command : item.type.replace(/([A-Z])/g, " $1"),
         item.aggregatedOutput || item.text || JSON.stringify(item), e.method === "item/completed" ? "done" : "running");
@@ -1401,6 +1426,9 @@ async function ensureRuntime(owner, s) {
     await s.runtime.reconfigureCodex();
     return s.runtime;
   }
+  // A disconnected runtime may still have a live agent process. Never replace
+  // its handle until the shared single-flight reaper has finished.
+  await owner.reapProcess(s);
   const runtime = new Runtime(owner, s); s.runtime = runtime;
   runtime.ready = runtime.initialize().catch(async (error) => { runtime.close(error.message); if (runtime.child === s.process) await owner.kill(runtime.child); throw error; });
   await runtime.ready;

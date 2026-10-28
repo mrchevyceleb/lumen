@@ -2199,16 +2199,25 @@ class Sessions {
     if (force) {
       s.stopping = true;
       clearTimeout(s.stopTimer);
+      let failure;
       try {
         s.runtime?.close("Force stopped. Conversation history is retained.");
         if (s.piClosingChild) await this.kill(s.piClosingChild, true);
-        if (s.process) { await this.kill(s.process, true); s.process = null; s.piRpcProcess = null; }
+        await this.reapProcess(s);
+        s.piRpcProcess = null;
         if (s.pty) { const terminal = s.pty; s.pty = null; terminal.kill(); }
         s.nativeOwned = false; clearInterval(s.nativeHistoryTimer);
         this.event(s, { type: "native-owner", nativeOwned: false });
         s.piNativeBridge?.close(); s.piNativeBridge = null;
         this.rejectPiCommands(s, "Force stopped.");
-      } finally { s.stopping = false; s.stopRequested = false; }
+      } catch (error) { failure = error; }
+      finally { s.stopping = false; s.stopRequested = !!failure; }
+      if (failure) {
+        // Keep the failed stop actionable. The runtime is closed, but the child
+        // handle remains available for an explicit Force stop retry.
+        this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: true });
+        throw failure;
+      }
       this.finish(s, 130);
       this.event(s, { type: "stop-state", stopping: false, forceStopAvailable: false });
       return;
@@ -2216,18 +2225,43 @@ class Sessions {
     if (s.stopRequested || !s.busy) return;
     s.stopRequested = true;
     this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: false });
-    s.stopTimer = setTimeout(() => { if (s.stopRequested) this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: true }); }, 10000);
+    s.stopTimer = setTimeout(() => {
+      if (!s.stopRequested || s.stopping) return;
+      this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: true });
+      // A wedged Codex cannot answer turn/interrupt. Stop still has to end the
+      // turn: use the existing per-chat force stop, which retains its history.
+      if (s.agent === "codex") void this.stop(id, true).catch((error) => this.event(s, { type: "error", message: error.message }));
+    }, 10000);
     try {
       if (s.agent === "pi" && s.piNativeBridge) { this.writePiBridge(s, { id: uuid(), type: "abort" }); s.pty?.write("\x1b"); }
       else if (s.agent === "shell" || s.nativeOwned) s.pty?.write("\x03");
       else if (s.runtime) await s.runtime.cancel();
-    } catch (error) { this.event(s, { type: "diagnostic", text: "Cancellation is still pending. " + error.message }); }
+    } catch (error) { if (!s.stopping && s.stopRequested) this.event(s, { type: "diagnostic", text: "Cancellation is still pending. " + error.message }); }
+  }
+  reapProcess(s, child) {
+    const expected = child || s.process;
+    if (s.processReap) return child && s.processReapChild !== child ? Promise.resolve() : s.processReap;
+    if (!expected || s.process !== expected) return Promise.resolve();
+    s.processReapChild = expected;
+    s.processReap = this.kill(expected, true).then(() => {
+      if (s.process === expected) s.process = null;
+    }).finally(() => {
+      if (s.processReapChild === expected) { s.processReap = null; s.processReapChild = null; }
+    });
+    return s.processReap;
   }
   async kill(child, forceTree = false) {
     if (!child.pid || child.exitCode !== null || child.signalCode !== null)
       return;
     let timer, killError;
     const exited = new Promise((resolve) => child.once("exit", resolve));
+    const waitForExit = (message) => {
+      clearTimeout(timer);
+      return Promise.race([
+        exited,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), 5000); }),
+      ]);
+    };
     try {
       if (process.platform === "win32" && forceTree) {
         try {
@@ -2242,15 +2276,14 @@ class Sessions {
         }
       } else child.kill("SIGTERM");
       if (child.exitCode === null && child.signalCode === null)
-        await Promise.race([
-          exited,
-          new Promise((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error(killError ? "Could not stop the process tree: " + strip(killError.stderr || killError.message) : "Process did not exit after stopping.")),
-              5000,
-            );
-          }),
-        ]);
+        await waitForExit(killError ? "Could not stop the process tree: " + strip(killError.stderr || killError.message) : "Process did not exit after stopping.");
+    } catch (error) {
+      if (!forceTree || process.platform === "win32" || child.exitCode !== null || child.signalCode !== null) throw error;
+      // A graceful signal is not a bounded stop on Unix. Escalate once, then
+      // leave the child's handle and Force stop state intact if even this fails.
+      child.kill("SIGKILL");
+      if (child.exitCode === null && child.signalCode === null)
+        await waitForExit("Process did not exit after a hard stop. Use Force stop to retry.");
     } finally {
       clearTimeout(timer);
     }
@@ -2271,7 +2304,7 @@ class Sessions {
     s.piNativeBridge?.close();
     s.terminalState?.dispose();
     if (s.shell) await this.kill(s.shell, true);
-    if (s.process) await this.kill(s.process, true);
+    await this.reapProcess(s);
     if (s.piClosingChild) await this.kill(s.piClosingChild, true).catch((error) => this.event(s, { type: "diagnostic", text: "Pi's disconnected process could not be stopped: " + error.message }));
     for (const watch of s.accountWatches || []) watch.close();
     await this.accounts?.syncClaude(s);
