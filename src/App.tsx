@@ -1043,18 +1043,22 @@ export default function App() {
               t.phase = undefined;
               t.phaseText = undefined;
               t.turn = e.turn;
-              t.started = Date.now();
+              t.started = e.startedAt || Date.now();
+              t.lastActivityAt = e.lastActivityAt || t.started;
+              t.stalled = false;
             } else if (e.type === "done") {
               t.busy = false;
               t.stopping = false;
               t.forceStopAvailable = false;
               t.interrupted = e.code === 130;
               t.phase = undefined;
+              t.stalled = false;
               t.phaseText = undefined;
               t.exitCode = e.code;
               t.duration = Date.now() - (t.started || Date.now());
               if (e.sessionRef) t.sessionRef = e.sessionRef;
             } else if (e.type === "stop-state") { t.stopping = e.stopping; t.forceStopAvailable = e.forceStopAvailable; }
+            else if (e.type === "activity") { t.lastActivityAt = e.lastActivityAt; t.stalled = e.stalled; if (e.startedAt) t.started = e.startedAt; }
             else if (e.type === "native-owner") t.nativeOwned = e.nativeOwned;
             else if (e.type === "terminal-ready") t.terminalReady = true;
             else if (e.type === "tool-terminal-release") { t.toolTerminals = t.toolTerminals?.filter((terminal) => terminal.id !== e.terminalId); if (t.terminalId === e.terminalId) t.terminalId = t.toolTerminals?.[0]?.id; }
@@ -1410,6 +1414,7 @@ export default function App() {
     const tab = find(id);
     if (!tab) throw Object.assign(new Error("This task is no longer open. Use list to find available chats."), { status: 404 });
     if (action === "get") return view(tab);
+    let outcome: Record<string, any> = {};
     if (action === "focus") {
       if (!tab.projectless) rememberProject(projectRootOf(tab), undefined, true);
       setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
@@ -1431,8 +1436,10 @@ export default function App() {
     } else {
       if (tab.mode !== "rich") throw new Error("Return this chat to readable view to control it. Native terminal interaction stays in Lumen.");
       if (action === "message") {
-        if (await submit(tab, body.id, body.text)) return { ...view(tab), messageId: body.id, reused: true };
-      } else if (action === "queue" || action === "resume") await api("session:queue-action", tab.id, body.messageId || "", action === "resume" ? "resume" : body.action);
+        const reused = await submit(tab, body.id, body.text);
+        if (reused && !tab.queuedMessages?.some((message) => message.id === body.id)) return { ...view(tab), messageId: body.id, reused: true, ...(body.delivery === "steer" ? { steered: tab.messages.find((message) => message.id === body.id)?.delivery === "steer" } : {}) };
+        if (body.delivery === "steer") outcome = tab.busy || reused ? await api("session:queue-action", tab.id, body.id, "steer") : { steered: false, reason: "No active turn; the message is sending normally." };
+      } else if (action === "queue" || action === "resume") outcome = await api("session:queue-action", tab.id, body.messageId || "", action === "resume" ? "resume" : body.action);
       else if (action === "stop") await api("session:stop", tab.id);
       else if (action === "models") return api("session:models", tab.id);
       else if (action === "configure") await api("session:configure", tab.id, body);
@@ -1452,7 +1459,7 @@ export default function App() {
     }
     if (action !== "message") audit(tab, `Local agent requested ${action}${action === "queue" ? ` · ${body.action}` : ""}.`);
     await settleControl(); persist();
-    return { ...view(find(id) || tab), ...(action === "message" ? { messageId: body.id } : {}) };
+    return { ...view(find(id) || tab), ...outcome, ...(action === "message" ? { messageId: body.id } : {}) };
   });
   const openEditorDoc = async (normalized: string, folder: string) => {
     // A split only makes sense with room for both halves. On a narrow window the

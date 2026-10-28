@@ -121,6 +121,8 @@ export interface Tab {
   sessionRef?: string;
   turn?: string;
   started?: number;
+  lastActivityAt?: number;
+  stalled?: boolean;
   duration?: number;
   cwd?: string;
   cwdVersion?: number;
@@ -218,6 +220,9 @@ export interface SessionEvent {
   key?: string;
   replace?: boolean;
   turn?: string;
+  startedAt?: number;
+  lastActivityAt?: number;
+  stalled?: boolean;
   title?: string;
   detail?: string;
   state?: string;

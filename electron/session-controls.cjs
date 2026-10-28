@@ -512,6 +512,8 @@ class Runtime {
     if (this.closed) return;
     const unfinished = code !== undefined && this.s.runtime === this && this.s.busy && !this.s.stopping;
     this.closed = true;
+    clearInterval(this.socketPing);
+    this.socketPing = null;
     this.steeredInputs.clear(); this.clearSteeredResult();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
@@ -619,6 +621,9 @@ class Runtime {
       }
       return;
     }
+    // Count real engine events, not transport keepalives or Lumen's own control
+    // replies. A live process with no progress must become visibly stalled.
+    if (!(e.type === "stream_event" && e.event?.type === "ping")) o.noteActivity(s);
     if (claude) {
       if (e.session_id && e.session_id !== s.sessionRef) { o.event(s, { type: "error", message: "Claude returned a different conversation identifier. Reconnect the saved chat before sending more messages." }); return; }
       if (typeof e.cwd === "string" && path.isAbsolute(e.cwd) && path.resolve(e.cwd) !== path.resolve(s.cwd || s.root)) {
@@ -761,7 +766,28 @@ class Runtime {
           });
         } catch (error) { if (Date.now() >= deadline) throw new Error("Codex's shared server did not become ready. " + error.message); await new Promise((resolve) => setTimeout(resolve, 100)); }
       }
-      this.socket.on("message", (message) => { try { this.receive(JSON.parse(message.toString())); } catch (error) { o.event(s, { type: "diagnostic", text: "Codex protocol: " + error.message }); } });
+      this.socket.on("message", (message) => {
+        if (this.protocolFailed) return;
+        let event;
+        try { event = JSON.parse(message.toString()); }
+        catch (error) { o.event(s, { type: "diagnostic", text: "Codex protocol: " + error.message }); return; }
+        try { this.receive(event); }
+        catch (error) {
+          this.protocolFailed = true;
+          o.event(s, { type: "error", message: `Lumen could not process a Codex event (${error.message}). The run was closed; conversation history is retained.` });
+          o.finish(s, 1);
+          void o.stop(s.id, true).catch((stopError) => o.event(s, { type: "error", message: stopError.message }));
+        }
+      });
+      this.socketAlive = true;
+      this.socket.on("pong", () => { this.socketAlive = true; });
+      this.socketPing = setInterval(() => {
+        if (this.closed || !this.socket) return;
+        if (!this.socketAlive) { this.socket.terminate(); return; }
+        this.socketAlive = false;
+        try { this.socket.ping(); } catch { this.socket.terminate(); }
+      }, 30000);
+      this.socketPing.unref?.();
       this.socket.on("close", () => {
         this.close("Codex disconnected. Reconnect this saved conversation.", 1);
         // A dropped transport does not stop the agent. Reap its child now, and
@@ -1047,7 +1073,9 @@ class Runtime {
     await this.owner.attachments.resolve(this.s.controlId, attachments);
   }
   async userInput(text, id, attachments = [], acknowledge = true, preparedContent) {
+    const turn = this.s.turn;
     const content = preparedContent ?? (attachments.length ? await this.content(text, attachments) : text);
+    if (this.closed || this.s.stopRequested || this.s.stopping || !this.s.busy || this.s.turn !== turn) throw new Error("The turn was stopped before the message was sent.");
     id ||= uuid();
     const input = { type: "user", uuid: id, session_id: this.s.sessionRef || "", parent_tool_use_id: null, message: { role: "user", content } };
     if (!acknowledge) {
@@ -1072,8 +1100,11 @@ class Runtime {
     if (this.closed || !this.s.busy) throw new Error("This turn has finished.");
     if (this.s.agent === "codex") {
       if (!this.activeTurnId) throw new Error("Codex is still starting its turn.");
-      message.steerTurnId = this.activeTurnId;
-      await this.request("turn/steer", { threadId: this.s.sessionRef, clientUserMessageId: message.id, expectedTurnId: this.activeTurnId, input: await this.content(message.text, message.attachments) });
+      const turn = this.s.turn, activeTurnId = this.activeTurnId;
+      const input = await this.content(message.text, message.attachments);
+      if (this.closed || this.s.stopRequested || this.s.stopping || !this.s.busy || this.s.turn !== turn || this.activeTurnId !== activeTurnId) throw new Error("The turn was stopped before the correction was sent.");
+      message.steerTurnId = activeTurnId;
+      await this.request("turn/steer", { threadId: this.s.sessionRef, clientUserMessageId: message.id, expectedTurnId: activeTurnId, input });
     } else if (this.s.agent === "grok") {
       if (!this.grokPromptActive) throw new Error("Grok has not started its turn or is finishing it.");
       if (message.attachments?.length) throw new Error("Grok interjections accept text only. Keep this image message queued for the next turn.");
@@ -1098,6 +1129,8 @@ class Runtime {
   }
   async prompt(text, message = {}) {
     const { s, owner: o } = this;
+    const turn = s.turn;
+    if (this.closed || s.stopRequested || s.stopping || !s.busy) throw new Error("The turn was stopped before the message was sent.");
     this.hadPrompt = true;
     if (s.agent === "codex") o.event(s, { type: "session", sessionRef: s.sessionRef });
     if (s.agent === "claude") await this.userInput(text, message.id, message.attachments);
@@ -1116,7 +1149,9 @@ class Runtime {
         if (s.catalog) { s.catalog = { ...s.catalog, currentSpeed: "default" }; o.event(s, { type: "models", catalog: s.catalog }); }
       }
       const collaborationMode = s.workMode ? { mode: s.workMode, settings: { model: s.model || defaultModel, reasoning_effort: s.effort || null, developer_instructions: null } } : undefined;
-      const result = await this.request("turn/start", { threadId: s.sessionRef, clientUserMessageId: message.id, input: await this.content(text, message.attachments), disabledPluginIds, ...(collaborationMode ? { collaborationMode } : {}), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}), ...(s.serviceTier ? { serviceTier: s.serviceTier } : {}) });
+      const input = await this.content(text, message.attachments);
+      if (this.closed || s.stopRequested || s.stopping || !s.busy || s.turn !== turn) throw new Error("The turn was stopped before the message was sent.");
+      const result = await this.request("turn/start", { threadId: s.sessionRef, clientUserMessageId: message.id, input, disabledPluginIds, ...(collaborationMode ? { collaborationMode } : {}), ...(s.model ? { model: s.model } : {}), ...(s.effort ? { effort: s.effort } : {}), ...(s.serviceTier ? { serviceTier: s.serviceTier } : {}) });
       if (s.busy && result.turn?.status === "inProgress") this.activeTurnId = result.turn.id;
     }
     else {

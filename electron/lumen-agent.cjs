@@ -11,8 +11,9 @@ const help = `Lumen agent control — all tasks are visible in the app
   lumen-agent create --agent claude --root "C:\\repo" --worktree agent/login-fix --base main --model MODEL --effort high --text "Fix login"
   lumen-agent create --agent claude --text-file task.txt
   lumen-agent get TASK_ID
-  lumen-agent send TASK_ID --text "Continue with tests"
-  lumen-agent steer TASK_ID MESSAGE_ID
+  lumen-agent send TASK_ID --text "Continue with tests"   (queue for the next turn)
+  lumen-agent steer TASK_ID --text "Correction for the active run"
+  lumen-agent steer TASK_ID MESSAGE_ID   (steer an existing queued message)
   lumen-agent remove TASK_ID MESSAGE_ID
   lumen-agent resume|stop|focus|close TASK_ID
   lumen-agent models TASK_ID
@@ -41,7 +42,8 @@ Options: --connection FILE, --id UUID (retry-safe task/message ID), --owner NAME
   --cwd FOLDER, --account-id UUID, --worktree BRANCH, --base REF.
   --worktree creates/reuses its dedicated checkout and needs --root.
   Omit --root for a chat without a workspace.
-Messages queue by default. Steer names an existing queued message. Watch emits
+Messages queue by default. Use steer --text to correct the active run in one
+step, or steer MESSAGE_ID for an existing queued message. Watch emits
 JSON snapshots as the visible transcript changes; it exits when idle or awaiting
 your input. Use get to inspect its status. Lumen must be running.
 Set LUMEN_CONTROL_FILE for portable/custom profiles. Never share its token.`;
@@ -150,7 +152,12 @@ async function main() {
   if (command === "list") result = await request("GET", "/v1/tasks");
   else if (command === "create") { body.id ||= crypto.randomUUID(); result = await request("POST", "/v1/tasks", body); }
   else if (command === "get" || command === "models") result = await request("GET", command === "get" ? route : route + "/models");
-  else if (command === "send") { body.id ||= crypto.randomUUID(); result = await request("POST", route + "/messages", body); }
+  else if (command === "send" || command === "steer" && body.text !== undefined) {
+    if (command === "steer" && messageId) throw new Error("Use steer TASK_ID --text for a new correction, or steer TASK_ID MESSAGE_ID without --text for a queued message.");
+    body.id ||= crypto.randomUUID();
+    if (command === "steer") body.delivery = "steer";
+    result = await request("POST", route + "/messages", body);
+  }
   else if (command === "steer" || command === "remove") result = await request("POST", route + "/queue", { messageId, action: command });
   else if (command === "answer") result = await request("POST", route + "/answer", { requestId: messageId, response: JSON.parse(options.response || "{}") });
   else if (["resume", "stop", "focus", "close", "rename", "configure"].includes(command)) result = await request("POST", route + "/" + command, body);
@@ -159,8 +166,10 @@ async function main() {
     if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(interval) || interval < 250) throw new Error("Use a positive timeout in seconds and interval of at least 250 ms.");
     const deadline = Date.now() + timeout * 1000; let previous = "";
     while (Date.now() < deadline) {
-      const value = await request("GET", route), serialized = JSON.stringify(value);
-      if (serialized !== previous) console.log(serialized);
+      const value = await request("GET", route), comparable = { ...value };
+      delete comparable.silentMs;
+      const serialized = JSON.stringify(comparable);
+      if (serialized !== previous) console.log(JSON.stringify(value));
       previous = serialized;
       if (value.pendingRequests.length || (!value.busy && (!value.queuedMessages.length || value.queuePaused))) return;
       await new Promise((resolve) => setTimeout(resolve, interval));

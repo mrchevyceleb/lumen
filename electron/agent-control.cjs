@@ -12,7 +12,7 @@ function validate(action, body) {
   if (!object(body)) throw new ControlError("Send a JSON object.");
   const fields = {
     create: ["id", "agent", "name", "owner", "root", "cwd", "worktree", "base", "model", "effort", "workMode", "serviceTier", "accountId", "text"],
-    message: ["id", "text"], queue: ["messageId", "action"], configure: ["model", "effort", "workMode", "serviceTier"],
+    message: ["id", "text", "delivery"], queue: ["messageId", "action"], configure: ["model", "effort", "workMode", "serviceTier"],
     rename: ["name"], answer: ["requestId", "response"], stop: [], focus: [], close: [], resume: [],
   }[action];
   if (!fields) return body;
@@ -37,7 +37,10 @@ function validate(action, body) {
   }
   if (action === "message" || (action === "create" && body.text !== undefined)) {
     if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 200000) throw new ControlError("Enter a message under 200,000 characters.");
-    if (action === "message") body.id ||= crypto.randomUUID();
+    if (action === "message") {
+      body.id ||= crypto.randomUUID();
+      if (body.delivery !== undefined && !["queue", "steer"].includes(body.delivery)) throw new ControlError("Delivery must be queue or steer.");
+    }
   }
   if (action === "queue" && (!body.messageId || !["steer", "remove"].includes(body.action))) throw new ControlError("Choose a queued messageId and steer or remove.");
   if (action === "rename" && !body.name?.trim()) throw new ControlError("Enter a task name.");

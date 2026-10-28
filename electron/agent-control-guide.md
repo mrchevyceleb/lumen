@@ -15,10 +15,13 @@ lumen create --agent claude --root 'C:\repo' --name 'Write the tests' --owner 'T
 lumen create --agent codex --root 'C:\repo' --worktree agent/login-fix --base main --model MODEL_ID --effort high --name 'Fix login' --owner 'Task <your id>' --text 'Fix the login bug'
 lumen watch TASK_ID          # follow it until it finishes or asks a question
 lumen send TASK_ID --text 'Now run the full suite'
+lumen steer TASK_ID --text 'Correction for the active run'
 lumen guide                  # this guide
 ```
 
 Set `--owner` to name yourself on tasks you create, so the user can see which agent is managing them. Everything you create or message is a real visible chat. Do not stop or close the user's own chats, and do not message your own task ID.
+
+**`send` queues for the next turn; it does not steer a busy agent.** To correct the active run now, use `lumen steer TASK_ID --text 'correction'` in one step. Do not pipe the JSON result to `Out-Null`: check `steered: true`, or `steered: false` with the reason it remains queued for the next turn.
 
 ## CLI
 
@@ -31,7 +34,9 @@ node $lumen create --agent claude --root 'C:\repo' --name 'Fix login' --owner 'M
 node $lumen watch TASK_ID
 node $lumen get TASK_ID
 node $lumen send TASK_ID --text 'Continue with the next change'
-# Busy messages queue by default; send returns messageId.
+# send queues for the next turn. Correct a busy agent now in one step:
+node $lumen steer TASK_ID --text 'Correction for the active run'
+# Or steer a message already in the queue, using the messageId returned by send:
 node $lumen steer TASK_ID MESSAGE_ID
 node $lumen remove TASK_ID MESSAGE_ID
 node $lumen stop TASK_ID
@@ -50,7 +55,7 @@ Worktree creation is serialized and journaled by Lumen's main process before Git
 
 Task IDs are stable across normal app restarts. List includes all open chats, including ones created by a human. Native chats can be inspected or focused, but must return to readable view in the app before sending prompts or changing controls. Shell commands retain their PowerShell process and must finish before another is sent. Closing requires an idle readable chat with an empty queue. Closing removes that tab just as closing it in the UI does; saved files and native CLI history remain.
 
-Create and send accept `--id UUID` for retry safety. Save your chosen UUID before sending a request. Retrying a create with the same open task ID returns that task and does not resend an initial prompt already in its transcript or queue. If initial submission fails before acceptance, create returns the opened task with `deliveryError`; retry with the same ID and text to submit the missing prompt. Retrying a send with a retained transcript/queue message ID returns the previous message. A timeout is an uncertain result: read/list before retrying. IDs of closed tasks or messages outside the saved transcript are not retained forever.
+Create, send, and direct steer (`steer --text`) accept `--id UUID` for retry safety. Save your chosen UUID before sending a request. Retrying a create with the same open task ID returns that task and does not resend an initial prompt already in its transcript or queue. If initial submission fails before acceptance, create returns the opened task with `deliveryError`; retry with the same ID and text to submit the missing prompt. Retrying a send or direct steer with a retained transcript/queue message ID returns the previous message without duplicating it; a still-queued direct steer retries steering. A timeout is an uncertain result: read/list before retrying. IDs of closed tasks or messages outside the saved transcript are not retained forever.
 
 Watch prints JSON snapshots only when the transcript or status changes. It exits at idle, a paused queue, failure, or an input request; default timeout is 600 seconds. A watch timeout leaves the task running. Inspect `status`, `exitCode`, `pendingRequests`, and `queuePaused` to choose the next action. Agent questions and plan approval are also visible in Lumen. To answer through the API, provide the same native response shape that the dialog sends (`value`, `confirmed`, `answers` with optional `answerLists`/`notes`, or `cancelled: true` as appropriate):
 
@@ -79,7 +84,7 @@ Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON
 | GET /v1/tasks | `{ tasks: [...] }` with metadata, queues, context usage, pending questions |
 | POST /v1/tasks | `id?`, `agent?`, `root?`, `cwd?`, `worktree?`, `base?`, `name?`, `owner?`, `accountId?`, `model?`, `effort?`, `workMode?`, `serviceTier?`, `text?`; returns visible task |
 | GET /v1/tasks/ID | Metadata plus the last 200 visible messages (up to 80,000 characters each); `transcriptLimited` reports truncation |
-| POST /v1/tasks/ID/messages | `{ id?: UUID, text: string }`; returns `messageId`, queue and current task |
+| POST /v1/tasks/ID/messages | `{ id?: UUID, text: string, delivery?: "queue" or "steer" }`; returns `messageId`, queue and current task. `delivery: "steer"` creates and steers a correction in one request. |
 | POST /v1/tasks/ID/queue | `{ messageId: UUID, action: "steer" or "remove" }` |
 | POST /v1/tasks/ID/resume | `{}`; resumes a paused queue |
 | POST /v1/tasks/ID/stop | `{}`; stops the turn and pauses its queue |

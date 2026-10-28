@@ -162,6 +162,14 @@ export default function Conversation({
   const request = useRef(0);
   const busyRef = useRef(tab.busy);
   busyRef.current = tab.busy;
+  const [activityNow, setActivityNow] = useState(Date.now());
+  useEffect(() => {
+    setActivityNow(Date.now());
+    if (!tab.busy) return;
+    const timer = setInterval(() => setActivityNow(Date.now()), 10000);
+    return () => clearInterval(timer);
+  }, [tab.busy, tab.lastActivityAt]);
+  const silentMinutes = tab.lastActivityAt ? Math.max(2, Math.floor((activityNow - tab.lastActivityAt) / 60000)) : 2;
   const loadedCommands = useRef(false);
   const loadingCommands = useRef<Promise<{ inventory?: CommandInventory; error?: string }> | null>(null);
   const commandToken = input.match(/^([/$])([^\s]*)([\s\S]*)$/);
@@ -320,7 +328,16 @@ export default function Conversation({
         top: scroll.current.scrollHeight,
         behavior: "instant",
       });
-  }, [messages, tab.busy]);
+  }, [messages, tab.busy, tab.stalled]);
+  useEffect(() => {
+    const el = scroll.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (stick.current) el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     stick.current = true;
     setAway(false);
@@ -574,15 +591,21 @@ export default function Conversation({
               />
             ))}
             {(tab.busy || tab.phase === "compacting") && (
-              <div className="working-indicator" role="status" aria-live="polite">
-                {tab.phase ? <TerminalSquare size={13} /> : <span className="thinking-dots">
-                  <i />
-                  <i />
-                  <i />
-                </span>}{" "}
-                {tab.phase === "retrying" ? (tab.phaseText || "Reconnecting…") : tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
-                  ? "Running command"
-                  : `${agentNames[tab.agent]} is working`}
+              <div className={`working-indicator${tab.stalled ? " stalled" : ""}`} role="status" aria-live="polite">
+                {tab.stalled ? <>
+                  <AlertCircle size={14} />
+                  <span>No updates for {silentMinutes}m. The run is still open.</span>
+                  {!tab.stopping && <button className="stall-stop" onClick={onStop}><Square size={11} fill="currentColor" />Stop run</button>}
+                </> : <>
+                  {tab.phase ? <TerminalSquare size={13} /> : <span className="thinking-dots">
+                    <i />
+                    <i />
+                    <i />
+                  </span>}{" "}
+                  {tab.phase === "retrying" ? (tab.phaseText || "Reconnecting…") : tab.phase === "compacting" ? "Compacting context…" : tab.phase === "finishing" ? "Finishing Grok CLI…" : tab.phase === "waiting" ? "Waiting for Grok to finish…" : tab.agent === "shell"
+                    ? "Running command"
+                    : `${agentNames[tab.agent]} is working`}
+                </>}
               </div>
             )}
             {!tab.busy && tab.duration !== undefined && (

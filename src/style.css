@@ -1834,6 +1834,39 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
   align-items: center;
   margin: 24px 0;
 }
+.working-indicator.stalled {
+  color: var(--text);
+  flex-wrap: wrap;
+  padding: 11px 12px;
+  margin: 18px 0;
+  border: 1px solid #d7a75c44;
+  border-radius: 10px;
+  background: #d7a75c0d;
+}
+.working-indicator.stalled > svg {
+  color: #d7a75c;
+  flex: 0 0 auto;
+}
+.stall-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 5px 9px;
+  border: 1px solid #d7a75c55;
+  border-radius: 7px;
+  color: var(--text);
+  background: #d7a75c14;
+  font-size: 10px;
+  transition: transform 140ms ease, background 140ms ease;
+}
+.stall-stop:hover {
+  transform: translateY(-1px);
+  background: #d7a75c26;
+}
+.stall-stop:active {
+  transform: translateY(0) scale(0.97);
+}
 .thinking-dots {
   display: flex;
   gap: 3px;

@@ -26,6 +26,10 @@ const OMIT = new Set([
   "__pycache__",
 ]);
 const uuid = () => crypto.randomUUID();
+const ACTIVITY_STALL_MS = 120000;
+const ACTIVITY_TICK_MS = 5000;
+const ACTIVITY_EMIT_MS = 15000;
+const MAX_JSON_RECORD_BYTES = 64 * 1024 * 1024;
 const inside = (root, target) => {
   const rel = path.relative(root, target);
   return (
@@ -1248,7 +1252,49 @@ class Sessions {
       return { model: s.model, effort: s.effort, workMode: s.workMode, serviceTier: s.serviceTier || "", catalog: s.catalog };
     } finally { s.setting = false; }
   }
+  startActivityMonitor(s) {
+    clearInterval(s.activityTimer);
+    const now = Date.now();
+    s.turnStartedAt = now;
+    s.lastActivityAt = now;
+    s.activityEmittedAt = now;
+    s.stalled = false;
+    s.activityTimer = setInterval(() => {
+      if (!s.busy) return;
+      const stalled = Date.now() - s.lastActivityAt >= ACTIVITY_STALL_MS;
+      if (stalled !== s.stalled) {
+        s.stalled = stalled;
+        this.emitActivity(s);
+      }
+    }, ACTIVITY_TICK_MS);
+    s.activityTimer.unref?.();
+  }
+  noteActivity(s) {
+    if (!s.busy) return;
+    s.lastActivityAt = Date.now();
+    // Keep renderer silence honest even for native events with no transcript row,
+    // without flooding recovery or redraws on every streamed token.
+    if (s.stalled || Date.now() - (s.activityEmittedAt || 0) >= ACTIVITY_EMIT_MS) {
+      s.stalled = false;
+      this.emitActivity(s);
+    }
+  }
+  emitActivity(s) {
+    s.activityEmittedAt = Date.now();
+    // Activity is ephemeral health, not durable transcript history.
+    this.emit({ id: s.id, type: "activity", startedAt: s.turnStartedAt, lastActivityAt: s.lastActivityAt, stalled: !!s.stalled });
+  }
   event(s, event) {
+    if (event.type === "start") {
+      this.startActivityMonitor(s);
+      event = { ...event, startedAt: s.turnStartedAt, lastActivityAt: s.lastActivityAt };
+    }
+    if (event.type === "done") {
+      clearInterval(s.activityTimer);
+      s.activityTimer = null;
+      s.stalled = false;
+    }
+    if (["text", "tool", "error", "diagnostic"].includes(event.type)) this.noteActivity(s);
     if (event.type === "history") {
       const saved = this.recovery?.state.tabs.find((tab) => tab.controlId === s.controlId)?.messages || s.savedTab?.messages;
       event = { ...event, messages: require("./session-history.cjs").preserveAttachments(event.messages, saved) };
@@ -1447,7 +1493,7 @@ class Sessions {
         const deliverContext = !s.lumenContextSent && !/^\s*[\/$]/.test(prompt)
           && fsSync.existsSync(path.join(this.dataDir, "agent-control.json"));
         if (deliverContext) {
-          expanded = `[You are running inside Lumen as task ${s.controlId}. You can talk to and orchestrate the other Lumen agents, and drive this chat's in-app browser, from your shell with the \`lumen\` command (already on PATH and authenticated): \`lumen whoami\`, \`lumen list\`, \`lumen create --agent codex --root <folder> --name <title> --text <task>\`, \`lumen send <task-id> --text <message>\`, \`lumen watch <task-id>\`, \`lumen get <task-id>\`, \`lumen stop|focus|rename|configure <task-id> …\`. Every chat you create or message is a real visible chat the user can watch. Browser: \`lumen browser open --chat-id ${s.controlId} --url <url>\`, then \`lumen browser snapshot <tab-id>\` to see clickable elements, \`lumen browser click <tab-id> --ref N\` (or --selector/--text/--x --y), \`type\`, \`press\`, \`scroll\`, \`inspect\`, \`screenshot --output <file>\`. Your mouse moves visibly in the pane while you drive it. Run \`lumen guide\` for the full guide. Use this only when the task calls for other agents or browser testing.]\n\n${expanded}`;
+          expanded = `[You are running inside Lumen as task ${s.controlId}. You can talk to and orchestrate the other Lumen agents, and drive this chat's in-app browser, from your shell with the \`lumen\` command (already on PATH and authenticated): \`lumen whoami\`, \`lumen list\`, \`lumen create --agent codex --root <folder> --name <title> --text <task>\`, \`lumen send <task-id> --text <message>\` (queues for the next turn), \`lumen steer <task-id> --text <correction>\` (corrects the active run immediately in one step), \`lumen watch <task-id>\`, \`lumen get <task-id>\`, \`lumen stop|focus|rename|configure <task-id> …\`. Every chat you create or message is a real visible chat the user can watch. Browser: \`lumen browser open --chat-id ${s.controlId} --url <url>\`, then \`lumen browser snapshot <tab-id>\` to see clickable elements, \`lumen browser click <tab-id> --ref N\` (or --selector/--text/--x --y), \`type\`, \`press\`, \`scroll\`, \`inspect\`, \`screenshot --output <file>\`. Your mouse moves visibly in the pane while you drive it. Run \`lumen guide\` for the full guide. Use this only when the task calls for other agents or browser testing.]\n\n${expanded}`;
         }
         await this.agentTurn(s, expanded, queuedMessage);
         if (deliverContext) s.lumenContextSent = true;
@@ -1530,6 +1576,12 @@ class Sessions {
   }
   child(s, args, env = {}) {
     const launch = profiledLaunch(s, [...args, ...extraOptions(s)], resolveLauncher);
+    const environment = accountEnvironment(s, s.profileEnvironment || process.env);
+    // Claude defaults stdio MCP calls to a 30-minute silent window. Keep an
+    // explicit user/server override, but do not let an unresponsive tool hide
+    // behind that window in Lumen. Native progress notifications reset it.
+    if (s.agent === "claude" && environment.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT === undefined)
+      environment.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT = "300000";
     const child = spawn(
       launch.file,
       launch.args,
@@ -1537,7 +1589,7 @@ class Sessions {
         cwd: s.cwd || s.root,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...accountEnvironment(s, s.profileEnvironment || process.env), NO_COLOR: "1", ...env },
+        env: { ...environment, NO_COLOR: "1", ...env },
       },
     );
     s.process = child;
@@ -1558,40 +1610,64 @@ class Sessions {
     return child;
   }
   jsonStream(s, child, handler) {
-    let buffer = "";
+    let buffer = "", bufferBytes = 0, broken = false;
+    const fail = (message) => {
+      if (broken) return;
+      broken = true;
+      this.event(s, { type: "error", message });
+      // A stream that cannot deliver its terminal event must never leave the
+      // turn latched. Finish first so this is an error, not a deliberate Stop.
+      this.finish(s, 1);
+      void this.stop(s.id, true).catch((error) => this.event(s, { type: "error", message: error.message }));
+    };
+    const consume = (line) => {
+      if (broken || !line.trim()) return;
+      let record;
+      try { record = JSON.parse(line); }
+      catch {
+        this.event(s, { type: "diagnostic", text: line.slice(0, 2000) });
+        return;
+      }
+      try { handler(record); }
+      catch (error) { fail(`Lumen could not process a CLI event (${error.message}). The run was closed; conversation history is retained.`); }
+    };
     child.stdout.setEncoding("utf8");
+    const flush = () => {
+      const remaining = buffer;
+      buffer = ""; bufferBytes = 0;
+      if (remaining.trim() && !broken) consume(remaining.replace(/\r$/, ""));
+    };
     child.stdout.on("data", (data) => {
+      if (broken) return;
       buffer += data;
+      bufferBytes += Buffer.byteLength(data, "utf8");
       let pos;
-      while ((pos = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, pos).replace(/\r$/, "");
+      while (!broken && (pos = buffer.indexOf("\n")) >= 0) {
+        const raw = buffer.slice(0, pos);
         buffer = buffer.slice(pos + 1);
-        if (!line.trim()) continue;
-        try {
-          handler(JSON.parse(line));
-        } catch (error) {
-          this.event(s, { type: "diagnostic", text: line.slice(0, 2000) });
-        }
+        bufferBytes -= Buffer.byteLength(raw, "utf8") + 1;
+        consume(raw.replace(/\r$/, ""));
       }
-      if (buffer.length > 8 * 1024 * 1024) {
-        this.event(s, {
-          type: "error",
-          message: "The CLI produced an oversized record.",
-        });
-        this.stop(s.id).catch((error) =>
-          this.event(s, { type: "error", message: error.message }),
-        );
+      // Base64 image results are legitimate and can be much larger than text.
+      // Keep a byte-bounded escape hatch, but never repeatedly request a
+      // graceful cancellation that the wedged runtime may be unable to answer.
+      if (!broken && bufferBytes > MAX_JSON_RECORD_BYTES) {
+        buffer = ""; bufferBytes = 0;
+        fail("The CLI sent a record over Lumen's 64 MB safety limit. The run was closed; conversation history is retained.");
       }
+    });
+    child.stdout.on("error", (error) => fail(`The CLI output stream failed (${error.message}). The run was closed; conversation history is retained.`));
+    child.stdout.on("end", () => {
+      if (s.process !== child || broken) return;
+      flush();
+      // Pi's terminal response can finish the turn while its short cwd sync is
+      // still settling. That is a completed native turn, not an unexpected EOF.
+      const settling = s.agent === "pi" && s.piCwdSyncing && s.piFinishCode !== undefined;
+      if (s.busy && !broken && !settling) fail("The CLI closed its output before finishing the turn. The run was closed; conversation history is retained.");
     });
     child.on("close", (code) => {
       if (s.process !== child) return;
-      if (buffer.trim()) {
-        try {
-          handler(JSON.parse(buffer));
-        } catch {
-          this.event(s, { type: "diagnostic", text: buffer.slice(-2000) });
-        }
-      }
+      flush();
       s.process = null;
       s.piPolicyReady = false;
       s.piMcpSupported = undefined;
@@ -1664,17 +1740,25 @@ class Sessions {
     }
   }
   async agentTurn(s, prompt, message = {}) {
+    const active = () => {
+      if (s.stopRequested || s.stopping || !s.busy) throw new Error("The turn was stopped before the message was sent.");
+    };
+    active();
     if (s.agent === "google") {
       await this.prepareLaunch(s);
+      active();
       return require("./google.cjs").turn(this, s, prompt, message);
     }
     if (s.agent === "pi") {
       await this.ensurePiPolicy(s);
       const images = (await this.attachments?.resolve(s.controlId, message.attachments || []) || []).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
+      active();
       await this.piRpc(s, "prompt", { message: prompt, clientId: message?.id, images });
       return;
     }
-    await (await ensureRuntime(this, s)).prompt(prompt, message);
+    const runtime = await ensureRuntime(this, s);
+    active();
+    await runtime.prompt(prompt, message);
   }
   codexEvent(s, e) {
     if (e.type === "thread.started") {
@@ -1724,6 +1808,13 @@ class Sessions {
       this.event(s, { type: "session", sessionRef: s.sessionRef });
     }
     const event = e.type === "stream_event" ? e.event : e;
+    if (e.type === "system" && e.subtype === "task_progress" && e.tool_use_id) {
+      this.tool(s, e.tool_use_id, "Tool result", e.summary || e.description || "Still running in the background.", "running");
+    }
+    if (e.type === "system" && e.subtype === "task_notification" && e.tool_use_id) {
+      this.tool(s, e.tool_use_id, "Tool result", e.summary || e.output_file || `Background task ${e.status}.`,
+        e.status === "completed" ? "done" : e.status === "stopped" ? "stopped" : "error");
+    }
     if (s.agent === "grok") {
       if (["message_start", "content_block_start"].includes(event?.type) ||
           (event?.type === "content_block_delta" && event.delta?.type !== "text_delta")) {
@@ -1825,6 +1916,12 @@ class Sessions {
     }
   }
   piEvent(s, e) {
+    // Native thinking and incremental tool updates are real progress even when
+    // they produce no rendered transcript row. Control replies and keepalives
+    // must not make a silent run look healthy.
+    const controlOrKeepalive = e.type === "response" || ["ping", "pong", "keepalive", "heartbeat"].includes(e.type) ||
+      e.type === "extension_ui_request" && e.method === "notify" && /^(?:LUMEN_CONTROLS|LUMEN_CONTEXT):/.test(e.message || "");
+    if (!controlOrKeepalive) this.noteActivity(s);
     if (e.type === "extension_error") {
       s.piCommandFailed = true;
       this.event(s, { type: "error", message: e.error || "Pi extension failed." });
@@ -2228,9 +2325,10 @@ class Sessions {
     s.stopTimer = setTimeout(() => {
       if (!s.stopRequested || s.stopping) return;
       this.event(s, { type: "stop-state", stopping: true, forceStopAvailable: true });
-      // A wedged Codex cannot answer turn/interrupt. Stop still has to end the
-      // turn: use the existing per-chat force stop, which retains its history.
-      if (s.agent === "codex") void this.stop(id, true).catch((error) => this.event(s, { type: "error", message: error.message }));
+      // A wedged CLI can be unable to answer its native interrupt. Stop has the
+      // same bounded meaning for every engine: clean up the runtime and retain
+      // the conversation instead of leaving the composer blocked forever.
+      void this.stop(id, true).catch((error) => this.event(s, { type: "error", message: error.message }));
     }, 10000);
     try {
       if (s.agent === "pi" && s.piNativeBridge) { this.writePiBridge(s, { id: uuid(), type: "abort" }); s.pty?.write("\x1b"); }
@@ -2292,6 +2390,7 @@ class Sessions {
     const s = this.sessions.get(id);
     if (!s) return;
     clearTimeout(s.progressTimer);
+    clearInterval(s.activityTimer);
     clearTimeout(s.catalogWarmTimer);
     clearTimeout(s.stopTimer);
     clearInterval(s.nativeHistoryTimer);
