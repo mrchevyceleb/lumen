@@ -1,7 +1,35 @@
-const { WebContentsView, BrowserWindow, session, Menu, clipboard, app, dialog } = require("electron");
+const { WebContentsView, BrowserWindow, session, Menu, clipboard, app, dialog, net, protocol } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { pathToFileURL } = require("node:url");
+
+// Each local document receives its own unguessable origin, scoped to its directory.
+protocol.registerSchemesAsPrivileged([{ scheme: "lumen-file", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
+const localRoots = new Map();
+async function localFingerprint(file) {
+  return crypto.createHash("sha256").update(await fs.promises.readFile(file)).digest("hex");
+}
+function localURL(file, fingerprint, trusted) {
+  const root = path.dirname(file);
+  let token = [...localRoots].find(([, value]) => value.file === file && value.fingerprint === fingerprint && value.trusted === trusted)?.[0];
+  if (!token) {
+    token = crypto.randomBytes(24).toString("hex");
+    localRoots.set(token, { root, file, fingerprint, trusted });
+  }
+  return `lumen-file://${token}/${encodeURIComponent(path.basename(file))}`;
+}
+function hasTrustedLocal(file, fingerprint) {
+  return [...localRoots.values()].some((entry) => entry.file === file && entry.fingerprint === fingerprint && entry.trusted);
+}
+function trustedLocalURL(value) {
+  try { const url = new URL(value); return url.protocol === "lumen-file:" && localRoots.get(url.hostname)?.trusted === true; }
+  catch { return false; }
+}
+function isLocalURL(value) {
+  try { const url = new URL(value); return url.protocol === "lumen-file:" && localRoots.has(url.hostname) && !url.username && !url.password && !url.port; }
+  catch { return false; }
+}
 
 // Errors the caller caused carry a status so the local agent API answers 4xx, not a blanket 500.
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -9,6 +37,7 @@ const bad = (message, status = 400) => Object.assign(new Error(message), { statu
 function browserURL(value) {
   if (typeof value !== "string" || value.length > 8192) throw bad("Enter a web address.");
   const input = value.trim();
+  if (isLocalURL(input)) return new URL(input).href;
   if (!input || input === "about:blank") return "about:blank";
   const local = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(input);
   const hostWithPort = /^(?:\[[\da-f:]+\]|[^/?#:\s]+):\d+(?:[/?#]|$)/i.test(input);
@@ -268,6 +297,43 @@ class BrowserService {
     this.knownChats = new Set();
     this.popups = new Set();
     this.profile = session.fromPartition("persist:lumen-browser");
+    this.profile.protocol.handle("lumen-file", async (request) => {
+      try {
+        const url = new URL(request.url), grant = localRoots.get(url.hostname), root = grant?.root;
+        if (!root || !["GET", "HEAD"].includes(request.method)) return new Response("Not found", { status: 404 });
+        // Remote sites cannot use a local page as a file-reading proxy.
+        if (request.initiatorOrigin && request.initiatorOrigin !== `lumen-file://${url.host}` && !(request.initiatorOrigin === "null" && !grant.trusted)) return new Response("Forbidden", { status: 403 });
+        const name = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+        if (!grant.trusted && name.split(/[\\/]/).some((part) => part.startsWith("."))) return new Response("Forbidden", { status: 403 });
+        const candidate = path.resolve(root, name), relative = path.relative(root, candidate);
+        if (!relative || relative.startsWith(".." + path.sep) || relative === ".." || path.isAbsolute(relative)) return new Response("Forbidden", { status: 403 });
+        const real = await fs.promises.realpath(candidate), realRelative = path.relative(root, real);
+        if (!realRelative || realRelative.startsWith(".." + path.sep) || realRelative === ".." || path.isAbsolute(realRelative)) return new Response("Forbidden", { status: 403 });
+        if (!grant.trusted && realRelative.split(path.sep).some((part) => part.startsWith("."))) return new Response("Forbidden", { status: 403 });
+        // A saved trust grant applies only to the version Matt approved.
+        const approvedBytes = grant.trusted && real === grant.file ? await fs.promises.readFile(real) : null;
+        const fingerprint = approvedBytes ? crypto.createHash("sha256").update(approvedBytes).digest("hex")
+          : grant.trusted ? await localFingerprint(grant.file) : "";
+        if (grant.trusted && fingerprint !== grant.fingerprint)
+          return new Response("This file changed. Open its chat link again to review it.", { status: 403, headers: { "Content-Type": "text/plain" } });
+        const stat = await fs.promises.stat(real);
+        if (!stat.isFile()) return new Response("Not found", { status: 404 });
+        const response = await net.fetch(pathToFileURL(real).href, { method: request.method });
+        const headers = new Headers(response.headers);
+        // An opaque sandbox blocks page scripts from reading local files. Block
+        // network subresources as well, so even active content cannot send data
+        // out through a script, image, form, fetch, or automatic navigation.
+        if (!grant.trusted) headers.set("Content-Security-Policy", "sandbox allow-scripts allow-modals; default-src lumen-file: data: blob:; script-src lumen-file: 'unsafe-inline' 'unsafe-eval'; style-src lumen-file: 'unsafe-inline'; img-src lumen-file: data: blob:; font-src lumen-file: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'");
+        headers.set("X-Content-Type-Options", "nosniff");
+        // Module scripts and fonts are fetched in CORS mode from the opaque
+        // sandbox. Grant only those resource destinations, never fetch/XHR.
+        const destination = request.headers.get("sec-fetch-dest");
+        if (!grant.trusted && ((destination === "script" && /\.(?:js|mjs)$/i.test(real)) ||
+            (destination === "font" && /\.(?:woff2?|ttf|otf)$/i.test(real)))) headers.set("Access-Control-Allow-Origin", "null");
+        headers.set("Referrer-Policy", "no-referrer");
+        return new Response(approvedBytes && request.method !== "HEAD" ? approvedBytes : response.body, { status: response.status, statusText: response.statusText, headers });
+      } catch { return new Response("Not found", { status: 404 }); }
+    });
     const networks = new Set(["local-network", "local-network-access", "loopback-network"]);
     // Media gets a per-request prompt, just like a browser. The session cannot
     // remember a device grant the way a site permission store can, so a stored
@@ -353,6 +419,12 @@ class BrowserService {
       contextIsolation: true, sandbox: true, webSecurity: true, navigateOnDragDrop: false };
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      if (saved.localRoots && typeof saved.localRoots === "object") {
+        for (const [token, grant] of Object.entries(saved.localRoots))
+          if (/^[0-9a-f]{48}$/.test(token) && grant && typeof grant.root === "string" && path.isAbsolute(grant.root)
+            && typeof grant.file === "string" && path.isAbsolute(grant.file) && path.dirname(grant.file) === grant.root
+            && /^[0-9a-f]{64}$/.test(grant.fingerprint) && typeof grant.trusted === "boolean") localRoots.set(token, grant);
+      }
       let remaining = MAX_TABS;
       for (const group of (saved.groups || []).slice(0, 512)) {
         if (!Array.isArray(group.tabs)) continue;
@@ -362,7 +434,7 @@ class BrowserService {
         if (legacy && typeof group.workspace !== "string") continue;
         const tabs = group.tabs.slice(0, Math.min(24, remaining)).flatMap((tab) => {
           try {
-            return [{ id: crypto.randomUUID(), url: browserURL(tab.url), title: String(tab.title || "New tab").slice(0, 200), error: "", console: [], view: normalizeView(tab.view), history: this.cleanHistory(tab.history), restored: true }];
+            return [{ id: crypto.randomUUID(), trustedEver: tab.trustedEver === true || trustedLocalURL(tab.url) || (tab.history?.entries || []).some((entry) => trustedLocalURL(entry.url)), url: browserURL(tab.url), title: String(tab.title || "New tab").slice(0, 200), error: "", console: [], view: normalizeView(tab.view), history: this.cleanHistory(tab.history), restored: true }];
           } catch { return []; }
         });
         remaining -= tabs.length;
@@ -461,11 +533,11 @@ class BrowserService {
     try {
       const groups = [
         ...[...this.groups].filter(([, group]) => group.tabs.length).map(([scope, group]) => ({ scope, activeIndex: group.tabs.findIndex((tab) => tab.id === group.activeId),
-          tabs: group.tabs.map((tab) => ({ url: tab.url, title: tab.title, view: tab.view || { mode: "desktop" }, history: this.history(tab) })) })),
+          tabs: group.tabs.map((tab) => ({ trustedEver: !!tab.trustedEver, url: tab.url, title: tab.title, view: tab.view || { mode: "desktop" }, history: this.history(tab) })) })),
         ...[...this.legacy].filter(([, group]) => group.tabs.length).map(([workspace, group]) => ({ workspace, activeIndex: group.tabs.findIndex((tab) => tab.id === group.activeId),
-          tabs: group.tabs.map((tab) => ({ url: tab.url, title: tab.title, view: tab.view || { mode: "desktop" }, history: this.history(tab) })) })),
+          tabs: group.tabs.map((tab) => ({ trustedEver: !!tab.trustedEver, url: tab.url, title: tab.title, view: tab.view || { mode: "desktop" }, history: this.history(tab) })) })),
       ];
-      fs.writeFileSync(this.file + ".tmp", JSON.stringify({ groups }));
+      fs.writeFileSync(this.file + ".tmp", JSON.stringify({ groups, localRoots: Object.fromEntries(localRoots) }));
       fs.renameSync(this.file + ".tmp", this.file);
     } catch (error) { console.warn("Could not save browser tabs:", error.message); }
   }
@@ -508,13 +580,26 @@ class BrowserService {
     }
     throw bad("This browser tab is closed.", 404);
   }
-  guard(contents) {
-    const prevent = (event, url) => { if (!webURL(url)) event.preventDefault(); };
+  guard(contents, tab = null) {
+    const prevent = (event, url) => {
+      const current = contents.getURL();
+      // A local document can navigate within its own granted origin; it cannot
+      // navigate to the network or another local origin and leak local data.
+      if (!webURL(url) || (isLocalURL(current) && !trustedLocalURL(current) && !url.startsWith(`lumen-file://${new URL(current).host}/`))
+        || (isLocalURL(url) && (!isLocalURL(current) || new URL(url).host !== new URL(current).host))) event.preventDefault();
+    };
     contents.on("will-navigate", prevent);
-    contents.on("will-redirect", prevent);
+    contents.on("will-redirect", (event, url) => {
+      // An address-bar or agent navigation away from a local page is already
+      // allowed. Redirects on that new web navigation must also work.
+      if (tab && webURL(tab.pendingURL) && !isLocalURL(tab.pendingURL) && webURL(url) && !isLocalURL(url)) return;
+      prevent(event, url);
+    });
     contents.on("will-frame-navigate", (event) => {
       if (!event.isMainFrame && /^(blob:|data:|about:(blank|srcdoc)$)/.test(event.url)) return;
-      if (!webURL(event.url)) event.preventDefault();
+      const current = contents.getURL();
+      if (!webURL(event.url) || (isLocalURL(current) && !trustedLocalURL(current) && !event.url.startsWith(`lumen-file://${new URL(current).host}/`))
+        || (isLocalURL(event.url) && (!isLocalURL(current) || new URL(event.url).host !== new URL(current).host))) event.preventDefault();
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
   }
@@ -534,13 +619,13 @@ class BrowserService {
     // Saved phone view applies before the first navigation so the server
     // renders the right (mobile) page, not just the right-sized one.
     this.applyEmulation(tab);
-    this.guard(contents);
+    this.guard(contents, tab);
     // A click inside the native page never reaches the app's own document, so report the page
     // taking focus and let the renderer close any menu that was open over it.
     contents.on("focus", () => {
       if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) this.window.webContents.send("browser:command", "page-focus");
     });
-    contents.setWindowOpenHandler(({ url }) => webURL(url) ? { action: "allow", overrideBrowserWindowOptions: {
+    contents.setWindowOpenHandler(({ url }) => (!isLocalURL(contents.getURL()) || trustedLocalURL(contents.getURL())) && !isLocalURL(url) && webURL(url) ? { action: "allow", overrideBrowserWindowOptions: {
       parent: this.window, width: 1000, height: 760, autoHideMenuBar: true, webPreferences: this.preferences,
     } } : { action: "deny" });
     contents.on("did-create-window", (popup) => {
@@ -558,6 +643,7 @@ class BrowserService {
     };
     contents.on("did-start-navigation", (details) => {
       if (!details.isMainFrame) return;
+      if (trustedLocalURL(details.url)) tab.trustedEver = true;
       tab.generation = (tab.generation || 0) + 1; tab.pendingURL = details.url;
       if (webURL(details.url)) tab.url = details.url;
       tab.error = "";
@@ -741,7 +827,7 @@ class BrowserService {
       throw bad(`Close a browser tab before opening another (${MAX_TABS} across all chats).`);
     const normalized = browserURL(url), group = this.group(scope);
     if (group.tabs.length >= 24) throw bad("Close a browser tab before opening another (24 per chat).");
-    const tab = { id: crypto.randomUUID(), url: normalized, title: "New tab", error: "", console: [], view: { mode: "desktop" } };
+    const tab = { id: crypto.randomUUID(), trustedEver: trustedLocalURL(normalized), url: normalized, title: "New tab", error: "", console: [], view: { mode: "desktop" } };
     group.tabs.push(tab); group.activeId = tab.id;
     if (normalized !== "about:blank") this.ensure(tab);
     this.sync(); this.emit(true);
@@ -861,12 +947,20 @@ class BrowserService {
     if (tab.emulationReady && tab.emulationKey !== this.emulationKey(tab)) this.applyEmulation(tab);
     view.setVisible(true);
   }
-  async capture(id) {
+  assertAgentAllowed(tab) {
+    const contents = tab.nativeView?.webContents;
+    const fullHistory = contents && !contents.isDestroyed() ? contents.navigationHistory.getAllEntries() : tab.history?.entries || [];
+    if (tab.trustedEver || trustedLocalURL(tab.url) || trustedLocalURL(tab.pendingURL)
+      || (contents && !contents.isDestroyed() && trustedLocalURL(contents.getURL()))
+      || fullHistory.some((entry) => trustedLocalURL(entry.url)))
+      throw bad("Trusted local pages are only available to the person who opened them.", 403);
+  }
+  async capture(id, agent = false) {
     const { tab } = this.find(id);
     if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
-    return this.pageOperation(tab, (contents) => contents.capturePage(undefined, { stayHidden: true, stayAwake: true }));
+    return this.pageOperation(tab, (contents) => contents.capturePage(undefined, { stayHidden: true, stayAwake: true }), undefined, agent);
   }
-  async beginCapture(id) {
+  async beginCapture(id, agent = false) {
     const { tab } = this.find(id);
     if (tab.url === "about:blank") throw bad("Open a page before capturing it.");
     let mutationAttempts = 0;
@@ -901,7 +995,7 @@ class BrowserService {
         if (mutationAttempts < 3) throw bad("The page changed while capturing it. Try again once it finishes loading.", 409);
       }
       return result;
-    });
+    }, undefined, agent);
     // Tokens are a side effect of a completed transaction only. A timed-out
     // operation may still finish inside Chromium, but it can never publish one.
     const token = crypto.randomUUID();
@@ -938,13 +1032,14 @@ class BrowserService {
       return image;
     } finally { if (!markupWindow.isDestroyed()) markupWindow.destroy(); }
   }
-  async captureMarked(id, marks, captureToken = "") {
+  async captureMarked(id, marks, captureToken = "", agent = false) {
     if (captureToken) {
+      if (agent) this.assertAgentAllowed(this.find(id).tab);
       const { image } = this.takeCapture(captureToken, id);
       return this.composeMarkedImageFor(image, marks);
     }
     // Agent/legacy callers pass no token: freeze, mark, and return in one go.
-    const begun = await this.beginCapture(id);
+    const begun = await this.beginCapture(id, agent);
     try { return await this.composeMarkedImageFor(this.takeCapture(begun.token, id).image, marks); }
     catch (error) { this.markCaptures.delete(begun.token); throw error; }
   }
@@ -1012,14 +1107,22 @@ class BrowserService {
       return result;
     } finally { release(); }
   }
-  async pageOperation(tab, operation, deadline = Date.now() + 15000) {
+  async pageOperation(tab, operation, deadline = Date.now() + 15000, agent = false) {
     return this.pageLocked(tab, async () => {
       // Chromium can briefly have no compositor frame, and a capture can race a
       // navigation even after the page looked idle. Both are normal transient
       // states, so retry them here instead of making every agent add sleep loops.
       for (;;) {
         if (Date.now() >= deadline) throw bad("The page took too long. Reload it and try again.", 504);
-        try { return await this.pageOperationOnce(tab, operation, deadline); }
+        try {
+          if (agent) this.assertAgentAllowed(tab);
+          const result = await this.pageOperationOnce(tab, (contents) => {
+            if (agent) this.assertAgentAllowed(tab);
+            return operation(contents);
+          }, deadline);
+          if (agent) this.assertAgentAllowed(tab);
+          return result;
+        }
         catch (error) {
           const message = String(error?.message || error);
           const capturePending = /^(?:UnknownVizError|Frame Gone|Timeout|EmbeddingTokenChanged|VizSentEmptyBitmap)$/.test(message);
@@ -1091,9 +1194,9 @@ class BrowserService {
       operationPromise.then((result) => finish(navigationError, result), (error) => finish(navigationError || error));
     });
   }
-  async inspect(id) {
+  async inspect(id, agent = false) {
     const { tab } = this.find(id);
-    const text = await this.pageOperation(tab, (contents) => contents.executeJavaScript("document.body?.innerText.slice(0, 16000) || ''"));
+    const text = await this.pageOperation(tab, (contents) => contents.executeJavaScript("document.body?.innerText.slice(0, 16000) || ''"), undefined, agent);
     return { url: tab.url, title: tab.title, text, console: [...tab.console] };
   }
   async captureContext(id, marks, captureToken = "") {
@@ -1118,13 +1221,15 @@ class BrowserService {
   // must never interleave mouse paths on the same page.
   async driveLocked(tab, fn) {
     return this.pageLocked(tab, async () => {
+      this.assertAgentAllowed(tab);
       const generation = tab.generation;
       tab.driveGeneration = generation;
-      try { return await fn(); }
+      try { const result = await fn(); this.assertAgentAllowed(tab); return result; }
       finally { if (tab.driveGeneration === generation) delete tab.driveGeneration; }
     });
   }
   assertDriveCurrent(tab, contents = tab.nativeView?.webContents) {
+    this.assertAgentAllowed(tab);
     if (tab.closed || !contents || contents.isDestroyed()) throw bad("The browser tab was closed.", 404);
     if (tab.pendingPageOperation?.expired) throw bad("The last page script did not finish. Navigate or reload the tab before using it again.", 409);
     if (tab.driveGeneration !== undefined && (tab.generation !== tab.driveGeneration || contents.isLoadingMainFrame()))
@@ -1375,7 +1480,10 @@ class BrowserService {
   async control(body) {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw bad("Send a browser action object.");
     const { action, id } = body;
-    if (action === "list") return { chats: [...this.groups].map(([scope, group]) => ({ scope, chatId: scope.startsWith(CHAT_SCOPE_PREFIX) ? scope.slice(CHAT_SCOPE_PREFIX.length) : "", activeId: group.activeId, tabs: group.tabs.map((tab) => this.metadata(tab)) })) };
+    if (action === "list") return { chats: [...this.groups].map(([scope, group]) => ({ scope, chatId: scope.startsWith(CHAT_SCOPE_PREFIX) ? scope.slice(CHAT_SCOPE_PREFIX.length) : "", activeId: group.activeId, tabs: group.tabs.map((tab) => {
+      const data = this.metadata(tab);
+      return body.viaAgent === true && (tab.trustedEver || trustedLocalURL(data.url)) ? { ...data, url: "", title: "Trusted local page" } : data;
+    }) })) };
     if (action === "open") {
       let scope;
       if (Object.hasOwn(body, "chatId")) {
@@ -1398,10 +1506,12 @@ class BrowserService {
       // not "give me another copy of it". Only link clicks ask for reuse; the
       // agent browser actions still open the new tab they asked for.
       const target = body.url ?? "about:blank";
+      if (body.viaAgent === true && trustedLocalURL(target)) throw bad("Trusted local pages are only available to the person who opened them.", 403);
       if (body.reuse === true) {
         const normalized = browserURL(target), group = this.groups.get(scope);
         const open = normalized !== "about:blank" && group?.tabs.find((tab) => tab.url === normalized || tab.pendingURL === normalized);
         if (open) {
+          if (body.viaAgent === true) this.assertAgentAllowed(open);
           group.activeId = open.id;
           const activate = () => {
             // A page that failed last time gets another try instead of leaving the
@@ -1422,6 +1532,12 @@ class BrowserService {
     // Validate the action before looking the tab up, so an unknown action names itself instead
     // of borrowing the misleading "That browser tab is closed" message.
     if (!TAB_ACTIONS.has(action)) throw bad(action ? `Unsupported browser action: ${action}.` : "Choose a browser action.");
+    if (body.viaAgent === true) {
+      const { tab } = this.find(id);
+      this.assertAgentAllowed(tab);
+      if (action === "navigate" && trustedLocalURL(body.url))
+        throw bad("Trusted local pages are only available to the person who opened them.", 403);
+    }
     // The pane's stop switch blocks everything an agent could use to change
     // this page (input, navigation, scripts, close), never the user's own clicks.
     if (body.viaAgent === true && ["navigate", "back", "forward", "reload", "stop", "evaluate", "close", "view"].includes(action)) {
@@ -1454,6 +1570,7 @@ class BrowserService {
       const { tab } = this.find(id);
       return this.pageLocked(tab, () => {
         if (tab.agentDriveBlocked) throw bad("The user stopped agent driving on this tab. Ask them to allow it from the browser pane before driving again.", 409);
+        this.assertAgentAllowed(tab);
         return this.control({ ...body, viaAgent: false });
       }, Date.now() + 15000, action === "navigate" || action === "reload");
     }
@@ -1468,10 +1585,10 @@ class BrowserService {
         : action === "press" ? this.agentPress(id, body)
         : this.agentScroll(id, body));
     }
-    if (action === "inspect") return this.inspect(id);
-    if (action === "screenshot") return { image: (await this.capture(id)).toDataURL() };
-    if (action === "markup-begin") { const begun = await this.beginCapture(id); return { token: begun.token, image: begun.image }; }
-    if (action === "screenshot-markup") return { image: (await this.captureMarked(id, body.marks, typeof body.captureToken === "string" ? body.captureToken : "")).toDataURL() };
+    if (action === "inspect") return this.inspect(id, body.viaAgent === true);
+    if (action === "screenshot") return { image: (await this.capture(id, body.viaAgent === true)).toDataURL() };
+    if (action === "markup-begin") { const begun = await this.beginCapture(id, body.viaAgent === true); return { token: begun.token, image: begun.image }; }
+    if (action === "screenshot-markup") return { image: (await this.captureMarked(id, body.marks, typeof body.captureToken === "string" ? body.captureToken : "", body.viaAgent === true)).toDataURL() };
     const { tab } = this.find(id), contents = this.ensure(tab).webContents;
     if (action === "back" && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
     else if (action === "forward" && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
@@ -1482,7 +1599,10 @@ class BrowserService {
       if (typeof body.script !== "string" || body.script.length > 100000) throw bad("Provide a script under 100,000 characters.");
       // A script that throws is a problem with the script, not a broken app, so say so with a
       // 4xx instead of letting it surface as an internal 500.
-      try { return await this.pageLocked(tab, () => this.pageOperationOnce(tab, (live) => live.executeJavaScript(body.script, true), Date.now() + 15000, true)); }
+      try { return await this.pageLocked(tab, () => this.pageOperationOnce(tab, (live) => {
+        if (body.viaAgent === true) this.assertAgentAllowed(tab);
+        return live.executeJavaScript(body.script, true);
+      }, Date.now() + 15000, true)); }
       catch (e) {
         if (e?.status) throw e;
         throw bad(`The page script failed: ${String((e && e.message) || e).slice(0, 300)}`, 422);
@@ -1497,4 +1617,4 @@ class BrowserService {
     for (const popup of this.popups) if (!popup.isDestroyed()) popup.destroy();
   }
 }
-module.exports = { BrowserService, browserURL, chatScope, friendlyLoadError, normalizeView, sameView, normalizeMarks, buildMarkupHTML, DEVICE_PROFILES };
+module.exports = { BrowserService, browserURL, localURL, localFingerprint, hasTrustedLocal, chatScope, friendlyLoadError, normalizeView, sameView, normalizeMarks, buildMarkupHTML, DEVICE_PROFILES };

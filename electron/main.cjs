@@ -20,7 +20,7 @@ const { createAdministrator, restoreRestartProfile, waitForRestartParent } = req
 const { RecoveryStore } = require("./recovery.cjs");
 const { Dictation } = require("./dictation.cjs");
 const { Attachments } = require("./attachments.cjs");
-const { BrowserService, browserURL } = require("./browser.cjs");
+const { BrowserService, browserURL, localURL, localFingerprint, hasTrustedLocal } = require("./browser.cjs");
 const { WorktreeJobs } = require("./worktree-jobs.cjs");
 app.setName("Lumen");
 if (process.env.LUMEN_TEST_DATA)
@@ -383,10 +383,38 @@ async function settleLink(filePath, root) {
   return { ...settled, clicked: target, redirected: resolved !== target };
 }
 
-async function openLink(filePath, root) {
+async function openLink(filePath, root, options = {}) {
   const settled = await settleLink(filePath, root);
   if (!settled) return { kind: "cancel" };
   const { real, realStat } = settled;
+  // HTML is a document to render, even when it is inside the workspace.
+  // Keep executable detection and the network confirmation before serving it.
+  if (realStat.isFile() && [".html", ".htm"].includes(path.extname(real).toLowerCase())) {
+    if (options.narrow) {
+      const realRoot = root ? await fs.realpath(path.resolve(root)).catch(() => path.resolve(root)) : "";
+      if (realRoot && inside(realRoot, real) && await isTextFile(real, realStat.size))
+        return { kind: "editor", relative: path.relative(realRoot, real).split(path.sep).join("/") };
+      return { kind: "narrow" };
+    }
+    if (await hasExecutableContent(real, realStat.size))
+      return revealTarget(real, realStat, activeMessage(settled.clicked, real, settled.redirected));
+    const fingerprint = await localFingerprint(real);
+    let trusted = hasTrustedLocal(real, fingerprint);
+    if (!trusted) {
+      const { response } = await dialog.showMessageBox(window, {
+        type: "question", title: "Open this HTML file?", message: path.basename(real),
+        detail: `To work fully, this page can run code, access files in ${path.dirname(real)}, and connect to the internet. Changes to other files in that folder will also be trusted. Your choice is remembered. Trust it only if you know where it came from.`,
+        buttons: ["Cancel", "Preview safely", "Trust and open"], defaultId: 1, cancelId: 0, noLink: true,
+      });
+      if (response === 0) return { kind: "cancel" };
+      trusted = response === 2;
+    }
+    if (!await unchanged(real, realStat) || await localFingerprint(real) !== fingerprint)
+      throw new Error("That file changed while Lumen was opening it. Click the link again.");
+    const rootPath = typeof root === "string" && root ? await fs.realpath(path.resolve(root)).catch(() => path.resolve(root)) : "";
+    return { kind: "browser", url: localURL(real, fingerprint, trusted), path: real,
+      relative: rootPath && inside(rootPath, real) ? path.relative(rootPath, real).split(path.sep).join("/") : undefined };
+  }
   const rootPath = typeof root === "string" && root ? path.resolve(root) : "";
   if (realStat.isFile() && rootPath) {
     // Compare real paths on both sides so a workspace opened through a symlink
@@ -432,7 +460,8 @@ async function openLinkExplicitly(filePath, root) {
   const settled = await settleLink(filePath, root);
   if (!settled) return { kind: "cancel" };
   const { real, realStat } = settled;
-  if (await isActiveTarget(real, realStat))
+  const html = realStat.isFile() && [".html", ".htm"].includes(path.extname(real).toLowerCase());
+  if (html ? await hasExecutableContent(real, realStat.size) : await isActiveTarget(real, realStat))
     return revealTarget(real, realStat, activeMessage(settled.clicked, real, settled.redirected));
   if (!isPassiveTarget(real, realStat)) {
     const { response } = await dialog.showMessageBox(window, {
@@ -700,12 +729,12 @@ startup.then(async (start) => {
   // Chat file links: resolve whatever the agent wrote (Windows or POSIX absolute,
   // ~, file:// URL, or workspace-relative) and open it the right way. Text files
   // inside the workspace go to the editor; everything else goes to the OS.
-  handle("file:open-link", (filePath, root) => openLink(filePath, root));
-  handle("file:link-menu", (filePath, root) => new Promise((resolve) => {
+  handle("file:open-link", (filePath, root, options) => openLink(filePath, root, options));
+  handle("file:link-menu", (filePath, root, options) => new Promise((resolve) => {
     let pending = null;
     const task = (work) => { pending = Promise.resolve().then(work); };
     const menu = Menu.buildFromTemplate([
-      { label: "Open", click: () => task(() => openLink(filePath, root)) },
+      { label: "Open", click: () => task(() => openLink(filePath, root, options)) },
       { label: "Open in default app", click: () => task(() => openLinkExplicitly(filePath, root)) },
       { label: "Show in folder", click: () => task(() => showInFolder(filePath, root)) },
       { type: "separator" },

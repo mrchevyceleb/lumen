@@ -557,12 +557,13 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
-  const openWeb = (url: string) => {
+  const openWeb = (url: string, localFile?: string) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat before opening its browser."); return; }
     // Same room calculation the pane clamps itself with. When the window cannot
     // give the pane a readable width, the system browser is the honest answer.
     if (browserRoom < MIN_BROWSER_PANE) {
+      if (localFile) { notify("Make the window wider to open this file in Lumen’s browser."); return; }
       void api("external:open", url).then(
         () => notify("Opened in your main browser."),
         (error) => notify(`Could not open that link: ${error.message || "the system browser refused it"}`),
@@ -585,6 +586,7 @@ export default function App() {
       // the pane back: an older failure must not close a browser a newer link
       // has just opened.
       const restore = () => { if (pane.opens === request && pane.toggles === paneToken && !wasBrowserOpen) setBrowserOpenFor(chat, false); };
+      if (localFile) { restore(); notify(`Could not open that file: ${error.message}`); return; }
       void api("external:open", url).then(restore, (fallbackError) => {
         if (pane.opens !== request) return;
         restore();
@@ -1517,12 +1519,18 @@ export default function App() {
   // way to open it instead of assuming everything is an editor file.
   const openFile = async (file: string, folder = root) => {
     try {
-      const result = await api<{ kind: "editor" | "external" | "unsupported" | "folder" | "cancel"; relative?: string; error?: string; folder?: string; path?: string }>(
+      const result = await api<{ kind: "editor" | "browser" | "external" | "unsupported" | "folder" | "cancel" | "narrow"; relative?: string; error?: string; folder?: string; path?: string; url?: string }>(
         "file:open-link",
         file,
         folder || "",
+        { narrow: browserRoom < MIN_BROWSER_PANE },
       );
       if (result.kind === "editor" && result.relative && folder) await openEditorDoc(result.relative, folder);
+      else if (result.kind === "browser" && result.url) {
+        if (browserRoom < MIN_BROWSER_PANE && result.relative && folder) await openEditorDoc(result.relative, folder);
+        else openWeb(result.url, result.path);
+      }
+      else if (result.kind === "narrow") notify("Make the window wider to open this file in Lumen’s browser.");
       else if (result.kind === "unsupported") showUnsupported(result);
       else showOpened(result, file);
     } catch (e: any) {
@@ -1530,10 +1538,15 @@ export default function App() {
     }
   };
   const fileMenu = (file: string, folder = root) => {
-    void api<{ kind?: string; relative?: string; error?: string; folder?: string; path?: string }>("file:link-menu", file, folder || "")
+    void api<{ kind?: string; relative?: string; error?: string; folder?: string; path?: string; url?: string }>("file:link-menu", file, folder || "", { narrow: browserRoom < MIN_BROWSER_PANE })
       .then((result) => {
         if (result?.kind === "editor" && result.relative && folder) return openEditorDoc(result.relative, folder);
-        if (result?.kind === "unsupported") showUnsupported(result);
+        if (result?.kind === "browser" && result.url) {
+          if (browserRoom < MIN_BROWSER_PANE && result.relative && folder) return openEditorDoc(result.relative, folder);
+          openWeb(result.url, result.path);
+        }
+        else if (result?.kind === "narrow") notify("Make the window wider to open this file in Lumen’s browser.");
+        else if (result?.kind === "unsupported") showUnsupported(result);
         else if (result?.kind === "error") notify(result.error || "That file could not be opened.");
         else showOpened(result || {}, file);
       })
