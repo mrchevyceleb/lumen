@@ -14,8 +14,8 @@ export interface SessionTabActions {
   onClearChat: (tab: Tab) => void;
   onExportChat: (tab: Tab) => void;
 }
-export default function SessionTabs({ tabs, activeId, settings, vertical = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat, onClearChat, onExportChat }: SessionTabActions & {
-  tabs: Tab[]; activeId: string; settings: Settings; vertical?: boolean; label: string;
+export default function SessionTabs({ tabs, activeId, settings, vertical = false, hideArchivedBadge = false, label, onSelect, onCustomize, onRename, onClose, onArchiveChat, onClearChat, onExportChat }: SessionTabActions & {
+  tabs: Tab[]; activeId: string; settings: Settings; vertical?: boolean; hideArchivedBadge?: boolean; label: string;
 }) {
   const nav = useRef<HTMLElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -114,7 +114,7 @@ export default function SessionTabs({ tabs, activeId, settings, vertical = false
         title={`${tab.projectless ? `No workspace · ${tab.cwd || "Scratch folder"}` : tab.cwd || tab.root}\n${tab.mode === "native" ? "Native CLI" : "Readable session"}${tab.archived ? " · Archived" : ""}${vertical ? " · Right-click or F2 to rename" : ""} · Double-click to customize`}>
         <AgentMark agent={tab.agent} color={settings.coloredAgents ? settings.agents[tab.agent].color : settings.muted} size={vertical ? 14 : 16} />
         <span>{tab.name}{tab.accountId ? ` · ${tab.accountName}` : ""}</span>
-        {tab.archived && <span className="archived-tag"><Archive size={10} aria-hidden="true" />Archived</span>}
+        {tab.archived && !hideArchivedBadge && <span className="archived-tag" title="Archived"><Archive size={12} aria-hidden="true" /></span>}
         {tab.managedBy && <Sparkles size={11} aria-label="Agent controlled task" />}
         {tab.busy ? tab.phase ? <span className="chat-phase" title={tab.phaseText || tab.phase}>…</span> : <span className="tiny-pulse" /> : tab.mode === "native" ? <span className="native-tag">CLI</span> : null}
       </button>}

@@ -4638,3 +4638,12 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .pi-custom-control:focus-visible pre { border-color: var(--accent); }
 .pi-control-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
 .pi-custom-control small { color: var(--muted); }
+
+.archive-chats { margin-top: 12px; padding-top: 6px; border-top: 1px solid var(--border); }
+.archive-chat-heading { width: 100%; display: flex; align-items: center; gap: 6px; text-align: left; color: var(--muted); border-radius: 7px; padding: 7px 8px; font-size: 11px; }
+.archive-chat-heading:hover, .archive-chat-heading:focus-visible { color: var(--text); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.archive-chat-heading span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-chat-heading small { font-size: 9px; padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, var(--muted) 10%, transparent); }
+.project-sidebar:not(.with-chats) .archived-projects .project-row { grid-template-columns: 18px 18px minmax(0, 1fr) 25px; }
+
+.project-sidebar.searching:not(.with-chats) .project-row:not(.archived) { grid-template-columns: 18px 18px minmax(0, 1fr) 25px; }

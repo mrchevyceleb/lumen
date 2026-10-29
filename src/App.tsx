@@ -786,7 +786,8 @@ export default function App() {
     setDialog(null);
     setAgentMenu(false);
     setAgentMenuRoot(undefined);
-    const existing = tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => !t.projectless && sameProject(t.root, next.root)) || tabsRef.current.find((t) => inProject(t, next.root));
+    const usable = (t: Tab) => !t.archived || isHiddenProject(next.root);
+    const existing = tabsRef.current.find((t) => usable(t) && t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => usable(t) && !t.projectless && sameProject(t.root, next.root)) || tabsRef.current.find((t) => usable(t) && inProject(t, next.root));
     rememberProject(existing ? projectRootOf(existing) : next.root, next.name, reveal);
     setActiveId(existing?.id || "");
     if (!existing) pendingCwds.current[next.root] = cwd;
@@ -817,12 +818,12 @@ export default function App() {
     setProjects((old) => old.map((p) => sameProject(p.root, project.root) ? { ...p, hidden: true } : p));
     if (sameProject(activeProjectRoot, project.root)) {
       const next = remaining.find((p) => p.pinned) || remaining[0];
-      const existing = next ? tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root]) || tabsRef.current.find((t) => inProject(t, next.root)) : tabsRef.current.find((t) => t.projectless);
+      const existing = next ? tabsRef.current.find((t) => t.id === projectTabsRef.current[next.root] && !t.archived && inProject(t, next.root)) || tabsRef.current.find((t) => !t.archived && inProject(t, next.root)) : tabsRef.current.find((t) => t.projectless && !t.archived);
       setActiveId(existing?.id || "");
-      setSelectedRoot(existing && !existing.projectless ? existing.root : "");
+      setSelectedRoot(existing ? (existing.projectless ? "" : existing.root) : next?.root || "");
       if (!existing && next) void openWorkspace(next.root);
     }
-    notify(`${project.name} archived. Use Show archived in the sidebar to see it and its chats.`);
+    notify(showArchivedRef.current ? `${project.name} archived.` : `${project.name} archived. Open Archive in the sidebar to see it and its chats.`);
   };
   useEffect(() => {
     let alive = true;
@@ -1827,7 +1828,7 @@ export default function App() {
     retractBeforeSwitch(tab.id);
     announceChat(tab);
     setActiveId(tab.id); setSelectedRoot(tab.projectless ? "" : tab.root);
-    if (!tab.projectless) setProjects((old) => old.map((p) => sameProject(p.root, projectRootOf(tab)) && p.collapsed ? { ...p, collapsed: false } : p));
+    if (!tab.projectless && !tab.archived && !isHiddenProject(projectRootOf(tab))) setProjects((old) => old.map((p) => sameProject(p.root, projectRootOf(tab)) && p.collapsed ? { ...p, collapsed: false } : p));
   };
   const listedTab = (tab: Tab) => !tab.archived && (tab.projectless || !isHiddenProject(projectRootOf(tab)));
   const exportChat = async (tab: Tab) => {
@@ -1841,28 +1842,30 @@ export default function App() {
   const archiveChat = (tab: Tab) => {
     const archived = !tab.archived;
     setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, archived } : t));
-    if (archived && !showArchivedRef.current && activeIdRef.current === tab.id) {
+    if (archived && activeIdRef.current === tab.id && !(showArchivedRef.current && !tab.projectless && isHiddenProject(projectRootOf(tab)))) {
       const sibling = tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t) && (tab.projectless ? t.projectless : inProject(t, projectRootOf(tab)))).at(-1)
         || tabsRef.current.filter((t) => t.id !== tab.id && listedTab(t)).at(-1);
       retractBeforeSwitch(sibling?.id || "");
       announceChat(sibling);
       setActiveId(sibling?.id || "");
       setSelectedRoot(sibling && !sibling.projectless ? sibling.root : tab.projectless ? "" : projectRootOf(tab));
+    } else if (!archived && !tab.projectless && !isHiddenProject(projectRootOf(tab))) {
+      setProjects((old) => old.map((project) => sameProject(project.root, projectRootOf(tab)) ? { ...project, collapsed: false } : project));
     }
   };
   const leaveHiddenView = () => {
     const activeTab = tabsRef.current.find((t) => t.id === activeIdRef.current);
     const shownRoot = activeTab ? (activeTab.projectless ? "" : projectRootOf(activeTab)) : selectedRoot;
     if (!((activeTab?.archived) || (shownRoot && isHiddenProject(shownRoot)))) return;
-    const sibling = tabsRef.current.filter((t) => t.id !== activeTab?.id && listedTab(t)).at(-1);
+    const sibling = tabsRef.current.filter((t) => t.id !== activeTab?.id && listedTab(t) && (activeTab?.projectless ? t.projectless : !!shownRoot && inProject(t, shownRoot))).at(-1)
+      || tabsRef.current.filter((t) => t.id !== activeTab?.id && listedTab(t)).at(-1);
     retractBeforeSwitch(sibling?.id || "");
     announceChat(sibling);
     setActiveId(sibling?.id || "");
-    setSelectedRoot(sibling && !sibling.projectless ? sibling.root : "");
+    setSelectedRoot(sibling ? (sibling.projectless ? "" : sibling.root) : shownRoot && !isHiddenProject(shownRoot) ? shownRoot : "");
   };
   const toggleArchived = () => {
     const next = !showArchived;
-    if (next) setProjects((old) => old.map((p) => p.hidden && p.collapsed ? { ...p, collapsed: false } : p));
     if (!next) leaveHiddenView();
     setShowArchived(next);
   };
@@ -2075,7 +2078,7 @@ export default function App() {
                     void openWorkspace(folder, !projectsRef.current.some((p) => p.hidden && sameProject(p.root, folder))).then((value) => { if (value) { setAgentMenuRoot(value.root); setAgentMenu(true); } });
                   } else open();
                 }}
-                counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => inProject(t, p.root) && (showArchived || p.hidden || !t.archived)).length]))}
+                counts={Object.fromEntries(projects.map((p) => [p.root, tabs.filter((t) => inProject(t, p.root) && (p.hidden || !t.archived)).length]))}
                 showArchived={showArchived} onToggleArchived={toggleArchived} onLeaveHidden={leaveHiddenView}
                 onOpen={(project, reveal = true) => { void openWorkspace(project.root, reveal); }} onAdd={() => setDialog("open")} onTerminal={() => { void addTab("shell", "rich", ""); }} onScratch={startWithoutWorkspace}
                 onChange={setProjects} onArchive={archiveProject} />
@@ -2105,7 +2108,7 @@ export default function App() {
         )}
         <main className="main" ref={setMainElement}>
           {(!verticalChats || !active) && <div className="tabbar">
-            <SessionTabs tabs={tabs.filter((tab) => (activeProjectRoot ? inProject(tab, activeProjectRoot) : tab.projectless) && (showArchived || !tab.archived))} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
+            <SessionTabs tabs={tabs.filter((tab) => (activeProjectRoot ? inProject(tab, activeProjectRoot) : tab.projectless) && (!tab.archived || (showArchived && tab.id === activeId) || (activeProjectRoot && isHiddenProject(activeProjectRoot))))} activeId={activeId} settings={settings} label="Workspace chats" {...tabActions} />
             {sessionActions}
           </div>}
           {active || workspace || startingProjectless ? (
