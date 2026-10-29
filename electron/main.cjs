@@ -537,11 +537,15 @@ startup.then(async (start) => {
   handle("attachments:paste", (id) => attachments.paste(sessions.get(id).controlId));
   handle("attachments:choose", (id) => attachments.choose(window, sessions.get(id).controlId));
   handle("attachments:import", (id, files) => attachments.import(sessions.get(id).controlId, files));
-  agentControl = new AgentControl({ dataDir, window: () => window, browser: (body) => {
+  agentControl = new AgentControl({ dataDir, window: () => window, browser: async (body) => {
     if (!browser) throw new Error("Lumen's browser is starting.");
     // Mark agent-API calls (overriding any client-sent flag) so the pane's
     // per-tab "stop agent" switch can block agents without blocking the user.
-    return browser.control({ ...body, viaAgent: true });
+    const scope = body.chatId ? `chat:${String(body.chatId).toLowerCase()}` : body.scope || browser.scope;
+    const result = await browser.control({ ...body, viaAgent: true });
+    if (body.action === "open" && scope?.startsWith("chat:") && window && !window.isDestroyed())
+      window.webContents.send("browser:agent-open", scope.slice(5));
+    return result;
   }, notify: (status) => {
     if (window && !window.isDestroyed()) window.webContents.send("agent-control:status", status);
   } });
@@ -654,7 +658,7 @@ startup.then(async (start) => {
   handle("session:create", (options) => { const created = sessions.create(options); accounts.notify({ type: "changed" }); return created; });
   handle("session:start", (id) => sessions.startNative(id));
   handle("session:send", (id, message, metadata) => sessions.send(id, message, metadata));
-  handle("session:submit", (id, message) => sessions.submit(id, message));
+  handle("session:submit", (id, message, delivery) => sessions.submit(id, message, delivery));
   handle("session:queue-action", (id, messageId, action) => sessions.queueAction(id, messageId, action));
   handle("session:stop", (id, force) => sessions.stop(id, force === true));
   handle("session:reconnect", (id) => sessions.reconnect(id));

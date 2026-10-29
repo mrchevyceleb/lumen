@@ -1493,7 +1493,7 @@ class Sessions {
         const deliverContext = !s.lumenContextSent && !/^\s*[\/$]/.test(prompt)
           && fsSync.existsSync(path.join(this.dataDir, "agent-control.json"));
         if (deliverContext) {
-          expanded = `[You are running inside Lumen as task ${s.controlId}. You can talk to and orchestrate the other Lumen agents, and drive this chat's in-app browser, from your shell with the \`lumen\` command (already on PATH and authenticated): \`lumen whoami\`, \`lumen list\`, \`lumen create --agent codex --root <folder> --name <title> --text <task>\`, \`lumen send <task-id> --text <message>\` (queues for the next turn), \`lumen steer <task-id> --text <correction>\` (corrects the active run immediately in one step), \`lumen watch <task-id>\`, \`lumen get <task-id>\`, \`lumen stop|focus|rename|configure <task-id> …\`. Every chat you create or message is a real visible chat the user can watch. Browser: \`lumen browser open --chat-id ${s.controlId} --url <url>\`, then \`lumen browser snapshot <tab-id>\` to see clickable elements, \`lumen browser click <tab-id> --ref N\` (or --selector/--text/--x --y), \`type\`, \`press\`, \`scroll\`, \`inspect\`, \`screenshot --output <file>\`. Your mouse moves visibly in the pane while you drive it. Run \`lumen guide\` for the full guide. Use this only when the task calls for other agents or browser testing.]\n\n${expanded}`;
+          expanded = `[You are running inside Lumen as task ${s.controlId}. You can talk to and orchestrate the other Lumen agents, and drive this chat's in-app browser, from your shell with the \`lumen\` command (already on PATH and authenticated): \`lumen whoami\`, \`lumen list\`, \`lumen create --agent codex --root <folder> --name <title> --text <task>\`, \`lumen send <task-id> --text <message>\` (steers a running agent; use --delivery queue to wait for the next turn), \`lumen steer <task-id> --text <correction>\` (corrects the active run immediately in one step), \`lumen watch <task-id>\`, \`lumen get <task-id>\`, \`lumen stop|focus|rename|configure <task-id> …\`. Every chat you create or message is a real visible chat the user can watch. Browser: \`lumen browser open --chat-id ${s.controlId} --url <url>\`, then \`lumen browser snapshot <tab-id>\` to see clickable elements, \`lumen browser click <tab-id> --ref N\` (or --selector/--text/--x --y), \`type\`, \`press\`, \`scroll\`, \`inspect\`, \`screenshot --output <file>\`. Your mouse moves visibly in the pane while you drive it. Run \`lumen guide\` for the full guide. Use this only when the task calls for other agents or browser testing.]\n\n${expanded}`;
         }
         await this.agentTurn(s, expanded, queuedMessage);
         if (deliverContext) s.lumenContextSent = true;
@@ -1560,7 +1560,7 @@ class Sessions {
     else if (s.agent === "google") await this.attachments.resolve(s.controlId, message.attachments);
     else await (await ensureRuntime(this, s)).validateImages(message.attachments);
   }
-  submit(id, message) { return this.get(id).messageQueue.submit(message); }
+  submit(id, message, delivery) { const queue = this.get(id).messageQueue; return delivery ? queue.submitControlled(message, delivery) : queue.submit(message); }
   queueAction(id, messageId, action) { return this.get(id).messageQueue.action(messageId, action); }
   async steer(s, message) {
     if (!s.busy || s.mode !== "rich" || s.stopping || s.transitioning || s.setting || s.phase === "compacting") throw new Error("This turn cannot accept steering right now.");

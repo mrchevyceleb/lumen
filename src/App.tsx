@@ -258,6 +258,8 @@ export default function App() {
     - (visibleExplorer ? Math.max(MIN_PANEL, explorerWidth) : 0)
     - (visibleSidebar ? Math.max(MIN_PANEL, sidebarWidth) : 0);
   const browserVisible = browserOpen && browserRoom >= MIN_BROWSER_PANE;
+  const browserRoomRef = useRef(browserRoom);
+  browserRoomRef.current = browserRoom;
   const panelWidthsRef = useRef({ sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen, browserVisible });
   panelWidthsRef.current = { sidebar: sidebarWidth, explorer: explorerWidth, browser: browserWidth, sidebarOpen: visibleSidebar, explorerOpen: visibleExplorer, browserOpen, browserVisible };
   // Width to come back to after the explorer is auto-hidden for lack of room; the clamp would
@@ -479,6 +481,14 @@ export default function App() {
     setTabs((old) => old.map((tab) => tab.id === chat.id ? { ...tab, browserOpen: open } : tab));
     void updateTab(chat.id, { browserOpen: open });
   };
+  useEffect(() => window.lumen.onAgentBrowserOpen((chatId) => {
+    const chat = tabsRef.current.find((tab) => (tab.controlId || tab.id).toLowerCase() === chatId);
+    if (chat) {
+      paneState(chatId).toggles++;
+      setBrowserOpenFor(chat, true);
+      if (chat.id === activeIdRef.current && browserRoomRef.current < MIN_BROWSER_PANE) notify("The agent opened its browser. Make the window wider to see it.");
+    }
+  }), []);
   const setBrowserOpen = (open: boolean | ((value: boolean) => boolean)) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat first, then its browser stays with that chat."); return; }
@@ -557,6 +567,9 @@ export default function App() {
   const notify = useCallback((text: string) => {
     setNotice(text);
   }, []);
+  useEffect(() => {
+    if (browserVisible) setNotice((current) => current === "The agent opened its browser. Make the window wider to see it." ? "" : current);
+  }, [browserVisible]);
   const openWeb = (url: string, localFile?: string) => {
     const chat = tabsRef.current.find((tab) => tab.id === activeIdRef.current);
     if (!chat) { notify("Open a chat before opening its browser."); return; }
@@ -1343,6 +1356,7 @@ export default function App() {
     return (linked && primary) || source.root;
   };
   const controlledTaskCreates = useRef(new Map<string, { signature: string; promise: Promise<any> }>());
+  const controlledMessageTurns = useRef(new Map<string, Promise<void>>());
   const createControlledTask = (body: Record<string, any>, human = false) => {
     const id = typeof body.id === "string" ? body.id.trim() : "";
     if (!id) return Promise.reject(new Error("A task ID is required."));
@@ -1456,9 +1470,24 @@ export default function App() {
     } else {
       if (tab.mode !== "rich") throw new Error("Return this chat to readable view to control it. Native terminal interaction stays in Lumen.");
       if (action === "message") {
-        const reused = await submit(tab, body.id, body.text);
-        if (reused && !tab.queuedMessages?.some((message) => message.id === body.id)) return { ...view(tab), messageId: body.id, reused: true, ...(body.delivery === "steer" ? { steered: tab.messages.find((message) => message.id === body.id)?.delivery === "steer" } : {}) };
-        if (body.delivery === "steer") outcome = tab.busy || reused ? await api("session:queue-action", tab.id, body.id, "steer") : { steered: false, reason: "No active turn; the message is sending normally." };
+        const previous = controlledMessageTurns.current.get(id) || Promise.resolve();
+        let release!: () => void;
+        const done = new Promise<void>((resolve) => { release = resolve; });
+        const tail = previous.then(() => done);
+        controlledMessageTurns.current.set(id, tail);
+        await previous;
+        try {
+        const current = find(id);
+        if (!current) throw Object.assign(new Error("This task is no longer open."), { status: 404 });
+        const recorded = current.messages.find((message) => message.id === body.id);
+        if (recorded && !current.queuedMessages?.some((message) => message.id === body.id)) return { ...view(current), messageId: body.id, reused: true, steered: recorded.delivery === "steer" };
+        if (current.agent === "shell") await submit(current, body.id, body.text);
+        else outcome = await api("session:submit", current.id, { id: body.id, text: body.text }, body.delivery || "auto");
+        await settleControl();
+        } finally {
+          release();
+          if (controlledMessageTurns.current.get(id) === tail) controlledMessageTurns.current.delete(id);
+        }
       } else if (action === "queue" || action === "resume") outcome = await api("session:queue-action", tab.id, body.messageId || "", action === "resume" ? "resume" : body.action);
       else if (action === "stop") await api("session:stop", tab.id);
       else if (action === "models") return api("session:models", tab.id);

@@ -77,6 +77,11 @@ contextBridge.exposeInMainWorld("lumen", {
     ipcRenderer.on("browser:state", listener);
     return () => ipcRenderer.removeListener("browser:state", listener);
   },
+  onAgentBrowserOpen: (callback) => {
+    const listener = (_event, chatId) => callback(chatId);
+    ipcRenderer.on("browser:agent-open", listener);
+    return () => ipcRenderer.removeListener("browser:agent-open", listener);
+  },
   onBrowserCommand: (callback) => {
     const listener = (_event, command) => callback(command);
     ipcRenderer.on("browser:command", listener);

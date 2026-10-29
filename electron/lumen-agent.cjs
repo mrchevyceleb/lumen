@@ -11,7 +11,8 @@ const help = `Lumen agent control — all tasks are visible in the app
   lumen-agent create --agent claude --root "C:\\repo" --worktree agent/login-fix --base main --model MODEL --effort high --text "Fix login"
   lumen-agent create --agent claude --text-file task.txt
   lumen-agent get TASK_ID
-  lumen-agent send TASK_ID --text "Continue with tests"   (queue for the next turn)
+  lumen-agent send TASK_ID --text "Continue with tests"   (steer a running agent)
+  lumen-agent send TASK_ID --delivery queue --text "Run tests afterward"
   lumen-agent steer TASK_ID --text "Correction for the active run"
   lumen-agent steer TASK_ID MESSAGE_ID   (steer an existing queued message)
   lumen-agent remove TASK_ID MESSAGE_ID
@@ -42,8 +43,8 @@ Options: --connection FILE, --id UUID (retry-safe task/message ID), --owner NAME
   --cwd FOLDER, --account-id UUID, --worktree BRANCH, --base REF.
   --worktree creates/reuses its dedicated checkout and needs --root.
   Omit --root for a chat without a workspace.
-Messages queue by default. Use steer --text to correct the active run in one
-step, or steer MESSAGE_ID for an existing queued message. Watch emits
+Messages steer a running agent by default; --delivery queue waits for its next
+turn. Use steer MESSAGE_ID for an existing queued message. Watch emits
 JSON snapshots as the visible transcript changes; it exits when idle or awaiting
 your input. Use get to inspect its status. Lumen must be running.
 Set LUMEN_CONTROL_FILE for portable/custom profiles. Never share its token.`;
@@ -80,7 +81,7 @@ async function main() {
     else { if (process.argv[i + 1] === undefined || process.argv[i + 1].startsWith("--")) throw new Error(`Missing value for ${arg}`); options[arg.slice(2)] = process.argv[++i]; }
   }
   if (options.help || !args.length || args[0] === "help") return console.log(help);
-  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "worktree", "base", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "speed", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks", "selector", "ref", "x", "y", "key", "dy", "dx", "modifiers", "submit", "double"]);
+  const allowed = new Set(["connection", "id", "agent", "root", "cwd", "worktree", "base", "name", "text", "text-file", "owner", "model", "effort", "work-mode", "speed", "account-id", "response", "timeout", "interval", "url", "chat-id", "workspace", "script-file", "output", "device", "orientation", "marks", "selector", "ref", "x", "y", "key", "dy", "dx", "modifiers", "submit", "double", "delivery"]);
   for (const key of Object.keys(options)) if (!allowed.has(key)) throw new Error(`Unknown option --${key}`);
   const dataDir = process.platform === "win32" ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Lumen") : process.platform === "darwin" ? path.join(os.homedir(), "Library", "Application Support", "Lumen") : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "Lumen");
   const file = options.connection || process.env.LUMEN_CONTROL_FILE || path.join(dataDir, "agent-control.json");
