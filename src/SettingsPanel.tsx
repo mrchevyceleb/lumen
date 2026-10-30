@@ -467,7 +467,7 @@ export default function SettingsPanel({
                   ["Find a file", "Ctrl P"],
                   ["Save file", "Ctrl S"],
                   ["New terminal", "Ctrl Shift T"],
-                  ["Worktrees", "Ctrl Shift N"],
+                  ["New chat in a worktree", "Ctrl Shift N"],
                   ["Settings", "Ctrl ,"],
                 ].map(([label, key]) => (
                   <div key={key}>

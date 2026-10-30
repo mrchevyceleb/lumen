@@ -1714,8 +1714,7 @@ export default function App() {
         setDialog("settings");
       } else if (e.shiftKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        setWorktreeFocus(worktreeTarget.current);
-        setDialog("worktrees");
+        void openWorktreeJob(worktreeTarget.current);
       }
     };
     window.addEventListener("keydown", key);
@@ -1946,8 +1945,8 @@ export default function App() {
         } }}><div className="menu-label">NEW CHAT{agentMenuRoot !== undefined ? ` · ${agentMenuRoot ? projects.find((p) => sameProject(p.root, agentMenuRoot))?.name || "Project" : "No workspace"}` : ""}</div>
         {agents.map((agent) => <button key={agent} onClick={() => { setAgentMenu(false); setAgentMenuRoot(undefined); void addTab(agent, "rich", agentMenuRoot ?? root); }}><AgentMark agent={agent} color={settings.agents[agent].color} size={18} /><span>{agentNames[agent]}</span><small>{agent === "shell" ? "Shell" : boot.agents[agent]?.available ? "Ready" : "Configure"}</small></button>)}
         <div className="menu-divider" /><button onClick={() => { setAgentMenu(false); void addTab("shell", "rich", ""); }}><TerminalSquare size={17} /><span>Terminal without workspace</span><kbd>Ctrl Alt T</kbd></button><button onClick={() => { setAgentMenu(false); startWithoutWorkspace(); }}><Sparkles size={17} /><span>New chat without workspace</span></button>
-        <button onClick={() => { const target = agentMenuRoot ?? worktreeTarget.current; setAgentMenu(false); setAgentMenuRoot(undefined); void openWorktreeJob(target); }}><Sparkles size={17} /><span>Worktree agent job</span><small>Model + effort</small></button>
-        <button onClick={() => { setAgentMenu(false); setWorktreeFocus(worktreeTarget.current); setDialog("worktrees"); }}><Layers size={17} /><span>New worktree</span><kbd>Ctrl ⇧ N</kbd></button>
+        {!!(agentMenuRoot ?? worktreeTarget.current) && !Object.values(workspaces).some((item) => samePath(item.root, agentMenuRoot ?? worktreeTarget.current) && !item.git.available) && <><button onClick={() => { const target = agentMenuRoot ?? worktreeTarget.current; setAgentMenu(false); setAgentMenuRoot(undefined); void openWorktreeJob(target); }}><Sparkles size={17} /><span>New chat in a worktree</span>{(agentMenuRoot === undefined || sameProject(agentMenuRoot, worktreeTarget.current)) && <kbd>Ctrl ⇧ N</kbd>}</button>
+        <button onClick={() => { const target = agentMenuRoot ?? worktreeTarget.current; setAgentMenu(false); setAgentMenuRoot(undefined); setWorktreeFocus(target); setDialog("worktrees"); }}><Layers size={17} /><span>Manage worktrees</span></button></>}
       </div>, appRootRef.current || document.body)}
     </div>
     <IconButton label="Settings" onClick={() => setDialog("settings")}><MoreHorizontal size={18} /></IconButton>
@@ -2465,11 +2464,11 @@ export default function App() {
                       </span>
                       <button
                         className="worktree-shortcut"
-                        onClick={() => { setWorktreeFocus(root); setDialog("worktrees"); }}
+                        onClick={() => { void openWorktreeJob(root); }}
                       >
                         <Layers size={16} />
                         <span>
-                          Start in a worktree
+                          New chat in a worktree
                           <small>A fresh branch. A clean space.</small>
                         </span>
                         <ArrowRight size={14} />
@@ -2615,10 +2614,10 @@ export default function App() {
             const source = gitRootOf(selected);
             const result = await createControlledTask({
               id: input.id, agent: input.agent, root: source, worktree: input.branch, base: input.base,
-              name: input.name || `${agentNames[input.agent]} worktree job`, nameCustom: !!input.name, owner: "You",
+              name: input.name || `Worktree ${input.id.slice(0, 8)} · ${agentNames[input.agent]}`, nameCustom: !!input.name, owner: "You",
               model: input.model, effort: input.effort, text: input.text || undefined,
             }, true);
-            if (result.deliveryError) notify(`The job is open, but its first instruction was not sent: ${result.deliveryError}`);
+            if (result.deliveryError) notify(`The chat is open, but its first instruction was not sent: ${result.deliveryError}`);
             setDialog(null); setWorktreeFocus("");
           }}
         />

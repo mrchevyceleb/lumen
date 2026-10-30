@@ -49,19 +49,21 @@ export function Modal({
   children,
   onClose,
   wide = false,
+  initialFocus,
 }: {
   title: string;
   subtitle?: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  initialFocus?: string;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const id = useId();
   useEffect(() => {
     const previous = document.activeElement as HTMLElement;
     const el = root.current!;
-    (el.querySelector("input,textarea,button,select") as HTMLElement)?.focus();
+    (((initialFocus && el.querySelector(initialFocus)) || el.querySelector("input,textarea,button,select")) as HTMLElement | null)?.focus();
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();

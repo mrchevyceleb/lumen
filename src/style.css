@@ -3543,6 +3543,12 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .worktree-job-source small { display: block; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
 .worktree-job-source em { color: var(--muted); font-size: 10px; font-style: normal; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worktree-job-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.worktree-job-options { margin: 14px 0; }
+.worktree-job-options summary { color: var(--muted); cursor: pointer; padding: 8px 0; }
+.worktree-job-options summary:hover { color: var(--accent); }
+.worktree-job-options summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.worktree-job-options[open] summary { margin-bottom: 12px; }
+.worktree-job-options > .field, .worktree-job-options > .job-model-defaults { margin-top: 14px; }
 .agent-job-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .agent-job-grid > button { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 9px; min-width: 0; padding: 13px 11px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); text-align: left; transition: transform 140ms ease, border-color 140ms ease, background 140ms ease; }
 .agent-job-grid > button:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--agent-color); }
@@ -3560,7 +3566,7 @@ button.context-indicator:disabled { opacity: 0.65; cursor: default; }
 .worktree-job-form .settings-note > svg { flex-shrink: 0; margin-top: 3px; color: var(--accent); }
 @media (max-width: 680px) {
   .default-model-group, .worktree-job-fields { grid-template-columns: 1fr; }
-  .agent-job-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .agent-job-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .worktree-job-source em { display: none; }
 }
 .current-tag {
