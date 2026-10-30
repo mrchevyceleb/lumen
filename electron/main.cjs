@@ -840,12 +840,12 @@ startup.then(async (start) => {
     if (body?.action === "evaluate") throw new Error("Page scripts use the authenticated local agent API.");
     return browser.control(body);
   });
-  handle("browser:attach", async (id, sessionId, marks, captureToken = "") => {
+  handle("browser:attach", async (id, sessionId, marks, captureToken = "", strokes = []) => {
     const chat = sessions.get(sessionId);
     if (!chat) throw new Error("That chat no longer exists.");
-    const { image, page } = await browser.captureContext(id, marks, captureToken);
+    const { image, page } = await browser.captureContext(id, marks, captureToken, strokes);
     try {
-      const attachment = await attachments.save(chat.controlId, image, marks?.length ? "Browser screenshot (markup).png" : "Browser screenshot.png");
+      const attachment = await attachments.save(chat.controlId, image, (marks?.length || strokes?.length) ? "Browser screenshot (markup).png" : "Browser screenshot.png");
       if (captureToken) browser.releaseCapture(captureToken, true);
       return { attachment, page };
     } catch (error) { if (captureToken) browser.releaseCapture(captureToken, false); throw error; }
