@@ -6,6 +6,7 @@ export interface BrowserTab { id: string; title: string; url: string; error: str
 export interface BrowserState { scope: string; activeId: string; tabs: BrowserTab[]; error?: string }
 export interface BrowserSnapshot { active: BrowserState; states: BrowserState[] }
 export interface BrowserPage { url: string; title: string; text: string; console: { level: string; message: string }[] }
+export interface BrowserStroke { color: string; points: { x: number; y: number }[] }
 export interface BrowserMark { label: string; x: number; y: number; color: string }
 export interface AdministratorStatus { supported: boolean; elevated: boolean | null; error: string }
 export interface AccountProfile { id: string; agent: "claude" | "codex"; name: string; signedIn: boolean; email: string; signingIn: boolean; inUse: boolean }

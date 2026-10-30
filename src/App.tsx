@@ -61,6 +61,7 @@ import {
   type ImageAttachment,
   type AttachmentImport,
   type BrowserMark,
+  type BrowserStroke,
   type BrowserPage,
 } from "./types";
 import { defaults, loadSettings, styleVars, agentNames } from "./settings";
@@ -612,24 +613,23 @@ export default function App() {
     setTabs((old) => old.map((value) => value.id === id ? { ...value, ...change } : value));
     return tab?.controlId ? api("recovery:update", tab.controlId, change).catch((error) => notify("Draft recovery could not be saved: " + error.message)) : Promise.resolve();
   };
-  const attachBrowser = async (id: string, marks?: BrowserMark[], captureToken?: string) => {
+  const attachBrowser = async (id: string, marks?: BrowserMark[], captureToken?: string, strokes?: BrowserStroke[]) => {
     const chatId = activeIdRef.current;
     const chat = tabsRef.current.find((tab) => tab.id === chatId);
     if (!chat || chat.agent === "shell" || chat.mode !== "rich") throw new Error("Select a readable agent chat to attach this page.");
     if ((chat.draftAttachments?.length || 0) >= 8) throw new Error("Attach up to eight images.");
-    if (marks && ((marks.length < 1) || (marks.length > 10))) throw new Error("Mark up to ten things on the screenshot, or skip markup.");
-    const result = await api<{ attachment: ImageAttachment; page: BrowserPage }>("browser:attach", id, chatId, marks, captureToken);
+    if (marks && marks.length > 10) throw new Error("Mark up to ten things on the screenshot, or skip markup.");
+    const result = await api<{ attachment: ImageAttachment; page: BrowserPage }>("browser:attach", id, chatId, marks, captureToken, strokes);
     const latest = tabsRef.current.find((tab) => tab.id === chatId);
     if (!latest) throw new Error("The chat was closed while capturing the page.");
     if ((latest.draftAttachments?.length || 0) >= 8) throw new Error("Attach up to eight images.");
-    const context = `Browser page: ${result.page.title}\nURL: ${result.page.url}\n\n${result.page.text.slice(0, 4000)}`;
     setTabs((old) => old.map((tab) => tab.id === chatId && (tab.draftAttachments?.length || 0) < 8
-      ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), result.attachment], draft: [tab.draft, context].filter(Boolean).join("\n\n") } : tab));
+      ? { ...tab, draftAttachments: [...(tab.draftAttachments || []), result.attachment] } : tab));
     await settleControl();
     if (!tabsRef.current.find((tab) => tab.id === chatId)?.draftAttachments?.some((image) => image.id === result.attachment.id))
       throw new Error("The chat changed or reached its eight-image limit while capturing.");
     await persist();
-    notify("Page screenshot and context added to your chat draft");
+    notify("Screenshot added to your chat draft");
   };
   const signInChat = async (id: string) => {
     if (signInLock.current || signIn) return;

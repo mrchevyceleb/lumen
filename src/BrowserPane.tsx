@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Camera, Code2, ExternalLink, Globe, Pencil, Plus, RefreshCw, Send, Smartphone, X } from "lucide-react";
-import { api, type BrowserMark, type BrowserSnapshot, type BrowserState, type BrowserViewMode } from "./types";
+import { api, type BrowserMark, type BrowserStroke, type BrowserSnapshot, type BrowserState, type BrowserViewMode } from "./types";
 import { IconButton } from "./Components";
 import "./browser.css";
 
@@ -11,6 +11,7 @@ const DEVICE_OPTIONS: { id: string; label: string; width: number; height: number
   { id: "ipad", label: "iPad 820×1180", width: 820, height: 1180 },
 ];
 const MARK_PALETTE = ["red", "orange", "blue", "green", "purple"];
+const DRAW_COLORS: Record<string, string> = { red: "#ef4444", orange: "#f59e0b", blue: "#3b82f6", green: "#10b981", purple: "#a855f7" };
 // Main keeps a markup capture alive for 15 minutes; a stashed set of pins past that cannot send.
 const MARKUP_TTL_MS = 15 * 60 * 1000;
 // While a screenshot is being marked, the page under the pins must stay the page that was
@@ -20,7 +21,7 @@ const PAGE_CHANGING = new Set(["select", "close", "open", "navigate", "back", "f
 
 export default function BrowserPane({ chatId, chatName, workspace, open, blocked, width, maxWidth, onWidth, onClose, onAttach, canAttach, onError }: {
   chatId: string; chatName: string; workspace: string; open: boolean; blocked: boolean; width: number; maxWidth: number; onWidth: (width: number) => void;
-  onClose: () => void; onAttach: (id: string, marks?: BrowserMark[], captureToken?: string) => Promise<void>; canAttach: boolean; onError: (message: string) => void;
+  onClose: () => void; onAttach: (id: string, marks?: BrowserMark[], captureToken?: string, strokes?: BrowserStroke[]) => Promise<void>; canAttach: boolean; onError: (message: string) => void;
 }) {
   const scope = chatId ? `chat:${chatId.toLowerCase()}` : "";
   const [state, setState] = useState<BrowserState>(() => browserStateCache.get(scope) || { scope, tabs: [], activeId: "" });
@@ -32,6 +33,11 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const [markupToken, setMarkupToken] = useState("");
   const [markupSize, setMarkupSize] = useState<{ width: number; height: number } | null>(null);
   const [marks, setMarks] = useState<BrowserMark[]>([]);
+  const [strokes, setStrokes] = useState<BrowserStroke[]>([]);
+  const [tool, setTool] = useState<"pin" | "draw">("pin");
+  const [drawColor, setDrawColor] = useState("red");
+  const drawingPointer = useRef<number | null>(null);
+  const [drawing, setDrawing] = useState(false);
   const [markDraft, setMarkDraft] = useState("");
   const [marksSending, setMarksSending] = useState(false);
   const [pendingNorm, setPendingNorm] = useState<{ x: number; y: number } | null>(null);
@@ -47,7 +53,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   // Frozen screenshots and their pins, kept per chat so a switch never costs the user their marks.
   // A capture token lives 15 minutes, so a stash older than that can no longer be sent.
-  const markupStash = useRef(new Map<string, { image: string; token: string; size: { width: number; height: number } | null; marks: BrowserMark[]; draft: string; at: number }>());
+  const markupStash = useRef(new Map<string, { image: string; token: string; size: { width: number; height: number } | null; marks: BrowserMark[]; strokes: BrowserStroke[]; draft: string; at: number }>());
   const input = useRef<HTMLInputElement>(null);
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
@@ -99,7 +105,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
   // a tab switch or navigation must not throw away pins the user has already placed.
   useEffect(() => {
     if (markupMode) return;
-    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false;
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setStrokes([]); drawingPointer.current = null; setDrawing(false); setMarkDraft(""); setPendingNorm(null); setMarksSending(false); marksLock.current = false;
   }, [current?.id, current?.url, markupMode]);
   // A frozen screenshot belongs to the chat it was taken in. Leaving that chat ends marking
   // rather than carrying chat A's pins and image into chat B's pane.
@@ -112,17 +118,17 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     // chat. They are kept with that chat rather than thrown away: coming back brings the frozen
     // screenshot and every pin back exactly as they were, until the capture token expires.
     if (markupMode && (marks.length || markupImage)) {
-      markupStash.current.set(left, { image: markupImage, token: markupToken, size: markupSize, marks, draft: markDraft, at: Date.now() });
-      onError(`Marks kept with this chat. They will be here when you come back.`);
+      markupStash.current.set(left, { image: markupImage, token: markupToken, size: markupSize, marks, strokes, draft: markDraft, at: Date.now() });
+      if (marks.length || strokes.length || markDraft.trim()) onError("Your markup is kept with this chat. It will be here when you come back.");
     }
     const kept = markupStash.current.get(scope);
     const fresh = kept && Date.now() - kept.at < MARKUP_TTL_MS ? kept : undefined;
     if (kept && !fresh) markupStash.current.delete(scope);
     setMarkupMode(!!fresh); setMarkupImage(fresh?.image || ""); setMarkupToken(fresh?.token || "");
-    setMarkupSize(fresh?.size || null); setMarks(fresh?.marks || []); setMarkDraft(fresh?.draft || "");
+    setMarkupSize(fresh?.size || null); setMarks(fresh?.marks || []); setStrokes(fresh?.strokes || []); drawingPointer.current = null; setDrawing(false); setMarkDraft(fresh?.draft || "");
     setPendingNorm(null); setMarksSending(false); setConfirmDiscard(false); marksLock.current = false;
-    if (fresh?.marks.length) onError(`Your ${fresh.marks.length} mark${fresh.marks.length === 1 ? " is" : "s are"} still on this chat's screenshot. Carry on when you are ready.`);
-  }, [scope, markupMode, marks, markupImage, markupToken, markupSize, markDraft, onError]);
+    if (fresh && (fresh.marks.length || fresh.strokes.length)) onError("Your markup is still on this chat’s screenshot. Carry on when you are ready.");
+  }, [scope, markupMode, marks, markupImage, markupToken, markupSize, strokes, markDraft, onError]);
   useEffect(() => { if (open && current) browserStateCache.set(scope, state); }, [state, scope, open, current]);
   // Fit the frozen screenshot into the pane ourselves: the pins are placed as percentages of the
   // image box, so the *image* box must be the thing we measure. CSS aspect-ratio plus max-width and
@@ -198,25 +204,27 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
       // picture no longer belongs to what is on screen, so drop it instead of opening markup
       // over the wrong page.
       if (scopeRef.current !== startScope || currentIdRef.current !== startTab) return;
+      setTool("pin");
       setMarkupToken(frozen.token);
       setMarkupImage(frozen.image);
       setMarkupSize(dimensions);
-      setMarks([]); setMarkDraft(""); setPendingNorm(null);
+      setMarks([]); setStrokes([]); drawingPointer.current = null; setDrawing(false); setMarkDraft(""); setPendingNorm(null);
       setMarkupMode(true);
     } catch (e: any) { setError(e.message); }
     finally { captureLock.current = false; setCapturing(false); }
   };
   const sendMarkup = async () => {
-    if (!current || marksLock.current || !marks.length) return;
+    if (!current || marksLock.current || (!marks.length && !strokes.length)) return;
+    if (pendingNorm || markDraft.trim()) { setTool("pin"); setError("Finish or clear your pin note before sending."); return; }
     marksLock.current = true; setMarksSending(true);
-    try { await onAttach(current.id, marks, markupToken); setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); }
+    try { await onAttach(current.id, marks, markupToken, strokes); setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setStrokes([]); drawingPointer.current = null; setDrawing(false); setMarkDraft(""); setPendingNorm(null); }
     catch (e: any) { setError(e.message); }
     finally { marksLock.current = false; setMarksSending(false); }
   };
   // Leaving markup throws the pins away, so ask first when there is work to lose.
   const cancelMarkup = () => {
-    if (marks.length && !confirmDiscard) { setConfirmDiscard(true); setError(""); return; }
-    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setMarkDraft(""); setPendingNorm(null); setConfirmDiscard(false);
+    if ((marks.length || strokes.length || markDraft.trim()) && !confirmDiscard) { setConfirmDiscard(true); setError(""); return; }
+    setMarkupMode(false); setMarkupImage(""); setMarkupToken(""); setMarkupSize(null); setMarks([]); setStrokes([]); drawingPointer.current = null; setDrawing(false); setMarkDraft(""); setPendingNorm(null); setConfirmDiscard(false);
   };
   // Place every label in measured pixels: beside its dot when there is room, flipped to the
   // other side near the right edge, and kept fully inside the picture top and bottom.
@@ -280,7 +288,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
     const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setStageReady(true)); });
     return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner); };
   }, [markupMode, stageBox]);
-  useEffect(() => { setConfirmDiscard(false); }, [marks.length]);
+  useEffect(() => { setConfirmDiscard(false); }, [marks.length, strokes.length]);
   // An armed "Discard N pins?" must not sit there waiting for a stray click minutes later.
   useEffect(() => {
     if (!confirmDiscard) return;
@@ -347,7 +355,7 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         <button type="submit" className="icon-button" aria-label="Go to address"><ArrowRight size={15} /></button>
       </form>
       <div className="browser-tools">
-        <button disabled={!canAttach || !current || current.url === "about:blank" || capturing || !!current.error || current.loading} title="Add a screenshot and page context to the current chat draft" onClick={async () => {
+        <button disabled={!canAttach || !current || current.url === "about:blank" || capturing || !!current.error || current.loading} title="Add a screenshot to the current chat draft" onClick={async () => {
           if (!current || captureLock.current) return; captureLock.current = true; setCapturing(true);
           try { await onAttach(current.id); } catch (e: any) { setError(e.message); } finally { captureLock.current = false; setCapturing(false); }
         }}><Camera size={13} />{capturing ? "Capturing…" : "Attach to chat"}</button>
@@ -366,25 +374,29 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
         : current?.agentDriving && <div className="browser-driving" role="status"><span className="browser-driving-dot" /><span>An agent is driving this tab. Watch its cursor, or stop it here.</span><button onClick={() => void action({ action: "agent-stop", id: current.id })}>Stop agent</button></div>}
       {markupMode && current && <div className="browser-markup-bar">
         <strong>Mark up the screenshot</strong>
-        <span className="browser-markup-hint">Click the picture to drop a pin, type what it means, then Add. Pins are numbered for the chat.</span>
-        <input ref={markInputRef} aria-label="What this pin means" placeholder="e.g. This button is broken" value={markDraft} maxLength={80}
+        <button disabled={drawing} aria-pressed={tool === "pin"} className={tool === "pin" ? "selected" : ""} onClick={() => setTool("pin")}>Pin</button>
+        <button disabled={drawing} aria-pressed={tool === "draw"} className={tool === "draw" ? "selected" : ""} onClick={() => setTool("draw")}>Draw</button>
+        {tool === "draw" && <><label className="browser-draw-color"><span className="browser-draw-swatch" style={{ background: DRAW_COLORS[drawColor] }} /> Color <select aria-label="Drawing color" value={drawColor} onChange={(e) => setDrawColor(e.target.value)}>{MARK_PALETTE.map((color) => <option key={color} value={color}>{color[0].toUpperCase() + color.slice(1)}</option>)}</select></label><button disabled={!strokes.length || drawing} onClick={() => setStrokes((old) => old.slice(0, -1))}>Undo drawing</button></>}
+        <span className="browser-markup-hint">{tool === "pin" ? "Click the picture to drop a pin, type what it means, then Add." : "Draw on the picture with your mouse, pen, or finger."}</span>
+        <input disabled={tool !== "pin"} ref={markInputRef} aria-label="What this pin means" placeholder="e.g. This button is broken" value={markDraft} maxLength={80}
           onChange={(e) => setMarkDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); document.querySelector<HTMLButtonElement>(".browser-mark-add")?.click(); } }} />
-        <button className="browser-mark-add" disabled={!markDraft.trim() || marks.length >= 10} onClick={() => {
+        <button className="browser-mark-add" disabled={tool !== "pin" || !markDraft.trim() || marks.length >= 10} onClick={() => {
           if (!markDraft.trim() || marks.length >= 10) return;
           if (!pendingNorm) { setError("Click the screenshot first to place this pin, then type what it means."); return; }
           setMarks((old) => [...old, { label: markDraft.trim(), x: pendingNorm.x, y: pendingNorm.y, color: MARK_PALETTE[old.length % MARK_PALETTE.length] }]);
           setPendingNorm(null); setMarkDraft("");
         }}>Add</button>
         {marks.length > 0 && <button onClick={() => setMarks((old) => old.slice(0, -1))}>Remove last</button>}
-        {marks.length > 0 && <button disabled={marksSending} onClick={() => void sendMarkup()}><Send size={12} />{marksSending ? "Sending…" : `Send ${marks.length} pin${marks.length === 1 ? "" : "s"} to chat`}</button>}
-        <button disabled={marksSending} onClick={cancelMarkup}>{confirmDiscard ? `Discard ${marks.length} pin${marks.length === 1 ? "" : "s"}?` : "Done marking"}</button>
+        <button disabled={marksSending || drawing || (!marks.length && !strokes.length)} onClick={() => void sendMarkup()}><Send size={12} />{marksSending ? "Sending…" : "Send to chat"}</button>
+        <button disabled={marksSending} onClick={cancelMarkup}>{confirmDiscard ? "Discard markup?" : "Done marking"}</button>
       </div>}
       <div ref={host} className={mobile || markupMode ? "browser-viewport browser-viewport-device" : "browser-viewport"}>
         {markupMode && current ? <div className="browser-markup-layer" ref={markupLayerRef}>
           <div ref={stageRef} className="browser-markup-stage" style={{ ...(stageBox ? { width: stageBox.width, height: stageBox.height } : {}), visibility: stageBox && stageReady ? undefined : "hidden" }}>
             <img alt="Screenshot to mark up" src={markupImage} draggable={false}
               onClick={(e) => {
+                if (tool !== "pin") return;
                 const box = e.currentTarget.getBoundingClientRect();
                 if (box.width < 1 || box.height < 1) return;
                 const x = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
@@ -394,6 +406,24 @@ export default function BrowserPane({ chatId, chatName, workspace, open, blocked
                 // Dropping a pin arms the note field: whatever the user types next belongs to it.
                 requestAnimationFrame(() => markInputRef.current?.focus());
               }} />
+            <svg className={`browser-drawing ${tool === "draw" ? "active" : ""}`} viewBox="0 0 1000 1000" preserveAspectRatio="none" role="img" aria-label={`Screenshot drawing, ${strokes.length} strokes`}
+              onPointerDown={(e) => {
+                if (tool !== "draw" || marksSending || drawingPointer.current !== null || e.button !== 0) return;
+                if (strokes.length >= 200 || strokes.reduce((n, item) => n + item.points.length, 0) >= 30000) { setError("Drawing limit reached. Undo a stroke to keep drawing."); return; }
+                e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); drawingPointer.current = e.pointerId; setDrawing(true);
+                const box = e.currentTarget.getBoundingClientRect();
+                const point = { x: Math.max(0, Math.min(1, (e.clientX - box.left) / box.width)), y: Math.max(0, Math.min(1, (e.clientY - box.top) / box.height)) };
+                setStrokes((old) => [...old, { color: drawColor, points: [point] }]);
+              }}
+              onPointerMove={(e) => {
+                if (drawingPointer.current !== e.pointerId) return;
+                if (strokes.reduce((n, item) => n + item.points.length, 0) >= 30000) { setError("Drawing limit reached. Undo a stroke to keep drawing."); return; }
+                const box = e.currentTarget.getBoundingClientRect();
+                const point = { x: Math.max(0, Math.min(1, (e.clientX - box.left) / box.width)), y: Math.max(0, Math.min(1, (e.clientY - box.top) / box.height)) };
+                setStrokes((old) => { const last = old[old.length - 1]; if (!last) return old; const prev = last.points[last.points.length - 1]; if (Math.hypot(point.x - prev.x, point.y - prev.y) < 0.001) return old; if (old.reduce((n, item) => n + item.points.length, 0) >= 30000) return old; return [...old.slice(0, -1), { ...last, points: [...last.points, point] }]; });
+              }} onPointerUp={() => { drawingPointer.current = null; setDrawing(false); }} onPointerCancel={() => { drawingPointer.current = null; setDrawing(false); }} onLostPointerCapture={() => { drawingPointer.current = null; setDrawing(false); }}>
+              {strokes.map((stroke, index) => <polyline key={index} points={(stroke.points.length === 1 ? [stroke.points[0], { x: stroke.points[0].x + 0.000001, y: stroke.points[0].y }] : stroke.points).map((p) => `${p.x * 1000},${p.y * 1000}`).join(" ")} fill="none" stroke={DRAW_COLORS[stroke.color]} strokeWidth={stageBox ? 0.006 * Math.min(stageBox.width, stageBox.height) : 3} vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />)}
+            </svg>
             {marks.map((mark, index) => <div className="browser-mark-pin" key={index} data-x={mark.x} data-y={mark.y} style={{ left: `${mark.x * 100}%`, top: `${mark.y * 100}%` }}>
               <span style={{ background: mark.color }}>{index + 1}</span><em>#{index + 1} {mark.label}</em>
             </div>)}

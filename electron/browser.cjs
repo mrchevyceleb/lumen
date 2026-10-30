@@ -114,9 +114,22 @@ const normalizeMarks = (marks) => {
     return { label, x, y, color };
   });
 };
+const normalizeStrokes = (strokes = []) => {
+  if (!Array.isArray(strokes)) throw bad("Invalid drawing.");
+  if (strokes.length > 200) throw bad("Too many drawing strokes.");
+  let count = 0;
+  return strokes.map((stroke) => {
+    if (!stroke || !Array.isArray(stroke.points) || !stroke.points.length || (count += stroke.points.length) > 30000) throw bad("Invalid drawing.");
+    const points = stroke.points.map((point) => {
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) throw bad("Drawing must stay inside the screenshot.");
+      return { x: point.x, y: point.y };
+    });
+    return { color: typeof stroke.color === "string" && Object.hasOwn(MARK_COLORS, stroke.color) ? MARK_COLORS[stroke.color] : MARK_COLORS.red, points };
+  });
+};
 // Compose at the screenshot's actual pixel size. The canvas is independent of
 // the hidden renderer window's display size and device scale factor.
-const renderMarkup = async (imageDataURL, marks, width, height) => {
+const renderMarkup = async (imageDataURL, marks, width, height, strokes = []) => {
   const image = new Image();
   image.src = imageDataURL;
   await image.decode();
@@ -125,6 +138,15 @@ const renderMarkup = async (imageDataURL, marks, width, height) => {
   const ctx = canvas.getContext("2d");
   if (!ctx || image.naturalWidth !== width || image.naturalHeight !== height) throw new Error("The screenshot could not be read.");
   ctx.drawImage(image, 0, 0);
+  for (const stroke of strokes) {
+    ctx.strokeStyle = stroke.color; ctx.fillStyle = stroke.color;
+    ctx.lineWidth = Math.min(width, height) * 0.006; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.beginPath();
+    const first = stroke.points[0]; ctx.moveTo(first.x * width, first.y * height);
+    for (const point of stroke.points.slice(1)) ctx.lineTo(point.x * width, point.y * height);
+    if (stroke.points.length === 1) { ctx.arc(first.x * width, first.y * height, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill(); }
+    else ctx.stroke();
+  }
   const scale = Math.max(1, Math.min(2, Math.min(width, height) / 700));
   const radius = 15 * scale, font = 12 * scale, gap = 7 * scale;
   const clamp = (v, low, high) => Math.max(low, Math.min(v, Math.max(low, high)));
@@ -1074,9 +1096,10 @@ class BrowserService {
     if (success) this.markCaptures.delete(token);
     else capture.busy = false;
   }
-  async composeMarkedImageFor(frozen, marks) {
+  async composeMarkedImageFor(frozen, marks, strokes = []) {
     const clean = normalizeMarks(marks);
-    if (!clean.length) return frozen;
+    const drawing = normalizeStrokes(strokes);
+    if (!clean.length && !drawing.length) return frozen;
     const { width, height } = frozen.getSize();
     if (width * height > 268435456) throw new Error("That page is too large to mark up. Zoom out or shrink the browser and try again.");
     const markupWindow = new BrowserWindow({ show: false, width: 1, height: 1, frame: false,
@@ -1086,7 +1109,7 @@ class BrowserService {
       const colors = clean.map((mark) => ({ ...mark, color: MARK_COLORS[mark.color] }));
       let timer;
       const result = await Promise.race([
-        markupWindow.webContents.executeJavaScript(`(${renderMarkup.toString()})(${JSON.stringify(frozen.toDataURL())},${JSON.stringify(colors)},${width},${height})`),
+        markupWindow.webContents.executeJavaScript(`(${renderMarkup.toString()})(${JSON.stringify(frozen.toDataURL())},${JSON.stringify(colors)},${width},${height},${JSON.stringify(drawing)})`),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Could not draw the markup onto the screenshot.")), 20000); }),
       ]).finally(() => clearTimeout(timer));
       const image = nativeImage.createFromDataURL(result);
@@ -1264,7 +1287,7 @@ class BrowserService {
     const text = await this.pageOperation(tab, (contents) => contents.executeJavaScript("document.body?.innerText.slice(0, 16000) || ''"), undefined, agent);
     return { url: tab.url, title: tab.title, text, console: [...tab.console] };
   }
-  async captureContext(id, marks, captureToken = "") {
+  async captureContext(id, marks, captureToken = "", strokes = []) {
     let frozen;
     if (captureToken) frozen = this.takeCapture(captureToken, id, false);
     else {
@@ -1276,7 +1299,7 @@ class BrowserService {
     // live page here: a later navigation could make it describe another page.
     try {
       if (!frozen.page) throw bad("That screenshot has no page context. Capture it again.", 409);
-      const image = marks === undefined ? frozen.image : await this.composeMarkedImageFor(frozen.image, marks);
+      const image = marks === undefined ? frozen.image : await this.composeMarkedImageFor(frozen.image, marks, strokes);
       return { image, page: frozen.page };
     } catch (error) { if (captureToken) this.releaseCapture(captureToken, false); throw error; }
   }
