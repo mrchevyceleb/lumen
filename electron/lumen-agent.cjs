@@ -11,8 +11,7 @@ const help = `Lumen agent control — all tasks are visible in the app
   lumen-agent create --agent claude --root "C:\\repo" --worktree agent/login-fix --base main --model MODEL --effort high --text "Fix login"
   lumen-agent create --agent claude --text-file task.txt
   lumen-agent get TASK_ID
-  lumen-agent send TASK_ID --text "Continue with tests"   (steer a running agent)
-  lumen-agent send TASK_ID --delivery queue --text "Run tests afterward"
+  lumen-agent send TASK_ID --text "Heads up: the review is starting"   (deliver to a running agent)
   lumen-agent steer TASK_ID --text "Correction for the active run"
   lumen-agent steer TASK_ID MESSAGE_ID   (steer an existing queued message)
   lumen-agent remove TASK_ID MESSAGE_ID
@@ -43,10 +42,20 @@ Options: --connection FILE, --id UUID (retry-safe task/message ID), --owner NAME
   --cwd FOLDER, --account-id UUID, --worktree BRANCH, --base REF.
   --worktree creates/reuses its dedicated checkout and needs --root.
   Omit --root for a chat without a workspace.
-Messages steer a running agent by default; --delivery queue waits for its next
-turn. Use steer MESSAGE_ID for an existing queued message. Watch emits
-JSON snapshots as the visible transcript changes; it exits when idle or awaiting
-your input. Use get to inspect its status. Lumen must be running.
+Send all agent messages directly, including updates: a busy agent receives them
+in its current turn. Do not use --delivery queue unless the user explicitly asks
+to wait until that turn finishes: lumen send TASK_ID --delivery queue --text "..."
+Read the full result: steered means accepted; check the transcript when needed.
+steerPending means automatic delivery after compaction. If deliveryUncertain is
+true, inspect the chat before retrying. A queued or separately sent message was
+accepted; do not resend it. Inspect the queue and use get to check the receiver.
+If a routine message was queued by mistake or waits for the queue while a
+supported receiver is busy, steer TASK_ID MESSAGE_ID on that existing message.
+Never steer a paused or uncertain queue, or a command needing its own turn.
+Gemini cannot steer; its queued messages wait for the next turn. If another
+action is in progress, wait for it to finish before steering. Watch emits JSON
+snapshots as the visible transcript changes; it exits when idle or awaiting input. Use get
+to inspect its status. Lumen must be running.
 Set LUMEN_CONTROL_FILE for portable/custom profiles. Never share its token.`;
 async function main() {
   // PowerShell's binary launcher transports arguments in a temporary file:

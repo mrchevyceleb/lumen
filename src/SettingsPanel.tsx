@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Palette,
   Waves,
@@ -96,6 +96,25 @@ export default function SettingsPanel({
   onAdministratorStatus: (status: AdministratorStatus) => void;
 }) {
   const [section, setSection] = useState(initialSection);
+  const navigation = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const nav = navigation.current;
+    if (!nav) return;
+    const revealSelected = () => {
+      const selected = nav.querySelector<HTMLElement>("button.selected");
+      if (selected && nav.scrollWidth > nav.clientWidth) {
+        const navRect = nav.getBoundingClientRect();
+        const selectedRect = selected.getBoundingClientRect();
+        if (selectedRect.left < navRect.left || selectedRect.right > navRect.right) {
+          nav.scrollLeft += selectedRect.left + selectedRect.width / 2 - navRect.left - navRect.width / 2;
+        }
+      }
+    };
+    revealSelected();
+    const observer = new ResizeObserver(revealSelected);
+    observer.observe(nav);
+    return () => observer.disconnect();
+  }, [section]);
   const set = (key: keyof Settings, value: any) =>
     update({ ...s, [key]: value });
   const agentSet = (agent: Agent, key: keyof AgentConfig, value: any) =>
@@ -111,7 +130,7 @@ export default function SettingsPanel({
       wide
     >
       <div className="settings-layout">
-        <nav className="settings-nav">
+        <nav className="settings-nav" ref={navigation}>
           {[
             ["appearance", Palette, "Appearance"],
             ["backgrounds", Waves, "Backgrounds"],

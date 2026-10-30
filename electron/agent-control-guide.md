@@ -14,15 +14,18 @@ lumen list                   # every open chat, yours included
 lumen create --agent claude --root 'C:\repo' --name 'Write the tests' --owner 'Task <your id>' --text '…'
 lumen create --agent codex --root 'C:\repo' --worktree agent/login-fix --base main --model MODEL_ID --effort high --name 'Fix login' --owner 'Task <your id>' --text 'Fix the login bug'
 lumen watch TASK_ID          # follow it until it finishes or asks a question
-lumen send TASK_ID --text 'Correction for the active run'
-lumen send TASK_ID --delivery queue --text 'Run the full suite afterward'
+lumen send TASK_ID --text 'Heads up: the review is starting now'
 lumen steer TASK_ID --text 'Correction for the active run'
 lumen guide                  # this guide
 ```
 
 Set `--owner` to name yourself on tasks you create, so the user can see which agent is managing them. Everything you create or message is a real visible chat. Do not stop or close the user's own chats, and do not message your own task ID.
 
-**`send` steers a running agent by default.** Use `--delivery queue` to wait for its next turn. Gemini and commands that require their own turn remain queued. Check the result and do not discard it. For Codex, `steered: true` means the turn accepted the message; check the transcript for confirmation. If `steerPending` is true, the message is already accepted and will automatically steer after compaction; do not resend it. If `deliveryUncertain` is true, inspect the chat before retrying.
+**Send every agent-to-agent message directly, including updates and heads-ups.** Use `lumen send TASK_ID --text 'message'` even when the receiving agent is busy. It steers the current turn. Do not choose `--delivery queue` to avoid interrupting or because a message is informational: the agent may not see it for a long time. Only use `--delivery queue` when the user explicitly asks to wait until the current turn finishes. Gemini and commands that require their own turn remain queued. Read the complete result and do not filter it away. `steered: true` means the turn accepted the message; check the transcript when confirmation matters. A queued or separately sent message was accepted; do not resend it. Inspect the queue and use lumen get to check the receiver. If a routine message is queued by mistake or is waiting for the queue while a supported receiver is busy, use `lumen steer TASK_ID MESSAGE_ID` on that existing message. Never steer if the queue is paused or delivery is uncertain, or if the message is a command needing its own turn. Gemini cannot steer and receives queued messages on its next turn. If another action is in progress, wait for it to finish before steering. If `steerPending` is true, the message is already accepted and will automatically steer after compaction; do not resend it. If `deliveryUncertain` is true, inspect the chat before retrying.
+
+## Explicitly deferred delivery
+
+Only when the user explicitly requests waiting until the current turn finishes, use `lumen send TASK_ID --delivery queue --text 'message'`. This message will wait for a separate turn.
 
 ## CLI
 
@@ -85,7 +88,7 @@ Every request requires `Authorization: Bearer TOKEN`. POST requests require JSON
 | GET /v1/tasks | `{ tasks: [...] }` with metadata, queues, context usage, pending questions |
 | POST /v1/tasks | `id?`, `agent?`, `root?`, `cwd?`, `worktree?`, `base?`, `name?`, `owner?`, `accountId?`, `model?`, `effort?`, `workMode?`, `serviceTier?`, `text?`; returns visible task |
 | GET /v1/tasks/ID | Metadata plus the last 200 visible messages (up to 80,000 characters each); `transcriptLimited` reports truncation |
-| POST /v1/tasks/ID/messages | `{ id?: UUID, text: string, senderId?: UUID, delivery?: "queue" or "steer" }`; returns `messageId`, queue and current task. The CLI automatically supplies its originating chat as `senderId`; callers using HTTP can supply it too. Omit `delivery` to steer a running supported agent; use `delivery: "queue"` to wait for the next turn, or `delivery: "steer"` to explicitly request steering. |
+| POST /v1/tasks/ID/messages | `{ id?: UUID, text: string, senderId?: UUID, delivery?: "queue" or "steer" }`; returns `messageId`, queue and current task. The CLI automatically supplies its originating chat as `senderId`; callers using HTTP can supply it too. Omit `delivery` to steer a running supported agent; use `delivery: "queue"` only when the user explicitly requests waiting for the next turn, or `delivery: "steer"` to explicitly request steering. |
 | POST /v1/tasks/ID/queue | `{ messageId: UUID, action: "steer" or "remove" }` |
 | POST /v1/tasks/ID/resume | `{}`; resumes a paused queue |
 | POST /v1/tasks/ID/stop | `{}`; stops the turn and pauses its queue |
