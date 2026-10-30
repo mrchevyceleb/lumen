@@ -842,8 +842,13 @@ startup.then(async (start) => {
   });
   handle("browser:attach", async (id, sessionId, marks, captureToken = "") => {
     const chat = sessions.get(sessionId);
+    if (!chat) throw new Error("That chat no longer exists.");
     const { image, page } = await browser.captureContext(id, marks, captureToken);
-    return { attachment: await attachments.save(chat.controlId, image, marks?.length ? "Browser screenshot (markup).png" : "Browser screenshot.png"), page };
+    try {
+      const attachment = await attachments.save(chat.controlId, image, marks?.length ? "Browser screenshot (markup).png" : "Browser screenshot.png");
+      if (captureToken) browser.releaseCapture(captureToken, true);
+      return { attachment, page };
+    } catch (error) { if (captureToken) browser.releaseCapture(captureToken, false); throw error; }
   });
   installZoom(window.webContents, dataDir);
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));

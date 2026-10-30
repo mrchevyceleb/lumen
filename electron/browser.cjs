@@ -1,4 +1,4 @@
-const { WebContentsView, BrowserWindow, session, Menu, clipboard, app, dialog, net, protocol } = require("electron");
+const { WebContentsView, BrowserWindow, nativeImage, session, Menu, clipboard, app, dialog, net, protocol } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -114,33 +114,79 @@ const normalizeMarks = (marks) => {
     return { label, x, y, color };
   });
 };
-// Numbered pins are drawn over the frozen capture in a hidden offscreen
-// window (Electron has no image-compositing API). Marks stay normalized.
-const buildMarkupHTML = (imageDataURL, marks, width, height) => {
+// Compose at the screenshot's actual pixel size. The canvas is independent of
+// the hidden renderer window's display size and device scale factor.
+const renderMarkup = async (imageDataURL, marks, width, height) => {
+  const image = new Image();
+  image.src = imageDataURL;
+  await image.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx || image.naturalWidth !== width || image.naturalHeight !== height) throw new Error("The screenshot could not be read.");
+  ctx.drawImage(image, 0, 0);
   const scale = Math.max(1, Math.min(2, Math.min(width, height) / 700));
   const radius = 15 * scale, font = 12 * scale, gap = 7 * scale;
-  const pins = marks.map((mark, index) => {
-    const label = `#${index + 1} ${mark.label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`;
-    return `<div class="pin" data-x="${mark.x}" data-y="${mark.y}" style="left:${mark.x * 100}%;top:${mark.y * 100}%;--pin:${MARK_COLORS[mark.color]};--r:${radius}px;--font:${font}px"><span class="dot">${index + 1}</span><em>${label}</em></div>`;
-  }).join("");
-  // The dot stays exactly on the mark. The label is placed in measured pixels by this script:
-  // beside the dot when it fits, flipped when it does not, and always fully inside the image,
-  // so no label is clipped or wrapped one letter per line.
-  const layout = `window.__layoutPins=()=>{const W=${width},H=${height},GAP=${gap};for(const pin of document.querySelectorAll('.pin')){` +
-    `const dot=pin.querySelector('.dot'),em=pin.querySelector('em');` +
-    `const x=parseFloat(pin.dataset.x)*W,y=parseFloat(pin.dataset.y)*H,r=dot.offsetWidth/2||${radius};` +
-    `let w=em.offsetWidth,h=em.offsetHeight;if(w>W-8){em.style.width=(W-8)+'px';w=em.offsetWidth;h=em.offsetHeight;}` +
-    `let left=x+r+GAP;if(left+w>W-4)left=x-r-GAP-w;` +
-    `if(left<4)left=Math.min(Math.max(4,W-4-w),Math.max(4,x-w/2));` +
-    `const top=Math.min(Math.max(4,y-h/2),Math.max(4,H-4-h));` +
-    `em.style.left=Math.round(left-x)+'px';em.style.top=Math.round(top-y)+'px';` +
-    `const dx=Math.min(Math.max(x,r+2),W-r-2),dy=Math.min(Math.max(y,r+2),H-r-2);` +
-    `dot.style.left=Math.round(dx-x)+'px';dot.style.top=Math.round(dy-y)+'px';}};window.__layoutPins();`;
-  return `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden;background:#fff;font-family:Segoe UI,Helvetica,Arial,sans-serif}img{display:block;width:${width}px;height:${height}px}` +
-    `.pin{position:absolute;width:0;height:0;pointer-events:none}` +
-    `.dot{position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:calc(var(--r)*2);height:calc(var(--r)*2);border-radius:50%;background:var(--pin);border:${2.5 * scale}px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);color:#fff;font-size:calc(var(--font) + 2px);font-weight:700;display:flex;align-items:center;justify-content:center}` +
-    `.pin em{position:absolute;left:0;top:0;width:max-content;max-width:290px;font-style:normal;font-size:var(--font);font-weight:600;color:#fff;line-height:1.3;text-shadow:0 1px 4px rgba(0,0,0,.95),0 0 2px rgba(0,0,0,.95)}` +
-    `</style><img src="${imageDataURL}">${pins}<script>${layout}<\/script>`;
+  const clamp = (v, low, high) => Math.max(low, Math.min(v, Math.max(low, high)));
+  const pins = marks.map((mark) => ({
+    ...mark, dx: clamp(mark.x * width, radius + 2, width - radius - 2),
+    dy: clamp(mark.y * height, radius + 2, height - radius - 2),
+  }));
+  const placed = pins.map(({ dx, dy }) => ({ left: dx - radius, top: dy - radius, right: dx + radius, bottom: dy + radius }));
+  for (let i = 0; i < pins.length; i++) {
+    const mark = pins[i], { dx, dy } = mark;
+    ctx.font = `600 ${font}px Segoe UI, Helvetica, Arial, sans-serif`;
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    const maxWidth = Math.max(1, Math.min(290 * scale, width - 8));
+    const text = `#${i + 1} ${mark.label}`;
+    const lines = []; let line = "";
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    for (const word of text.split(/\s+/)) {
+      const next = line ? `${line} ${word}` : word;
+      if (ctx.measureText(next).width <= maxWidth) { line = next; continue; }
+      if (line) { lines.push(line); line = ""; }
+      for (const { segment } of segmenter.segment(word)) {
+        if (line && ctx.measureText(line + segment).width > maxWidth) { lines.push(line); line = ""; }
+        line += segment;
+      }
+    }
+    if (line) lines.push(line);
+    const lineHeight = font * 1.3;
+    const labelWidth = Math.min(maxWidth, Math.max(...lines.map((v) => ctx.measureText(v).width), 1));
+    const labelHeight = lineHeight * lines.length;
+    const right = dx + radius + gap, leftSide = dx - radius - gap - labelWidth;
+    let left, top;
+    if (right + labelWidth <= width - 4) { left = right; top = dy - labelHeight / 2; }
+    else if (leftSide >= 4) { left = leftSide; top = dy - labelHeight / 2; }
+    else { left = dx - labelWidth / 2; top = dy - radius - gap - labelHeight;
+      if (top < 4) top = dy + radius + gap; }
+    left = clamp(left, 4, width - 4 - labelWidth);
+    top = clamp(top, 4, height - 4 - labelHeight);
+    const clear = (l, t) => !placed.some((p) => l < p.right + 4 && l + labelWidth > p.left - 4 && t < p.bottom + 4 && t + labelHeight > p.top - 4);
+    if (!clear(left, top)) {
+      const other = left === right ? leftSide : right;
+      if (other >= 4 && other + labelWidth <= width - 4 && clear(other, top)) left = other;
+      else {
+        const initialTop = top;
+        for (let step = 1; step <= 24 && !clear(left, top); step++) {
+          for (const candidate of [initialTop + step * (labelHeight + 6), initialTop - step * (labelHeight + 6)]) {
+            if (candidate >= 4 && candidate + labelHeight <= height - 4 && clear(left, candidate)) { top = candidate; break; }
+          }
+        }
+      }
+    }
+    placed.push({ left, top, right: left + labelWidth, bottom: top + labelHeight });
+    ctx.save(); ctx.lineWidth = 3 * scale; ctx.lineJoin = "round"; ctx.strokeStyle = "rgba(0,0,0,.9)"; ctx.fillStyle = "#fff";
+    lines.forEach((value, n) => { const py = top + n * lineHeight; ctx.strokeText(value, left, py); ctx.fillText(value, left, py); }); ctx.restore();
+  }
+  pins.forEach(({ dx, dy, color }, i) => {
+    ctx.save(); ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = 8 * scale;
+    ctx.beginPath(); ctx.arc(dx, dy, radius, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    ctx.lineWidth = 2.5 * scale; ctx.strokeStyle = "#fff"; ctx.stroke(); ctx.restore();
+    ctx.font = `700 ${font + 2}px Segoe UI, Helvetica, Arial, sans-serif`;
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(i + 1), dx, dy);
+  });
+  return canvas.toDataURL("image/png");
 };
 // Actions that need an existing tab. Anything outside this set is a client error.
 const TAB_ACTIONS = new Set(["navigate", "select", "close", "view", "inspect", "screenshot", "markup-begin",
@@ -1000,43 +1046,62 @@ class BrowserService {
     // operation may still finish inside Chromium, but it can never publish one.
     const token = crypto.randomUUID();
     this.markCaptures.set(token, { tabId: tab.id, generation: captured.generation, image: captured.image, page: captured.page, createdAt: Date.now() });
-    for (const [key, capture] of this.markCaptures) if (Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) this.markCaptures.delete(key);
-    while (this.markCaptures.size > 8) this.markCaptures.delete(this.markCaptures.keys().next().value);
+    for (const [key, capture] of this.markCaptures) if (!capture.busy && Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) this.markCaptures.delete(key);
+    while (this.markCaptures.size > 8) {
+      const oldest = [...this.markCaptures].find(([, capture]) => !capture.busy);
+      if (!oldest) break;
+      this.markCaptures.delete(oldest[0]);
+    }
     return { token, image: captured.image.toDataURL(), width: captured.size.width, height: captured.size.height };
   }
-  takeCapture(token, id) {
+  takeCapture(token, id, consume = true) {
     const capture = typeof token === "string" ? this.markCaptures.get(token) : undefined;
     if (!capture) throw bad("That screenshot expired. Capture it again.", 409);
-    this.markCaptures.delete(token);
+    if (capture.busy) throw bad("That screenshot is already being attached.", 409);
+    if (Date.now() - capture.createdAt > MARK_TOKEN_TTL_MS) { this.markCaptures.delete(token); throw bad("That screenshot expired. Capture it again.", 409); }
     const { tab } = this.find(id);
     if (capture.tabId !== tab.id || capture.generation !== tab.generation)
       throw bad("The page changed since that screenshot. Capture it again.", 409);
     const size = capture.image.getSize();
     if (!size.width || !size.height) throw bad("The screenshot was empty. Capture it again.", 409);
+    if (consume) this.markCaptures.delete(token);
+    else capture.busy = true;
     return { tab, image: capture.image, size, page: capture.page || null };
+  }
+  releaseCapture(token, success) {
+    const capture = this.markCaptures.get(token);
+    if (!capture) return;
+    if (success) this.markCaptures.delete(token);
+    else capture.busy = false;
   }
   async composeMarkedImageFor(frozen, marks) {
     const clean = normalizeMarks(marks);
     if (!clean.length) return frozen;
     const { width, height } = frozen.getSize();
     if (width * height > 268435456) throw new Error("That page is too large to mark up. Zoom out or shrink the browser and try again.");
-    const markupWindow = new BrowserWindow({ show: false, width, height, useContentSize: true, frame: false, resizable: false,
+    const markupWindow = new BrowserWindow({ show: false, width: 1, height: 1, frame: false,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false } });
     try {
-      await markupWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(buildMarkupHTML(frozen.toDataURL(), clean, width, height)));
-      await markupWindow.webContents.executeJavaScript("Promise.all([...document.images].map((image) => image.complete ? image.decode().catch(() => {}) : new Promise((resolve) => { image.onload = resolve; image.onerror = resolve; })))");
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      const image = await markupWindow.webContents.capturePage({ x: 0, y: 0, width, height });
+      await markupWindow.loadURL("data:text/html;charset=utf-8,%3C!doctype%20html%3E");
+      const colors = clean.map((mark) => ({ ...mark, color: MARK_COLORS[mark.color] }));
+      let timer;
+      const result = await Promise.race([
+        markupWindow.webContents.executeJavaScript(`(${renderMarkup.toString()})(${JSON.stringify(frozen.toDataURL())},${JSON.stringify(colors)},${width},${height})`),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Could not draw the markup onto the screenshot.")), 20000); }),
+      ]).finally(() => clearTimeout(timer));
+      const image = nativeImage.createFromDataURL(result);
       const size = image.getSize();
       if (size.width !== width || size.height !== height) throw new Error("Could not draw the markup onto the screenshot.");
       return image;
     } finally { if (!markupWindow.isDestroyed()) markupWindow.destroy(); }
   }
+
   async captureMarked(id, marks, captureToken = "", agent = false) {
     if (captureToken) {
       if (agent) this.assertAgentAllowed(this.find(id).tab);
-      const { image } = this.takeCapture(captureToken, id);
-      return this.composeMarkedImageFor(image, marks);
+      const { image } = this.takeCapture(captureToken, id, false);
+      try { const result = await this.composeMarkedImageFor(image, marks); this.releaseCapture(captureToken, true); return result; }
+      catch (error) { this.releaseCapture(captureToken, false); throw error; }
     }
     // Agent/legacy callers pass no token: freeze, mark, and return in one go.
     const begun = await this.beginCapture(id, agent);
@@ -1201,7 +1266,7 @@ class BrowserService {
   }
   async captureContext(id, marks, captureToken = "") {
     let frozen;
-    if (captureToken) frozen = this.takeCapture(captureToken, id);
+    if (captureToken) frozen = this.takeCapture(captureToken, id, false);
     else {
       const begun = await this.beginCapture(id);
       try { frozen = this.takeCapture(begun.token, id); }
@@ -1209,8 +1274,11 @@ class BrowserService {
     }
     // Every attachment uses the text frozen with its pixels. Never re-read a
     // live page here: a later navigation could make it describe another page.
-    if (!frozen.page) throw bad("That screenshot has no page context. Capture it again.", 409);
-    return { image: marks === undefined ? frozen.image : await this.composeMarkedImageFor(frozen.image, marks), page: frozen.page };
+    try {
+      if (!frozen.page) throw bad("That screenshot has no page context. Capture it again.", 409);
+      const image = marks === undefined ? frozen.image : await this.composeMarkedImageFor(frozen.image, marks);
+      return { image, page: frozen.page };
+    } catch (error) { if (captureToken) this.releaseCapture(captureToken, false); throw error; }
   }
   // --- Agent driving: real Chromium input with a cursor the user can watch.
   // Every action glides the injected cursor to its target while real
@@ -1617,4 +1685,4 @@ class BrowserService {
     for (const popup of this.popups) if (!popup.isDestroyed()) popup.destroy();
   }
 }
-module.exports = { BrowserService, browserURL, localURL, localFingerprint, hasTrustedLocal, chatScope, friendlyLoadError, normalizeView, sameView, normalizeMarks, buildMarkupHTML, DEVICE_PROFILES };
+module.exports = { BrowserService, browserURL, localURL, localFingerprint, hasTrustedLocal, chatScope, friendlyLoadError, normalizeView, sameView, normalizeMarks, renderMarkup, DEVICE_PROFILES };
