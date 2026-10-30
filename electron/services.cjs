@@ -1305,6 +1305,7 @@ class Sessions {
         s.contextWindow = Number.isFinite(event.contextWindow) && event.contextWindow > 0 ? event.contextWindow : null;
       event = { ...event, contextTokens: s.contextTokens, contextWindow: s.contextWindow ?? null };
     }
+    if (event.type === "phase" && event.phase !== "compacting") queueMicrotask(() => s.messageQueue?.retryDeferredSteering());
     this.recovery?.event(s, event);
     this.emit({ id: s.id, ...event });
   }
@@ -1476,7 +1477,7 @@ class Sessions {
     s.piPromptId = undefined;
     s.piCommandFailed = false;
     this.event(s, { type: "start", turn: s.turn });
-    this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], delivery: "send", deliveryState: "sending" });
+    this.event(s, { type: "user-message", messageId: queuedMessage?.id || uuid(), text: prompt, attachments: queuedMessage?.attachments || [], sender: queuedMessage?.sender, delivery: "send", deliveryState: "sending" });
     try {
       if (s.agent === "shell") await this.shellTurn(s, prompt);
       else {
@@ -1563,7 +1564,8 @@ class Sessions {
   submit(id, message, delivery) { const queue = this.get(id).messageQueue; return delivery ? queue.submitControlled(message, delivery) : queue.submit(message); }
   queueAction(id, messageId, action) { return this.get(id).messageQueue.action(messageId, action); }
   async steer(s, message) {
-    if (!s.busy || s.mode !== "rich" || s.stopping || s.transitioning || s.setting || s.phase === "compacting") throw new Error("This turn cannot accept steering right now.");
+    if (s.phase === "compacting" || s.piCompacting) throw Object.assign(new Error("Waiting for compaction to finish."), { steerCompacting: true });
+    if (!s.busy || s.mode !== "rich" || s.stopping || s.stopRequested || s.transitioning || s.setting) throw new Error("This turn cannot accept steering right now.");
     if (s.agent === "google") throw new Error("Google accepts follow-ups through the queue after this turn finishes.");
     if (message.text.trimStart().startsWith("/") || (s.agent === "codex" && message.text.trimStart().startsWith("$"))) throw new Error("Steer with a normal message. Run CLI commands after this turn finishes.");
     if (s.agent === "pi") { const images = (await this.attachments.resolve(s.controlId, message.attachments || [])).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType })); await this.piRpc(s, "steer", { message: message.text, clientId: message.id, images }); }

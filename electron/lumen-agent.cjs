@@ -148,6 +148,9 @@ async function main() {
     if (!["connection", "text-file", "timeout", "interval", "response"].includes(key)) body[field] = value;
   }
   if (options["text-file"]) { if (options.text !== undefined) throw new Error("Choose --text or --text-file."); body.text = await fs.readFile(options["text-file"], "utf8"); }
+  if (["create", "send"].includes(command) || (command === "steer" && body.text !== undefined)) {
+    if (process.env.LUMEN_TASK_ID) body.senderId = process.env.LUMEN_TASK_ID;
+  }
   const route = `/v1/tasks/${id}`;
   let result;
   if (command === "list") result = await request("GET", "/v1/tasks");

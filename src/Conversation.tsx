@@ -294,7 +294,7 @@ export default function Conversation({
   const dragDepth = useRef(0);
   const sending = sendingMessage(tab);
   const messages = useMemo<Message[]>(() => sending && !tab.messages.some((message) => message.id === sending.id)
-    ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, delivery: "send", deliveryState: "sending" }]
+    ? [...tab.messages, { id: sending.id, role: "user", text: sending.text, attachments: sending.attachments, sender: sending.sender, delivery: "send", deliveryState: "sending" }]
     : tab.messages, [tab.messages, sending]);
   // The first message on screen once the reader scrolls up or pages back, so
   // new messages do not push the top away; null follows the newest ones.
@@ -871,7 +871,7 @@ function MessageView({
     return (
       <div className="user-message">
         {!!m.attachments?.length && <div className="message-images">{m.attachments.map((image) => <img key={image.id} src={image.preview} alt={image.name} />)}</div>}
-        <div>{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Added during run · separate answer not guaranteed</span>}<LinkText text={m.text} onWeb={onWeb} onError={onError} /></div>
+        <div>{m.sender && <span className="steered-label">{m.sender}</span>}{m.deliveryState === "sending" && <span className="steered-label">Sending…</span>}{m.deliveryState === "uncertain" && <span className="steered-label">Delivery uncertain · inspect history before resending</span>}{m.delivery === "steer" && <span className="steered-label">Added during run · separate answer not guaranteed</span>}<LinkText text={m.text} onWeb={onWeb} onError={onError} /></div>
         <CopyButton text={m.text} />
       </div>
     );

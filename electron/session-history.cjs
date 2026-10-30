@@ -184,13 +184,24 @@ async function readHistory(session) {
 function preserveAttachments(messages, saved = []) {
   const previous = saved.filter((message) => message.role === "user");
   const used = new Set();
+  const senderByText = new Map();
+  const nativeCount = new Map();
+  for (const item of messages) if (item.role === "user") nativeCount.set(item.text, (nativeCount.get(item.text) || 0) + 1);
+  const savedCount = new Map();
+  for (const item of previous) {
+    savedCount.set(item.text, (savedCount.get(item.text) || 0) + 1);
+    const sender = item.sender || "";
+    if (!senderByText.has(item.text)) senderByText.set(item.text, sender);
+    else if (senderByText.get(item.text) !== sender) senderByText.set(item.text, null);
+  }
   return messages.map((message) => {
     if (message.role !== "user") return message;
     let index = previous.findIndex((item, i) => !used.has(i) && (item.id === message.id || item.id === message.providerMessageId));
+    const matchedById = index >= 0;
     if (index < 0) index = previous.findIndex((item, i) => !used.has(i) && item.text === message.text);
     if (index < 0) return { ...message, deliveryState: "confirmed" };
     used.add(index);
-    return { ...message, attachments: previous[index].attachments || message.attachments, delivery: previous[index].delivery, deliveryState: "confirmed" };
+    return { ...message, attachments: previous[index].attachments || message.attachments, delivery: previous[index].delivery, sender: matchedById ? previous[index].sender : (savedCount.get(message.text) === 1 && nativeCount.get(message.text) === 1 ? senderByText.get(message.text) || undefined : undefined), deliveryState: "confirmed" };
   });
 }
 module.exports = { sessionFile, readHistory, preserveAttachments, isNarrationThinking, formatToolDetail };

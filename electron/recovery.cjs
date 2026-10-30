@@ -152,7 +152,7 @@ class RecoveryStore {
     if (event.type === "queue") { tab.queuedMessages = event.queuedMessages; tab.queuePaused = event.queuePaused; }
     if (event.type === "user-message-retracted") tab.messages = tab.messages.filter((message) => message.id !== event.messageId);
     if (event.type === "user-message" && !tab.messages.some((message) => message.id === event.messageId))
-      tab.messages.push({ id: event.messageId, role: "user", text: event.text || "", attachments: event.attachments || [], delivery: event.delivery, deliveryState: event.deliveryState || "confirmed", turn: tab.turn });
+      tab.messages.push({ id: event.messageId, role: "user", text: event.text || "", attachments: event.attachments || [], sender: event.sender, delivery: event.delivery, deliveryState: event.deliveryState || "confirmed", turn: tab.turn });
     if (["text", "tool", "error", "diagnostic"].includes(event.type)) {
       const id = `${tab.turn || "init"}-${event.key || event.type}`;
       let message = tab.messages.find((value) => value.id === id);

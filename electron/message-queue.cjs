@@ -3,7 +3,7 @@ function validate(message) {
   if (!message || !uuid.test(message.id) || typeof message.text !== "string" || (!message.text.trim() && !message.attachments?.length) || message.text.length > 200000)
     throw new Error("Enter a message under 200,000 characters.");
   if (!Array.isArray(message.attachments || []) || (message.attachments || []).length > 8 || (message.attachments || []).some((attachment) => !uuid.test(attachment?.id))) throw new Error("Invalid image attachments.");
-  return { id: message.id, text: message.text, attachments: message.attachments || [], createdAt: message.createdAt || Date.now(), deliveryUncertain: !!message.deliveryUncertain || ["sending", "steering"].includes(message.state), state: "queued", ...(typeof message.steerTurnId === "string" && message.steerTurnId.length <= 300 ? { steerTurnId: message.steerTurnId } : {}) };
+  return { id: message.id, text: message.text, attachments: message.attachments || [], ...(typeof message.sender === "string" && message.sender.length <= 300 ? { sender: message.sender } : {}), createdAt: message.createdAt || Date.now(), deliveryUncertain: !!message.deliveryUncertain || ["sending", "steering"].includes(message.state), state: "queued", ...(typeof message.steerTurnId === "string" && message.steerTurnId.length <= 300 ? { steerTurnId: message.steerTurnId } : {}) };
 }
 class MessageQueue {
   constructor(owner, session, saved = []) {
@@ -36,7 +36,7 @@ class MessageQueue {
     let result;
     try { result = await this.submitControlledOnce(message, delivery); }
     catch (error) { if (!prior) this.controlledResults.delete(message.id); throw error; }
-    if (!this.controlledResults.get(message.id)?.deliveryUncertain) this.controlledResults.set(message.id, { steered: result.steered, reason: result.reason, deliveryUncertain: result.deliveryUncertain });
+    if (!this.controlledResults.get(message.id)?.deliveryUncertain) this.controlledResults.set(message.id, { steered: result.steered, reason: result.reason, deliveryUncertain: result.deliveryUncertain, steerPending: result.steerPending });
     if (this.controlledResults.size > 1000) this.controlledResults.delete(this.controlledResults.keys().next().value);
     return result;
   }
@@ -46,6 +46,7 @@ class MessageQueue {
     if (!entry) return { ...this.state(), steered: this.steered.has(message.id) || this.controlledResults.get(message.id)?.steered === true, reason: "Message was already accepted." };
     if (entry.deliveryUncertain) return { ...this.state(), steered: false, deliveryUncertain: true, reason: "Delivery is uncertain. Inspect the chat before resuming the queue." };
     const separateTurn = this.s.agent === "google" || entry.text.trimStart().startsWith("/") || (this.s.agent === "codex" && entry.text.trimStart().startsWith("$"));
+    if (this.items.some((item) => item.deliveryUncertain)) return { ...this.state(), steered: false, reason: "The queue has uncertain delivery. Inspect the chat before taking action." };
     if (delivery === "queue" || separateTurn) return { ...this.state(), steered: false, reason: this.paused ? "The queue is paused." : separateTurn && delivery === "steer" ? "This agent or command cannot be steered; the message is queued for the next turn." : "This message will run as a separate turn." };
     // A prior submit or steer can still be handing off to the native runtime.
     // Wait briefly for that handoff so the decision uses main-process state.
@@ -54,7 +55,7 @@ class MessageQueue {
     entry = this.items.find((item) => item.id === message.id);
     if (!entry) return { ...this.state(), steered: this.steered.has(message.id) || this.controlledResults.get(message.id)?.steered === true, reason: "Message was accepted for delivery." };
     if (entry.deliveryUncertain) return { ...this.state(), steered: false, deliveryUncertain: true, reason: "Delivery is uncertain. Inspect the chat before resuming the queue." };
-    if (!this.s.busy || this.pending || this.s.stopping || this.s.transitioning)
+    if (!this.s.busy || this.pending || this.s.stopping || this.s.stopRequested || this.s.transitioning)
       return { ...this.state(), steered: false, reason: this.paused ? "The queue is paused." : "Message accepted; it will run when the queue is ready." };
     try {
       const result = await this.action(entry.id, "steer");
@@ -77,13 +78,27 @@ class MessageQueue {
     if (entry.deliveryUncertain) { this.paused = true; this.emit(); return; }
     this.pending = true;
     delete entry.steerTurnId;
+    delete entry.steerAfterCompaction;
     entry.state = "sending"; this.emit();
-    try { await this.owner.send(s.id, entry.text, entry); this.items = this.items.filter((m) => m.id !== entry.id); }
+    try { await this.owner.send(s.id, entry.text, entry); this.items = this.items.filter((m) => m.id !== entry.id); if (this.controlledResults.has(entry.id)) this.controlledResults.set(entry.id, { steered: false, steerPending: false, reason: "Message sent as a separate turn." }); }
     catch (error) { entry.state = "queued"; entry.deliveryUncertain = true; this.paused = true; this.owner.event(s, { type: "diagnostic", text: "Message delivery was not confirmed. Inspect history before retrying: " + error.message }); }
     finally { this.pending = false; this.emit(); if (!this.closed) void this.drain(); }
   }
+  deferSteer(entry) {
+    entry.steerAfterCompaction = true;
+    this.emit();
+    return { ...this.state(), steered: false, steerPending: true, reason: "Waiting for compaction to finish, then steering the active turn." };
+  }
+  retryDeferredSteering() {
+    const s = this.s;
+    if (this.closed || this.pending || (this.items.some((item) => item.deliveryUncertain)) || !s.busy || s.stopping || s.stopRequested || s.transitioning || s.setting || s.phase === "compacting" || s.piCompacting) return;
+    const entry = this.items.find((item) => item.steerAfterCompaction === true && !item.deliveryUncertain);
+    if (!entry) return;
+    delete entry.steerAfterCompaction;
+    void this.action(entry.id, "steer").catch((error) => this.owner.event(s, { type: "diagnostic", text: "Could not steer the waiting message. Check its queue: " + error.message }));
+  }
   async action(id, action) {
-    if (this.closed || this.pending || this.s.stopping || this.s.transitioning) throw new Error("Wait for the current message action to finish.");
+    if (this.closed || this.pending || this.s.stopping || this.s.stopRequested || this.s.transitioning) throw new Error("Wait for the current message action to finish.");
     if (action === "resume") {
       if (this.s.mode !== "rich") throw new Error("Return to readable view to send queued messages.");
       // Resume is the explicit retry: the user has seen the delivery warning and
@@ -95,11 +110,13 @@ class MessageQueue {
     }
     const entry = this.items.find((m) => m.id === id);
     if (!entry) throw new Error("This message has already left the queue.");
-    if (action === "remove") { if (entry.deliveryUncertain) this.owner.event(this.s, { type: "message-delivery-state", messageId: entry.id, deliveryState: "uncertain" }); this.items = this.items.filter((m) => m !== entry); this.emit(); return this.state(); }
+    if (action === "remove") { if (this.controlledResults.has(entry.id)) this.controlledResults.set(entry.id, { steered: false, steerPending: false, reason: "Message removed before delivery." }); if (entry.deliveryUncertain) this.owner.event(this.s, { type: "message-delivery-state", messageId: entry.id, deliveryState: "uncertain" }); this.items = this.items.filter((m) => m !== entry); this.emit(); return this.state(); }
     if (action !== "steer") throw new Error("Unknown queue action.");
     if (entry.deliveryUncertain) throw new Error("Delivery is uncertain. Inspect the chat before resuming the queue.");
     if (!this.s.busy) { this.items = [entry, ...this.items.filter((m) => m !== entry)]; this.paused = false; this.emit(); void this.drain(); return this.state(); }
     if (this.s.agent === "google") throw new Error("Gemini does not support steering. This message stays queued for after the current turn.");
+    if (this.s.phase === "compacting" || this.s.piCompacting) return this.deferSteer(entry);
+    delete entry.steerAfterCompaction;
     this.pending = true; entry.state = "steering"; this.emit();
     const generation = ++this.steeringGeneration;
     try {
@@ -109,20 +126,22 @@ class MessageQueue {
       else this.owner.event(this.s, { type: "message-delivered", messageId: entry.id });
       this.items = this.items.filter((m) => m !== entry);
       if (this.controlledResults.has(entry.id)) this.controlledResults.set(entry.id, { steered: true });
-      this.owner.event(this.s, { type: "user-message", messageId: entry.id, text: entry.text, attachments: entry.attachments, delivery: "steer", deliveryState: this.s.agent === "codex" ? "sending" : undefined });
+      this.owner.event(this.s, { type: "user-message", messageId: entry.id, text: entry.text, attachments: entry.attachments, sender: entry.sender, delivery: "steer", deliveryState: this.s.agent === "codex" ? "sending" : undefined });
     } catch (error) {
       if (generation !== this.steeringGeneration) return this.state();
       entry.state = "queued";
+      if (error.steerCompacting === true) return this.deferSteer(entry);
       entry.deliveryUncertain = error.deliveryUncertain === true;
-      if (entry.deliveryUncertain) this.paused = true;
+      if (entry.deliveryUncertain) this.pause();
       if (entry.deliveryUncertain) throw new Error("Steering was not confirmed; inspect history before resending this queued message. " + error.message);
       // A native turn-boundary rejection is not a delivery failure. Keep the
       // message in the normal queue so it sends as soon as this turn finishes.
+      if (this.controlledResults.has(entry.id)) this.controlledResults.set(entry.id, { steered: false, steerPending: false, reason: error.message });
       this.owner.event(this.s, { type: "diagnostic", text: "The active turn did not accept steering; the message stays queued for the next turn. " + error.message });
       return { ...this.state(), steered: false, reason: error.message };
     }
     finally {
-      if (generation === this.steeringGeneration) { this.pending = false; this.emit(); if (!this.closed) void this.drain(); }
+      if (generation === this.steeringGeneration) { this.pending = false; this.emit(); if (!this.closed) { void this.drain(); queueMicrotask(() => this.retryDeferredSteering()); } }
     }
     return { ...this.state(), steered: true };
   }
@@ -138,6 +157,7 @@ class MessageQueue {
       if (this.controlledResults.has(id)) this.controlledResults.set(id, { steered: true });
       this.emit();
       this.owner.event(this.s, { type: "message-delivered", messageId: id });
+      queueMicrotask(() => this.retryDeferredSteering());
       return;
     }
     const accepted = this.steered.get(id);
@@ -147,6 +167,7 @@ class MessageQueue {
     }
   }
   finish(code) {
+    for (const entry of this.items) { if (entry.steerAfterCompaction && this.controlledResults.has(entry.id)) this.controlledResults.set(entry.id, { steered: false, steerPending: false, reason: "The turn ended; this message is queued for the next turn." }); delete entry.steerAfterCompaction; }
     const unconsumed = [...this.steered.values()];
     this.steered.clear();
     for (const entry of unconsumed) {
@@ -177,7 +198,7 @@ class MessageQueue {
     this.paused = !!this.items.length;
     this.emit();
   }
-  pause() { this.paused = true; clearTimeout(this.timer); this.emit(); }
+  pause() { this.paused = true; for (const entry of this.items) { if (entry.steerAfterCompaction && this.controlledResults.has(entry.id)) this.controlledResults.set(entry.id, { steered: false, steerPending: false, reason: "The queue is paused. Inspect the chat before taking action." }); delete entry.steerAfterCompaction; } clearTimeout(this.timer); this.emit(); }
   close() { this.closed = true; clearTimeout(this.timer); }
 }
 module.exports = { MessageQueue };

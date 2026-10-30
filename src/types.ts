@@ -93,11 +93,12 @@ export interface Message {
   state?: string;
   turn?: string;
   time?: number;
+  sender?: string;
   delivery?: "steer" | "send";
   deliveryState?: "sending" | "confirmed" | "uncertain";
   attachments?: ImageAttachment[];
 }
-export interface QueuedMessage { id: string; text: string; attachments?: ImageAttachment[]; deliveryUncertain?: boolean; dispatchReady?: boolean; state: "queued" | "sending" | "steering" }
+export interface QueuedMessage { id: string; text: string; sender?: string; steerAfterCompaction?: boolean; attachments?: ImageAttachment[]; deliveryUncertain?: boolean; dispatchReady?: boolean; state: "queued" | "sending" | "steering" }
 export interface CheckoutInfo { path: string; name: string; branch: string; linked: boolean }
 export interface Tab {
   id: string;
@@ -245,6 +246,7 @@ export interface SessionEvent {
   queuePaused?: boolean;
   messageId?: string;
   deliveryState?: "sending" | "confirmed" | "uncertain";
+  sender?: string;
   delivery?: "steer" | "send";
   attachments?: ImageAttachment[];
   terminalId?: string;

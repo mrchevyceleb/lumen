@@ -1109,7 +1109,7 @@ export default function App() {
             else if (e.type === "session-controls") { t.autoCompactTokens = e.autoCompactTokens; t.mcpOverrides = e.mcpOverrides; }
             else if (e.type === "context") { t.contextTokens = e.contextTokens; t.contextWindow = e.contextWindow; t.contextStale = false; }
             else if (e.type === "queue") { t.queuedMessages = e.queuedMessages; t.queuePaused = e.queuePaused; }
-            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, turn: t.turn, role: "user", text: e.text || "", attachments: e.attachments, delivery: e.delivery, deliveryState: e.deliveryState });
+            else if (e.type === "user-message" && e.messageId && !t.messages.some((m) => m.id === e.messageId)) t.messages.push({ id: e.messageId, turn: t.turn, role: "user", text: e.text || "", attachments: e.attachments, sender: e.sender, delivery: e.delivery, deliveryState: e.deliveryState });
             else if (["message-delivered", "message-delivery-state"].includes(e.type)) t.messages = t.messages.map((message) => message.id === e.messageId ? { ...message, deliveryState: e.type === "message-delivered" ? "confirmed" : e.deliveryState } : message);
             else if (e.type === "user-message-retracted") t.messages = t.messages.filter((m) => m.id !== e.messageId);
             else if (e.type === "cwd") { t.cwd = e.cwd; t.cwdVersion = (t.cwdVersion || 0) + 1; }
@@ -1274,7 +1274,7 @@ export default function App() {
     const message = attachment ? `${text}\n\nFile reference: ${attachment}` : text;
     const images = active.draftAttachments || [];
     try {
-      const entry = { id: crypto.randomUUID(), text: message, attachments: images };
+      const entry = { id: crypto.randomUUID(), text: message, attachments: images, sender: "You" };
       if (active.agent === "shell") await api("session:send", active.id, message, entry);
       else await api("session:submit", active.id, entry);
       const current = tabsRef.current.find((tab) => tab.id === active.id);
@@ -1286,7 +1286,7 @@ export default function App() {
   const continueSession = async () => {
     if (!active) return;
     const text = "Continue from where you left off. First inspect the current state and completed actions; do not repeat completed work.";
-    try { await api("session:send", active.id, text, { id: crypto.randomUUID(), text }); }
+    try { await api("session:send", active.id, text, { id: crypto.randomUUID(), text, sender: "You" }); }
     catch (error: any) { notify(error.message); }
   };
   const closeTab = (tab: Tab) => {
@@ -1315,15 +1315,15 @@ export default function App() {
   const find = (id: string) => tabsRef.current.find((t) => (t.controlId || t.id) === id);
   const view = (tab: Tab, full = true) => taskView(tab, uiRequestsRef.current, full);
   const audit = (tab: Tab, text: string) => setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: crypto.randomUUID(), role: "notice", title: "Agent control", text }] } : t));
-  const submit = async (tab: Tab, messageId: string, text: string) => {
+  const submit = async (tab: Tab, messageId: string, text: string, sender?: string) => {
     if (tab.messages.some((m) => m.id === messageId) || tab.queuedMessages?.some((m) => m.id === messageId)) return true;
     if (tab.mode !== "rich") throw new Error("Return this task to readable view before submitting its prompt.");
     if (tab.agent === "shell") {
       if (tab.busy) throw new Error("Wait for this shell command to finish.");
-      setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: messageId, role: "user", text }] } : t));
-      try { await api("session:send", tab.id, text, { id: messageId, text }); }
+      setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: [...t.messages, { id: messageId, role: "user", text, sender }] } : t));
+      try { await api("session:send", tab.id, text, { id: messageId, text, sender }); }
       catch (e) { setTabs((old) => old.map((t) => t.id === tab.id ? { ...t, messages: t.messages.filter((m) => m.id !== messageId) } : t)); throw e; }
-    } else await api("session:submit", tab.id, { id: messageId, text });
+    } else await api("session:submit", tab.id, { id: messageId, text, sender });
     return false;
   };
   const resolveWorktreeWorkspace = async (target: string) => {
@@ -1357,6 +1357,10 @@ export default function App() {
   };
   const controlledTaskCreates = useRef(new Map<string, { signature: string; promise: Promise<any> }>());
   const controlledMessageTurns = useRef(new Map<string, Promise<void>>());
+  const agentSender = (senderId?: string) => {
+    const sender = senderId ? find(senderId) : undefined;
+    return sender ? `Agent · ${sender.name}` : "Agent";
+  };
   const createControlledTask = (body: Record<string, any>, human = false) => {
     const id = typeof body.id === "string" ? body.id.trim() : "";
     if (!id) return Promise.reject(new Error("A task ID is required."));
@@ -1430,7 +1434,7 @@ export default function App() {
       let deliveryError = "";
       if (body.text) {
         try {
-          await submit(created, id, body.text);
+          await submit(created, id, body.text, human ? "You" : agentSender(body.senderId));
         } catch (e: any) { deliveryError = e.message; audit(created, `Initial prompt was not submitted: ${e.message}. Retry create with task ID ${id}.`); }
       }
       await settleControl(); await persist();
@@ -1481,8 +1485,8 @@ export default function App() {
         if (!current) throw Object.assign(new Error("This task is no longer open."), { status: 404 });
         const recorded = current.messages.find((message) => message.id === body.id);
         if (recorded && !current.queuedMessages?.some((message) => message.id === body.id)) return { ...view(current), messageId: body.id, reused: true, steered: recorded.delivery === "steer" };
-        if (current.agent === "shell") await submit(current, body.id, body.text);
-        else outcome = await api("session:submit", current.id, { id: body.id, text: body.text }, body.delivery || "auto");
+        if (current.agent === "shell") await submit(current, body.id, body.text, agentSender(body.senderId));
+        else outcome = await api("session:submit", current.id, { id: body.id, text: body.text, sender: agentSender(body.senderId) }, body.delivery || "auto");
         await settleControl();
         } finally {
           release();
